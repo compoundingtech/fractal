@@ -15,6 +15,7 @@ pub use fractal_evidence::*;
 pub mod changes;
 pub mod github;
 pub mod idle_holds;
+pub mod measurement;
 pub mod watches;
 
 pub use changes::index::GitChangesStore;

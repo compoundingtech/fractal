@@ -4,7 +4,7 @@
 # change what deletes. It deletes with this host's own git login: the evidence-tags ruleset refuses moving a tag, not deleting
 # one. Every open pull request's head, read from the GitHub API without a login, keeps its records however old it is; if that list
 # cannot be read, nothing runs. Each run's summary is kept under the state directory and stored as a new
-# version of one st document, so the graph holds the log. When this host runs the evidence log (evidence-log-timer installed and
+# version of one Fractal document, so the graph holds the log. When this host runs the evidence log (evidence-log-timer installed and
 # ~/.config/evidence-log/signer.json present), GC's lines go into it before anything is deleted, and the new head is published:
 # a pull then neither reports what GC deleted as missing nor restores it, and if that step fails nothing is deleted.
 #
@@ -61,7 +61,7 @@ python3 -I "$tools/evidence-gc" --repo "$repo" --remote origin --main origin/mai
   "${resume_args[@]}" --plan-out "$state/runs/$stamp.plan.json" > "$state/runs/$stamp.json" 2> "$state/runs/$stamp.log" || status=$?
 cat "$state/runs/$stamp.log" >&2
 if [ -s "$state/runs/$stamp.json" ]; then
-  st documents put "$state/runs/$stamp.json" --as "$document" >&2 || echo "evidence-gc-timer: could not store the summary in $document" >&2
+  fractal documents put "$state/runs/$stamp.json" --as "$document" >&2 || echo "evidence-gc-timer: could not store the summary in $document" >&2
 fi
 find "$state/runs" -type f -mtime +30 -delete
 exit "$status"

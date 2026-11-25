@@ -16,7 +16,6 @@ axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
 futures-util = "0.3"
 hex = "0.4"
-notify = "8"
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
 pty-core = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -28,7 +27,7 @@ smallclaims = { path = "../smallclaims" }
 fractal-client = { path = "../fractal-client", features = ["trace-propagation"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.27"
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tower = { version = "0.5", features = ["util"] }
 urlencoding = "2"

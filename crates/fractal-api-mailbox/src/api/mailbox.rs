@@ -30,6 +30,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/mailbox/bind", post(bind))
         .route("/v1/mailbox/attachment", get(attachment))
         .route("/v1/mailbox/receipts", post(receipt))
+        .route("/v1/mailbox/acceptance-frontier", post(acceptance_frontier))
         .route("/v1/harness-questions/native", post(questions::ingest))
 }
 
@@ -39,6 +40,61 @@ pub struct ReceiptRequest {
     receipt: Receipt,
     #[serde(default)]
     native_receipt: Option<crate::conversation_delivery::NativeReceipt>,
+    #[serde(default)]
+    input_acceptance: Option<InputAcceptance>,
+}
+
+#[derive(serde::Deserialize)]
+struct InputAcceptance {
+    accepted_at_unix_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AcceptanceFrontierRequest {
+    #[serde(flatten)]
+    fence: Fence,
+    observed_through_unix_ms: u64,
+}
+
+/// A native producer's sealed, drained source cut. It is not a per-message lifecycle event.
+pub async fn acceptance_frontier(
+    State(state): State<AppState>,
+    peer: Option<Extension<NativeDeliveryPeer>>,
+    Json(mut request): Json<AcceptanceFrontierRequest>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    request.fence = storage_fence(&state, request.fence)?;
+    authorize(&request.fence, peer.as_ref().map(|peer| &peer.0))?;
+    if request.fence.component != "delivery" {
+        return Err(ApiError::bad(FractalError::new("invalid-input-acceptance-frontier",
+            "only the delivery component publishes acceptance frontiers")));
+    }
+    let peer = peer.expect("authorize checked the native peer").0;
+    let admission = fractal_drivers::harness_state::record_lock_admission(
+        &authority::source_agent_dir(&state, &request.fence),
+    ).await.map_err(ApiError::internal)?;
+    let checked_state = state.clone();
+    let ((record, changed), _) = authority_action(move || {
+        let _admission = admission;
+        authority::with_claude_primary(&checked_state, &request.fence, &peer, None, || {
+            if checked_state.store.has_mailbox_lease(&request.fence)? {
+                authority::with_authority(&checked_state, &request.fence, &peer, || {}, |owner, validate| {
+                    validate()?;
+                    if !checked_state.store.owns_mailbox_lease(&request.fence, owner)? {
+                        return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    }
+                    checked_state.store.record_mail_acceptance_frontier(
+                        &request.fence, request.observed_through_unix_ms,
+                    )
+                })
+            } else {
+                checked_state.store.record_mail_acceptance_frontier(
+                    &request.fence, request.observed_through_unix_ms,
+                )
+            }
+        })
+    }).await?;
+    if changed { signal_local_change(&state); }
+    Ok(Json(record))
 }
 
 /// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
@@ -299,11 +355,11 @@ pub async fn receipt(
     request.fence = storage_fence(&state, request.fence)?;
     authorize(&request.fence, peer.as_ref().map(|p| &p.0))?;
     if request.fence.component != "delivery"
-        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read")
+        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read" | "accepted")
     {
         return Err(ApiError::bad(FractalError::new(
             "invalid-mailbox-receipt",
-            "only the delivery component can publish staged, delivered or read",
+            "only the delivery component can publish staged, delivered, read or accepted",
         )));
     }
     if payload.native_receipt.as_ref().is_some_and(|proof| !proof.valid())
@@ -312,6 +368,10 @@ pub async fn receipt(
     {
         return Err(ApiError::bad(FractalError::new("invalid-native-receipt",
             "a native record identity requires a Claude consumption receipt")));
+    }
+    if (request.lifecycle == "accepted") != payload.input_acceptance.is_some() {
+        return Err(ApiError::bad(FractalError::new("invalid-input-acceptance",
+            "accepted requires an input acceptance timestamp; other lifecycle receipts cannot carry one")));
     }
     let input = ClaimInput {
         subject: request.message.clone(),
@@ -366,6 +426,15 @@ pub async fn receipt(
         };
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
+                if let Some(acceptance) = &payload.input_acceptance {
+                    validate()?;
+                    if !store.owns_mailbox_lease(&request.fence, owner)? {
+                        return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                    }
+                    return store.record_mail_input_acceptance(
+                        &input.subject, &request.fence, acceptance.accepted_at_unix_ms,
+                    );
+                }
                 validate()?;
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(FractalError::new("stale-mailbox-session", "another process owns this mailbox lease"));
@@ -376,6 +445,10 @@ pub async fn receipt(
                 store.append_native_mailbox_receipt_outcome(&input, &request.fence,
                     payload.native_receipt.as_ref())
             })?
+        } else if let Some(acceptance) = &payload.input_acceptance {
+            store.record_mail_input_acceptance(
+                &input.subject, &request.fence, acceptance.accepted_at_unix_ms,
+            )?
         } else if stream.is_some() {
             record_stream()?
         } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
@@ -406,6 +479,7 @@ fn record_stream_receipt(
     input: &ClaimInput,
     native: Option<&crate::conversation_delivery::NativeReceipt>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
+    check_suspension_receipt(store, fence, &input.kind)?;
     if input.kind == "message.staged" && !store.rollout_message_allowed(message)? {
         return Err(FractalError::new("seat-rollout-draining", "new independent delivery waits for the seat rollout"));
     }
@@ -424,6 +498,34 @@ fn record_stream_receipt(
     ), appended))
 }
 
+fn check_suspension_receipt(store: &Store, fence: &Fence, kind: &str) -> Result<(), FractalError> {
+    if matches!(kind, "message.staged" | "message.delivered")
+        && crate::suspension::current(store, &fence.subject)
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
+            .is_some_and(|hold| hold.holds_seat())
+    {
+        return Err(FractalError::new(
+            "seat-suspended",
+            "delivery waits for the seat's native resume and channel readiness",
+        ));
+    }
+    Ok(())
+}
+
+/// Keep suspension separate from silent release: resume is not itself a waking message.
+/// The raw snapshot retains all identities so a runtime phase change can offer them without
+/// losing the pending-wake projection to a premature staged receipt.
+fn release_mailbox_offer(store: &Store, fence: &Fence, messages: &mut Vec<MessageView>) -> anyhow::Result<()> {
+    if crate::suspension::current(store, &fence.subject)?
+        .is_some_and(|hold| hold.holds_seat())
+    {
+        messages.clear();
+    } else {
+        crate::silent::release(messages);
+    }
+    Ok(())
+}
+
 type Snapshot = (
     Option<crate::model::DesiredSubject>,
     Vec<crate::model::MessageView>,
@@ -436,6 +538,10 @@ type MaintenanceIds = std::collections::BTreeSet<String>;
 struct MailboxOrder {
     keys: std::collections::BTreeMap<String, smallclaims::store::canonical::ClaimKey>,
     remaining: usize,
+    #[cfg(test)]
+    cache_subjects: usize,
+    #[cfg(test)]
+    full_sorts: usize,
 }
 
 impl MailboxOrder {
@@ -447,6 +553,18 @@ impl MailboxOrder {
     }
     fn remove(&mut self, subject: &str) {
         self.keys.remove(subject);
+    }
+    fn cache(&mut self, store: &Store, messages: &[MessageView]) -> anyhow::Result<()> {
+        #[cfg(test)]
+        { self.cache_subjects += messages.len(); }
+        store.cache_mailbox_order_keys(messages, &mut self.keys)
+    }
+    fn sort(&mut self, store: &Store, messages: &mut [MessageView]) -> anyhow::Result<()> {
+        self.cache(store, messages)?;
+        #[cfg(test)]
+        { self.full_sorts += 1; }
+        messages.sort_by(|left, right| self.keys[&left.subject].cmp(&self.keys[&right.subject]));
+        Ok(())
     }
     fn bound_held(&mut self, messages: &mut Vec<MessageView>, refreshed: bool) {
         if refreshed {
@@ -476,7 +594,11 @@ impl MailboxOrder {
             .take(crate::silent::BATCH_LIMIT)
             .map(|(_, subject)| subject)
             .collect::<std::collections::BTreeSet<_>>();
-        messages.retain(|m| !crate::silent::waits_for_turn(m) || selected.contains(&m.subject));
+        messages.retain(|m| {
+            let keep = !crate::silent::waits_for_turn(m) || selected.contains(&m.subject);
+            if !keep { self.keys.remove(&m.subject); }
+            keep
+        });
         for m in messages.iter_mut() {
             m.tags
                 .retain(|tag| !tag.starts_with(crate::silent::REMAINING_PREFIX));
@@ -658,6 +780,7 @@ fn update_snapshot<F>(
     admitted: &mut MailRecovery,
     policy_rechecks: &mut std::collections::BTreeSet<String>,
     order: &mut MailboxOrder,
+    routed: Option<std::collections::BTreeSet<String>>,
 ) -> anyhow::Result<SnapshotUpdate>
 where
     F: FnOnce(&Store, &Fence) -> anyhow::Result<Snapshot>,
@@ -673,7 +796,23 @@ where
             None
         } else { previous };
         let (mark, seat, mut messages) = if let Some((mark, (mut seat, mut messages))) = previous {
-            let changes = store.mailbox_changes(binding, &mark, &messages)?;
+            let changes = if let Some(subjects) = routed {
+                // Routing identifies content, not authority. A replacement can commit
+                // after consuming the hint or the native pre-read check, so validate
+                // ownership again inside the same pinned snapshot as the point reads.
+                store.check_mailbox(binding)?;
+                // The dispatcher already identified this recipient's changed identities.
+                // Keep the durable cursor: safety reconciliation must still cover global
+                // projection repairs and missed routing, without trusting this local hint.
+                crate::store::mailbox_changes::MailboxChanges {
+                    mark,
+                    seat: false,
+                    resync: false,
+                    messages: subjects.into_iter().collect(),
+                }
+            } else {
+                store.mailbox_changes(binding, &mark, &messages)?
+            };
             let mut updated = changes.seat || changes.resync || !changes.messages.is_empty();
             if changes.resync {
                 order.clear();
@@ -689,15 +828,16 @@ where
                         .next();
                 }
                 // A key belongs to the subject's own claims; a policy recheck keeps its key.
-                for subject in &changes.messages {
+                let changed_subjects = changes.messages.into_iter()
+                    .collect::<std::collections::BTreeSet<_>>();
+                for subject in &changed_subjects {
                     order.remove(subject);
                 }
-                let subjects = changes
-                    .messages
-                    .into_iter()
+                let subjects = changed_subjects
+                    .iter()
+                    .cloned()
                     .chain(policy_rechecks.iter().cloned())
                     .collect::<std::collections::BTreeSet<_>>();
-                let mut reorder = false;
                 let mut waking_added = false;
                 let mut candidates = Vec::new();
                 for subject in &subjects {
@@ -721,21 +861,39 @@ where
                     candidates.extend(changed);
                 }
                 retain_live_mail(store, &mut candidates, since, Some(through), admitted, true)?;
+                order.cache(store, &candidates)?;
                 let mut candidates = candidates.into_iter()
                     .map(|message| (message.subject.clone(), message))
                     .collect::<std::collections::BTreeMap<_, _>>();
                 for subject in subjects {
-                    let old = messages.iter().find(|message| message.subject == subject);
-                    let changed = candidates.remove(&subject);
+                    let position = messages.iter().position(|message| message.subject == subject);
+                    let old = position.map(|position| &messages[position]);
+                    let changed = candidates.get(&subject);
                     waking_added |= old.is_none()
-                        && changed.as_ref()
+                        && changed
                             .is_some_and(|m| m.status == "sent" && !crate::silent::is_held(m));
-                    if serde_json::to_value(old)? != serde_json::to_value(changed.as_ref())? {
-                        messages.retain(|message| message.subject != subject);
-                        messages.extend(changed);
-                        reorder = true;
+                    if changed_subjects.contains(&subject)
+                        || serde_json::to_value(old)? != serde_json::to_value(changed)?
+                    {
+                        if let Some(position) = position {
+                            messages.remove(position);
+                        }
+                        if changed.is_none() {
+                            order.remove(&subject);
+                        }
                         updated = true;
+                    } else {
+                        candidates.remove(&subject);
                     }
+                }
+                // Remove every changed old position before searching with refreshed keys:
+                // an imported earlier send can change a key without changing its view.
+                // Retained messages and their cached keys stay sorted and allocated in place.
+                for changed in candidates.into_values() {
+                    let position = messages.binary_search_by(|retained| {
+                        order.keys[&retained.subject].cmp(&order.keys[&changed.subject])
+                    }).unwrap_or_else(|position| position);
+                    messages.insert(position, changed);
                 }
                 // A waking change refills the bounded held batch from durable metadata.
                 // This is one bulk read per real turn, never an extra seek per delivery.
@@ -753,11 +911,9 @@ where
                     retain_live_mail(store, &mut messages, since, Some(through), admitted, true)?;
                     order.clear();
                     order.bound_held(&mut messages, true);
+                    order.sort(store, &mut messages)?;
                 }
                 order.bound_held(&mut messages, false);
-                if reorder {
-                    store.order_mailbox_messages(&mut messages, &mut order.keys)?;
-                }
                 return Ok((changes.mark, (seat, messages), updated));
             }
         } else {
@@ -793,6 +949,7 @@ where
         policy_rechecks.retain(|subject| eligible.contains(subject));
         retain_live_mail(store, &mut messages, since, Some(through), admitted, true)?;
         order.bound_held(&mut messages, true);
+        order.sort(store, &mut messages)?;
         Ok((mark, (seat, messages), true))
     });
     // Reading never commits a closure or builds persistent derived state. The background
@@ -1041,7 +1198,18 @@ async fn stream_with_timers_inner<F, S, H>(
             let store = state.store.clone();
             let binding = fence.clone();
             let read = read.clone();
-            subscription.changed.borrow_and_update();
+            let work = subscription.work.clone();
+            let snapshot_work = work.clone();
+            let read = move |store: &Store, fence: &Fence| {
+                snapshot_work.snapshots.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                read(store, fence)
+            };
+            let pending = subscription.take_messages();
+            let routed = if matches!(pending_caller, crate::otel::MailboxFenceCaller::DirtyPass) {
+                pending
+            } else {
+                None
+            };
             let mut admitted = recovered.clone();
             let mut policies = policy_rechecks.clone();
             let mut keys = std::mem::take(&mut order);
@@ -1076,18 +1244,24 @@ async fn stream_with_timers_inner<F, S, H>(
                 }
             } else { false };
             if repaired { previous = None; }
+            #[cfg(test)]
+            if let Some(gate) = &control.dirty_gate {
+                let hook = gate.before_snapshot.lock().unwrap().take();
+                if let Some(hook) = hook { hook(); }
+            }
             let result = crate::api::read_deadline::store_read(&admission_store, move || {
                 crate::profile::task("task mailbox-update", || {
+                    work.updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if routed.is_some() && previous.is_some() {
+                        work.routed_updates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let result = update_snapshot(
-                        &store,
-                        &binding,
-                        read,
-                        previous,
-                        (since, through),
-                        &mut admitted,
-                        &mut policies,
-                        &mut keys,
+                        &store, &binding, read, previous, (since, through),
+                        &mut admitted, &mut policies, &mut keys, routed,
                     );
+                    if result.as_ref().is_ok_and(|(_, _, updated, _)| !updated) {
+                        work.unchanged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     (result, admitted, policies, keys)
                 })
             })
@@ -1163,7 +1337,9 @@ async fn stream_with_timers_inner<F, S, H>(
             subscription.messages(&subjects);
             // Held mail stays admitted to this stream, so the next waking message releases it
             // without another read; until then the seat is offered none of it.
-            crate::silent::release(&mut messages);
+            if release_mailbox_offer(&state.store, &fence, &mut messages).is_err() {
+                return;
+            }
             let bytes = serde_json::to_vec(&messages).unwrap_or_default();
             if fence.component == "delivery" && bytes != previous_mailbox {
                 if send(&mut socket, &Frame::Mailbox { messages })
@@ -1587,6 +1763,105 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn mailbox_orders_graph_and_high_index_stream_mail_by_send_time() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        crate::store::mailbox_tests::ready(&store, "ordered");
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "ordered", "delivery")).unwrap();
+        let send_at = |target: &smallclaims::store::Store, id: &str, at: u128| {
+            let claim = target.append_claim(&ClaimInput {
+                subject: format!("message/{id}"),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("agent/sender")),
+                    ("to".into(), json!(fence.subject)),
+                    ("content".into(), json!("Synthetic ordering fixture")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            target.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![at.to_string(), claim.id],
+            ).unwrap();
+        };
+        // Shard admission order differs from send order, and its index namespace is
+        // above every graph index. Neither fact may move an older send behind new mail.
+        send_at(&shard, "0000000000000030", 30);
+        send_at(&shard, "0000000000000010", 10);
+        send_at(&store.graph, "0000000000000020", 20);
+        let mut recovery = MailRecovery::default();
+        let mut policies = std::collections::BTreeSet::new();
+        let mut order = MailboxOrder::new();
+        let (mark, initial, _, _) = update_snapshot(&store, &fence, raw_snapshot, None, (0, 0), &mut recovery, &mut policies, &mut order, None).unwrap();
+        let subjects = |messages: &[MessageView]| messages.iter()
+            .map(|message| message.subject.clone()).collect::<Vec<_>>();
+        let expected = [
+            "message/0000000000000010",
+            "message/0000000000000020",
+            "message/0000000000000030",
+        ];
+        assert_eq!(subjects(&initial.1), expected);
+        assert!(initial.1[0].created_index >= crate::store::messages_shard::STREAM_INDEX_BASE);
+        assert!(initial.1[0].created_index > initial.1[1].created_index);
+        assert_eq!(order.cache_subjects, 3);
+        assert_eq!(order.full_sorts, 1);
+        let cached_subject_allocations = expected.map(|subject| {
+            (subject, order.keys.get_key_value(subject).unwrap().0.as_ptr())
+        });
+        // The delta reuses cached graph AND shard keys, and inserts a backdated
+        // shard import before later sends rather than at the end of the namespace.
+        send_at(&shard, "0000000000000015", 15);
+        let (mark, delta, _, _) = update_snapshot(&store, &fence, raw_snapshot, Some((mark, initial)), (0, 0), &mut recovery, &mut policies, &mut order, None).unwrap();
+        assert_eq!(subjects(&delta.1), [
+            "message/0000000000000010",
+            "message/0000000000000015",
+            "message/0000000000000020",
+            "message/0000000000000030",
+        ]);
+        assert_eq!(order.keys.len(), 4, "every admitted message keeps its canonical key");
+        assert_eq!(order.cache_subjects, 4, "a one-message delta must visit only one cache subject");
+        assert_eq!(order.full_sorts, 1, "a delta must not fully sort the retained mailbox");
+        for (subject, allocation) in cached_subject_allocations {
+            assert_eq!(order.keys.get_key_value(subject).unwrap().0.as_ptr(), allocation,
+                "a delta rebuilt an unchanged subject's cached allocation");
+        }
+        let mut oracle = delta.1.clone();
+        oracle.reverse();
+        MailboxOrder::new().sort(&store, &mut oracle).unwrap();
+        assert_eq!(subjects(&delta.1), subjects(&oracle));
+        // Refreshing an existing subject's key must also move it, even when its
+        // message view is otherwise unchanged by an imported earlier send.
+        // Each writer admits message.sent only once; the earlier send arrives
+        // from an independent writer rather than violating local cardinality.
+        const FLEET: &str = "18ba3167-11fb-472c-8ff8-e46e0fefb1e4";
+        let source = Store::open(&root.path().join("source.db"), "source").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        send_at(&source.graph, "0000000000000020", 5);
+        let exchange = source.export_replication_exchange(
+            FLEET, &store.replication_inventory().unwrap(),
+        ).unwrap();
+        store.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+        store.validate_replication_backlog().unwrap();
+        store.project_replication_backlog().unwrap();
+        assert!(store.graph.claims_for("message/0000000000000020", Some("message.sent"))
+            .unwrap().iter().any(|claim| claim.origin == "source" && claim.accepted_at_unix_ms == 5));
+        let (_, moved, _, _) = update_snapshot(&store, &fence, raw_snapshot, Some((mark, delta)), (0, 0), &mut recovery, &mut policies, &mut order, None).unwrap();
+        assert_eq!(order.cache_subjects, 5);
+        assert_eq!(order.full_sorts, 1);
+        assert_eq!(moved.1[0].subject, "message/0000000000000020");
+        let mut oracle = moved.1.clone();
+        oracle.reverse();
+        MailboxOrder::new().sort(&store, &mut oracle).unwrap();
+        assert_eq!(subjects(&moved.1), subjects(&oracle));
+    }
 
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
@@ -2350,9 +2625,7 @@ mod tests {
         let mut delta_recovery = MailRecovery::default();
         let mut policies = std::collections::BTreeSet::new();
         let mut order = MailboxOrder::new();
-        let (mark, initial, _, _) = update_snapshot(
-            &store, &fence, raw_snapshot, None, floor, &mut delta_recovery, &mut policies, &mut order,
-        ).unwrap();
+        let (mark, initial, _, _) = update_snapshot(&store, &fence, raw_snapshot, None, floor, &mut delta_recovery, &mut policies, &mut order, None).unwrap();
         send_at("expired", since - RECOVERY_CUTOFF_MS - 1);
         send_at("cutoff", since - RECOVERY_CUTOFF_MS);
         send_at("staged", since - threshold - 20);
@@ -2389,10 +2662,7 @@ mod tests {
         assert!(held.is_empty());
         assert!(rechecks.contains("message/old-0"));
         assert!(preview.backlog.is_empty());
-        let (_, delta, _, _) = update_snapshot(
-            &store, &fence, raw_snapshot, Some((mark, initial)), floor,
-            &mut delta_recovery, &mut policies, &mut order,
-        ).unwrap();
+        let (_, delta, _, _) = update_snapshot(&store, &fence, raw_snapshot, Some((mark, initial)), floor, &mut delta_recovery, &mut policies, &mut order, None).unwrap();
         let mut selected = delta.1.into_iter().map(|m| m.subject).collect::<Vec<_>>();
         selected.sort();
         assert_eq!(selected, expected, "a whole import delta shares one oldest-first budget");
@@ -2465,10 +2735,7 @@ mod tests {
         let mut order = MailboxOrder::new();
         let mut previous = None;
         for (start, end) in [(0, 5), (5, 10), (10, 12)] {
-            let (mark, snapshot, updated, _) = update_snapshot(
-                &store, &fence, raw_snapshot, previous.take(), floor,
-                &mut recovery, &mut policies, &mut order,
-            ).unwrap();
+            let (mark, snapshot, updated, _) = update_snapshot(&store, &fence, raw_snapshot, previous.take(), floor, &mut recovery, &mut policies, &mut order, None).unwrap();
             assert!(updated);
             let expected = (start..end).map(|id| format!("message/batch-{id:02}"))
                 .collect::<std::collections::BTreeSet<_>>();
@@ -2481,10 +2748,7 @@ mod tests {
                 let phase = if position == 0 { "message.staged" } else { "message.delivered" };
                 receipt(subject, phase);
             }
-            let (mark, snapshot, _, _) = update_snapshot(
-                &store, &fence, raw_snapshot, previous.take(), floor,
-                &mut recovery, &mut policies, &mut order,
-            ).unwrap();
+            let (mark, snapshot, _, _) = update_snapshot(&store, &fence, raw_snapshot, previous.take(), floor, &mut recovery, &mut policies, &mut order, None).unwrap();
             assert_eq!(recovery.backlog, expected, "one staged member must block refill");
             assert!(!snapshot.1.iter().any(|m| m.status == "sent"));
             previous = Some((mark, snapshot));
@@ -2504,10 +2768,7 @@ mod tests {
                 }
             }
         }
-        let (_, snapshot, _, _) = update_snapshot(
-            &store, &fence, raw_snapshot, previous.take(), floor,
-            &mut recovery, &mut policies, &mut order,
-        ).unwrap();
+        let (_, snapshot, _, _) = update_snapshot(&store, &fence, raw_snapshot, previous.take(), floor, &mut recovery, &mut policies, &mut order, None).unwrap();
         assert!(recovery.backlog.is_empty(), "the final two-member batch must settle");
         assert!(!snapshot.1.iter().any(|message| message.status == "sent" || message.status == "staged"));
         }
@@ -2594,6 +2855,121 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn suspension_keeps_wake_indexed_until_resumed_offer_and_receipt() {
+        use crate::suspension;
+        for cause in ["idle", "manual"] {
+            let store = Store::open_memory("node").unwrap();
+            let intent = crate::parse_intent(
+                "version 2\nagent \"eval.worker\" { command \"true\"; }", "node",
+            ).unwrap();
+            store.apply(&intent, &BTreeMap::from([("agent/eval.worker".into(), Vec::new())]), "fixture").unwrap();
+            crate::store::mailbox_tests::ready(&store, "current");
+            let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "current", "delivery")).unwrap();
+            let declaration = store.suspension_lineage_at(&fence.subject, None).unwrap().pop().unwrap();
+            let append = |subject: &str, kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
+                store.append_claim(&ClaimInput {
+                    subject: subject.into(), kind: kind.into(), actor: Some(fence.subject.clone()),
+                    fields: serde_json::from_value(fields).unwrap(), evidence,
+                    expected_subject: None, idempotency_key: key,
+                }).unwrap()
+            };
+            let mut cursor = store.mailbox_wake_cursor().unwrap();
+            let frontier = suspension::mailbox_intake_frontier(&store, &fence.subject).unwrap();
+            let suspend = append(&fence.subject, "runtime.action.requested",
+                json!({"action":"suspend", "cause":cause, "incarnation_id":"current"}),
+                vec![declaration.clone()], None);
+            append("message/wake", "message.sent",
+                json!({"from":"person/avery","to":fence.subject,"content":"Please continue","status":"sent"}),
+                vec![], None);
+            let receipt_input = |kind: &str| ClaimInput {
+                subject: "message/wake".into(), kind: kind.into(), actor: Some(fence.subject.clone()),
+                fields: BTreeMap::from([("status".into(), json!(kind.strip_prefix("message.").unwrap())),
+                    ("recipient".into(), json!(fence.subject))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            };
+            // Deterministic interleaving: the intake snapshot precedes quiescing, while its
+            // receipt commits after the request. The existing writer fence must reject it.
+            for kind in ["message.staged", "message.delivered"] {
+                let error = crate::store::append_claim_with_commit_context(
+                    &store.graph, &receipt_input(kind), Some(&fence), None, None, None,
+                    crate::store::ClaimCommitContext {
+                        mailbox_intake_frontier: Some(frontier), ..Default::default()
+                    },
+                ).unwrap_err();
+                assert_eq!(error.code, "seat-suspension-changed");
+            }
+            let since = client_now_ms();
+            let through = store.index().unwrap();
+            let mut recovery = MailRecovery::default();
+            let mut policies = std::collections::BTreeSet::new();
+            let mut order = MailboxOrder::new();
+            let mut previous = None;
+            let mut check_held = |expected_phase: &str| {
+                assert_eq!(suspension::current(&store, &fence.subject).unwrap().unwrap().phase, expected_phase);
+                let (mark, snapshot, updated, _) = update_snapshot(&store, &fence, raw_snapshot, previous.take(), (since, through), &mut recovery, &mut policies, &mut order, None).unwrap();
+                assert!(updated, "runtime.action phase changes must invalidate the snapshot");
+                assert!(snapshot.0.is_some(), "suspension must not hide seat/status frames");
+                assert_eq!(snapshot.1.len(), 1, "retain raw pending identities across hold phases");
+                let mut offered = snapshot.1.clone();
+                release_mailbox_offer(&store, &fence, &mut offered).unwrap();
+                assert!(offered.is_empty());
+                for kind in ["message.staged", "message.delivered"] {
+                    assert_eq!(check_suspension_receipt(&store, &fence, kind).unwrap_err().code, "seat-suspended");
+                    assert_eq!(store.append_mailbox_receipt_outcome(&receipt_input(kind), &fence).unwrap_err().code,
+                        "seat-suspended", "the actual graph writer must reject held intake");
+                }
+                assert!(check_suspension_receipt(&store, &fence, "message.read").is_ok());
+                assert_eq!(store.wake_demand(&fence.subject).unwrap().oldest.unwrap().subject, "message/wake");
+                let (next, dependencies, _) = store.mailbox_wake_batch(cursor).unwrap();
+                assert!(dependencies.contains(&crate::store::mailbox_wakes::Dependency::Subject(fence.subject.clone())));
+                cursor = next;
+                previous = Some((mark, snapshot));
+            };
+            check_held("quiescing");
+            // The initial request already holds intake, before the owner stops anything.
+            // Add a phase receipt after cursor capture to exercise reactive invalidation.
+            append(&fence.subject, "runtime.action.succeeded", json!({"action":"suspend"}),
+                vec![suspend.id.clone()], Some(suspension::suspend_snapshot_key(&suspend.id)));
+            check_held("snapshotting");
+            append(&fence.subject, "runtime.action.succeeded", json!({"action":"suspend"}),
+                vec![suspend.id.clone()], Some(suspension::suspend_completed_key(&suspend.id)));
+            check_held("suspended");
+            assert_eq!(store.claims_for(&fence.subject, Some("runtime.action.requested")).unwrap().len(), 1,
+                "neither idle nor manual mailbox delivery creates an automatic resume request");
+            let resume = append(&fence.subject, "runtime.action.requested", json!({"action":"resume"}),
+                vec![declaration, suspend.id.clone()], None);
+            check_held("restoring");
+            append(&fence.subject, "runtime.action.succeeded", json!({"action":"resume","incarnation_id":"current"}),
+                vec![resume.id.clone()], Some(suspension::resume_started_key(&resume.id)));
+            check_held("verifying");
+            append(&fence.subject, "runtime.action.succeeded", json!({"action":"resume"}),
+                vec![resume.id.clone()], Some(suspension::resume_completed_key(&resume.id)));
+            let (_, snapshot, updated, _) = update_snapshot(&store, &fence, raw_snapshot, previous, (since, through), &mut recovery, &mut policies, &mut order, None).unwrap();
+            assert!(updated);
+            let mut offered = snapshot.1;
+            release_mailbox_offer(&store, &fence, &mut offered).unwrap();
+            assert_eq!(offered.len(), 1);
+            assert!(store.wake_demand(&fence.subject).unwrap().oldest.is_some(),
+                "offering itself must not consume pending wake demand");
+            check_suspension_receipt(&store, &fence, "message.staged").unwrap();
+            store.append_mailbox_receipt_outcome(&ClaimInput {
+                subject: "message/wake".into(), kind: "message.staged".into(),
+                actor: Some(fence.subject.clone()),
+                fields: BTreeMap::from([("status".into(), json!("staged")), ("recipient".into(), json!(fence.subject))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }, &fence).unwrap();
+            assert!(store.wake_demand(&fence.subject).unwrap().oldest.is_none());
+            // Resume with no independent waking mail must retain the silent-only rule.
+            let mut silent = offered;
+            // Person messages always wake, even with a silent tag; model an ordinary agent FYI.
+            silent[0].from = "agent/peer".into();
+            silent[0].tags = vec![crate::silent::SILENT_TAG.into()];
+            release_mailbox_offer(&store, &fence, &mut silent).unwrap();
+            assert!(silent.is_empty());
+        }
     }
 
     fn age_expired(database: &Path, subject: &str) {
@@ -3638,6 +4014,105 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn one_message_updates_one_of_forty_five_open_streams_without_snapshots() {
+        const STREAMS: usize = 45;
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let mut fences = Vec::new();
+        for index in 0..STREAMS {
+            let subject = format!("agent/stream-{index}");
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "runtime_id":format!("stream-{index}"), "incarnation_id":"current"})),
+                ("harness.observed", json!({"state":"ready", "driver":"omp", "incarnation_id":"current"})),
+            ] {
+                state.store.append_claim(&ClaimInput {
+                    subject: subject.clone(), kind: kind.into(), actor: Some(subject.clone()),
+                    fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+                    expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            fences.push(state.store.bind_mailbox(&Fence::new(&subject, "current", "delivery")).unwrap());
+        }
+        let mut streams = Vec::new();
+        for (index, fence) in fences.iter().enumerate() {
+            streams.push(controlled_stream(state.clone(), fence, &root.path().join(format!("stream-{index}.sock"))).await);
+        }
+        let before = state.store.mailbox_stream_work();
+        assert_eq!(before["open_streams"], STREAMS);
+        state.store.append_claim(&ClaimInput {
+            subject: "message/one-recipient".into(), kind: "message.sent".into(),
+            actor: Some("person/fixture".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("sent")), ("from".into(), json!("person/fixture")),
+                ("to".into(), json!(fences[0].subject)), ("content".into(), json!("One recipient.")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        signal_changed(&state);
+        assert!(matches!(next(&mut streams[0].socket).await,
+            Frame::Mailbox { messages } if messages.len() == 1 && messages[0].subject == "message/one-recipient"));
+        // Taking the census locks the dispatcher registry: all notifications in this
+        // committed batch have finished before we examine exact work counts.
+        let after = state.store.mailbox_stream_work();
+        let sum = |report: &Value, field: &str| report["streams"].as_array().unwrap().iter()
+            .map(|stream| stream[field].as_u64().unwrap()).sum::<u64>();
+        assert_eq!(sum(&after, "notifications") - sum(&before, "notifications"), 1);
+        assert_eq!(sum(&after, "updates") - sum(&before, "updates"), 1);
+        assert_eq!(sum(&after, "routed_updates") - sum(&before, "routed_updates"), 1);
+        assert_eq!(sum(&after, "snapshots") - sum(&before, "snapshots"), 0);
+        assert_eq!(sum(&after, "unchanged") - sum(&before, "unchanged"), 0);
+        for stream in &after["streams"].as_array().unwrap()[..] {
+            if stream["subject"] != fences[0].subject {
+                assert_eq!(stream["updates"], 1, "{stream}");
+                assert_eq!(stream["snapshots"], 1, "{stream}");
+                assert_eq!(stream["notifications"], 0, "{stream}");
+            }
+        }
+        for stream in streams {
+            stream.server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn routed_message_fences_a_binding_replaced_after_hint_consumption() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        crate::store::mailbox_tests::ready(&state.store, "current");
+        let fence = state.store.bind_mailbox(
+            &Fence::new("agent/eval.worker", "current", "delivery"),
+        ).unwrap();
+        let mut stream = controlled_stream(
+            state.clone(), &fence, &root.path().join("owner-race.sock"),
+        ).await;
+        let store = state.store.clone();
+        let old = fence.clone();
+        *stream.dirty_gate.before_snapshot.lock().unwrap() = Some(Box::new(move || {
+            // The routed identities have been consumed, and any native pre-read
+            // check has finished. Replacement is visible in the ensuing read snapshot.
+            let replacement = store.bind_mailbox(
+                &Fence::new(&old.subject, &old.incarnation, &old.component),
+            ).unwrap();
+            assert_ne!(replacement.token, old.token);
+        }));
+        state.store.append_claim(&ClaimInput {
+            subject: "message/replaced-before-read".into(), kind: "message.sent".into(),
+            actor: Some("person/fixture".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("sent")), ("from".into(), json!("person/fixture")),
+                ("to".into(), json!(fence.subject)), ("content".into(), json!("Current owner only.")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        signal_changed(&state);
+        // No mailbox offer may precede fencing, even though the original wake was
+        // message-only. Waiting for the next frame makes the old failure deterministic.
+        assert!(matches!(next(&mut stream.socket).await, Frame::Fenced { .. }));
+        assert!(stream.dirty_gate.before_snapshot.lock().unwrap().is_none());
+        assert_eq!(stream.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        stream.server.abort();
+    }
+
     async fn controlled_stream(state: AppState, fence: &Fence, path: &Path) -> ControlledStream {
         controlled_stream_with_peer(state, fence, path, None).await
     }
@@ -3656,6 +4131,7 @@ mod tests {
             notifications: std::sync::atomic::AtomicUsize::new(0),
             replay_proofs: std::sync::atomic::AtomicUsize::new(0),
             attachment_evaluations: std::sync::atomic::AtomicUsize::new(0),
+            before_snapshot: std::sync::Mutex::new(None),
         });
         let fixture_gate = dirty_gate.clone();
         let app = Router::new()
@@ -4233,6 +4709,7 @@ mod tests {
         crate::store::mailbox_tests::ready(&source, "session-1");
         let request = || ReplicationReceiveRequest {
             carrier: Default::default(),
+            authenticated_member_key: None,
             peer: "source".into(),
             fleet_id: FLEET.into(),
             exchange: source
@@ -4546,16 +5023,7 @@ mod tests {
         let mut admitted = Default::default();
         let mut policies = Default::default();
         let mut order = MailboxOrder::new();
-        let (mark, view, _, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            None,
-            floor,
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (mark, view, _, _) = update_snapshot(&store, &fence, read, None, floor, &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert_eq!(
             view.1.len(),
@@ -4585,16 +5053,7 @@ mod tests {
             .unwrap();
         let committed = store.index().unwrap();
         store.committed_index.store(previous_committed, Ordering::Release);
-        let (mark, view, _, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            Some((mark, view)),
-            floor,
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (mark, view, _, _) = update_snapshot(&store, &fence, read, Some((mark, view)), floor, &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert_eq!(
             reads.get(),
@@ -4607,16 +5066,7 @@ mod tests {
             "resync must include commits beyond the atomic"
         );
         store.committed_index.store(committed, Ordering::Release);
-        let (_, view, updated, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            Some((mark, view)),
-            floor,
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (_, view, updated, _) = update_snapshot(&store, &fence, read, Some((mark, view)), floor, &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert!(!updated);
         assert_eq!(view.1.len(), 2);
@@ -4640,16 +5090,7 @@ mod tests {
         let mut admitted = MailRecovery::default();
         let mut policies = std::collections::BTreeSet::new();
         let mut order = MailboxOrder::new();
-        let (mark, view, _, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            None,
-            (since, through),
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (mark, view, _, _) = update_snapshot(&store, &fence, read, None, (since, through), &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         let mut previous = Some((mark, view));
         let append = |subject: &str, phase: &str, to: &str| {
@@ -4703,16 +5144,7 @@ mod tests {
                     "",
                 );
             }
-            let (mark, view, updated, _) = update_snapshot(
-                &store,
-                &fence,
-                read,
-                previous.take(),
-                (since, through),
-                &mut admitted,
-                &mut policies,
-                &mut order,
-            )
+            let (mark, view, updated, _) = update_snapshot(&store, &fence, read, previous.take(), (since, through), &mut admitted, &mut policies, &mut order, None)
             .unwrap();
             let mut oracle = snapshot(&store, &fence).unwrap();
             retain_live_mail(&store, &mut oracle.1, since, Some(through), &mut admitted, true).unwrap();
@@ -4728,32 +5160,14 @@ mod tests {
         }
         // An idle cursor check performs no full read and produces no mailbox frame.
         for _ in 0..4 {
-            let (mark, view, updated, _) = update_snapshot(
-                &store,
-                &fence,
-                read,
-                previous.take(),
-                (since, through),
-                &mut admitted,
-                &mut policies,
-                &mut order,
-            )
+            let (mark, view, updated, _) = update_snapshot(&store, &fence, read, previous.take(), (since, through), &mut admitted, &mut policies, &mut order, None)
             .unwrap();
             assert!(!updated);
             previous = Some((mark, view));
         }
         // Unrelated graph traffic advances the cursor without reconstructing this mailbox.
         append("message/unrelated", "sent", "agent/other");
-        let (mark, view, updated, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            previous.take(),
-            (since, through),
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (mark, view, updated, _) = update_snapshot(&store, &fence, read, previous.take(), (since, through), &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert!(!updated);
         previous = Some((mark, view));
@@ -4773,16 +5187,7 @@ mod tests {
                 idempotency_key: Some("seat-refresh".into()),
             })
             .unwrap();
-        let (_, view, updated, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            previous,
-            (since, through),
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (_, view, updated, _) = update_snapshot(&store, &fence, read, previous, (since, through), &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert!(updated);
         assert!(
@@ -4838,9 +5243,7 @@ mod tests {
         let mut admitted = MailRecovery::default();
         let mut policies = std::collections::BTreeSet::new();
         let mut order = MailboxOrder::new();
-        let (mark, view, _, _) = update_snapshot(
-            &store, &fence, read, None, (since, through), &mut admitted, &mut policies, &mut order,
-        )
+        let (mark, view, _, _) = update_snapshot(&store, &fence, read, None, (since, through), &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         let listed = |view: &Snapshot| {
             view.1
@@ -4876,8 +5279,8 @@ mod tests {
                     receipt(first, "delivered");
                     // The receipt is routed to this seat although it wrote no graph claim.
                     let (_, dependencies, _) = store.mailbox_wake_batch(cursor).unwrap();
-                    assert!(dependencies.contains(&crate::store::mailbox_wakes::Dependency::Recipient(
-                        fence.subject.clone()
+                    assert!(dependencies.contains(&crate::store::mailbox_wakes::Dependency::Message(
+                        first.to_owned(), fence.subject.clone()
                     )));
                 }
                 "sent" => {
@@ -4895,16 +5298,7 @@ mod tests {
                 .map(|_| ())
                 .unwrap(),
             }
-            let (mark, view, updated, _) = update_snapshot(
-                &store,
-                &fence,
-                read,
-                previous.take(),
-                (since, through),
-                &mut admitted,
-                &mut policies,
-                &mut order,
-            )
+            let (mark, view, updated, _) = update_snapshot(&store, &fence, read, previous.take(), (since, through), &mut admitted, &mut policies, &mut order, None)
             .unwrap();
             assert!(updated, "{step}");
             let expected = expected
@@ -5059,45 +5453,18 @@ mod tests {
         let mut admitted = Default::default();
         let mut policies = Default::default();
         let mut order = MailboxOrder::new();
-        let (mark, view, _, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            None,
-            (since, through),
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (mark, view, _, _) = update_snapshot(&store, &fence, read, None, (since, through), &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert!(view.1.is_empty());
         assert!(policies.contains("message/held-watch"));
         let index = store.index().unwrap();
         drop(post);
         assert_eq!(store.index().unwrap(), index);
-        let (mark, view, updated, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            Some((mark, view)),
-            (since, through),
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (mark, view, updated, _) = update_snapshot(&store, &fence, read, Some((mark, view)), (since, through), &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert!(updated);
         assert_eq!(view.1.len(), 1);
-        let (_, view, updated, _) = update_snapshot(
-            &store,
-            &fence,
-            read,
-            Some((mark, view)),
-            (since, through),
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (_, view, updated, _) = update_snapshot(&store, &fence, read, Some((mark, view)), (since, through), &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert!(!updated);
         assert_eq!(view.1[0].subject, "message/held-watch");
@@ -5156,16 +5523,7 @@ mod tests {
         let mut policies = Default::default();
         let mut order = MailboxOrder::new();
         let before = store.index().unwrap();
-        let (_, view, _, closures) = update_snapshot(
-            store,
-            &fence,
-            raw_snapshot,
-            None,
-            floor,
-            &mut admitted,
-            &mut policies,
-            &mut order,
-        )
+        let (_, view, _, closures) = update_snapshot(store, &fence, raw_snapshot, None, floor, &mut admitted, &mut policies, &mut order, None)
         .unwrap();
         assert!(view.1.is_empty());
         assert_eq!(store.index().unwrap(), before, "a mailbox read must not write");

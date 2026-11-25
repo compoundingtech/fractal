@@ -433,7 +433,14 @@ impl Lease {
             observer: Mutex::new(None),
         });
         let weak = Arc::downgrade(&lease);
-        let observer = state.store.observe_commits(move |connection| {
+        let observer = state.store.observe_tables(&[
+            "claims", "claim_positions", "desired", "batches", "replica_records",
+            "replica_envelopes", "released_envelopes", "checkpoint_envelopes",
+            "claim_verdicts", "claim_signature_judging", "claim_verdict_queue",
+            "claim_signature_migration", "expected_claim_signatures", "meta",
+            "replica_envelope_signatures", "replica_restore_quarantine", "replica_record_rows",
+            "projection_digest_repaired_claims", "local_pairing_migration_allowances", "step_runs",
+        ], move |connection| {
             if let Some(lease) = weak.upgrade()
                 && !snapshot(
                     connection,

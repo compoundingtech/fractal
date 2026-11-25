@@ -75,6 +75,13 @@
     "incarnation_id": "runtime-9:2026-09-20T11:06:30Z", "current_work_ids": ["step-run/release/build"], "active_work_count": 1,
     "next_work_id": "step-run/release/deploy", "upcoming_work_ids": ["step-run/release/deploy"], "queued_work_count": 1,
     "under": [],
+    "suspension": {
+      "action": "resume", "phase": "resumed", "operation_id": "resume/sample",
+      "cause": "idle", "mode": "git", "updated_at": "2026-09-20T11:06:30Z", "blocking": []
+    },
+    "residency": {
+      "policy": "off", "eligible_since": null, "due_at": null, "refusal_reason": "policy-off"
+    },
     "subagents": [{
       "id": "019a-thread-review", "subagent_type": null, "description": "review the changelog", "driver": "codex",
       "session_id": "019a-thread-main", "work_id": "step-run/release/build", "started_at": "2026-09-20T11:07:10Z",

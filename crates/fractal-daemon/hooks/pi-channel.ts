@@ -95,7 +95,7 @@ type Stash = {
    */
   lastCostUsd?: number;
   label?: string;
-  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean }>;
+  accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean; acceptedAtUnixMs?: number }>;
 
 };
 
@@ -336,7 +336,7 @@ export default function (pi: ExtensionAPI) {
           state.reconnectAttempt = 0;
           await applyLabel(ctx);
           for (const accepted of state.accepted?.values() ?? []) {
-            send({ type: "delivered", meta: accepted.meta });
+            send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
           // The native session this channel serves: st resumes a suspended seat on it and checks
@@ -350,6 +350,7 @@ export default function (pi: ExtensionAPI) {
             const sessionFile = sessions.getSessionFile?.();
             send({
               type: "ready",
+              inputAcceptanceClock: true,
               sessionId: nativeSessionId,
               ...(typeof sessionFile === "string" ? { sessionFile } : {}),
             });
@@ -363,7 +364,7 @@ export default function (pi: ExtensionAPI) {
         const messageId = frame.meta?.messageId;
         if (typeof messageId === "string" && state.accepted?.has(messageId)) {
           const accepted = state.accepted.get(messageId)!;
-          send({ type: "delivered", meta: accepted.meta });
+          send({ type: "delivered", meta: accepted.meta, acceptedAtUnixMs: accepted.acceptedAtUnixMs });
           if (accepted.read) send({ type: "read", meta: accepted.meta });
           return;
         }
@@ -382,7 +383,12 @@ export default function (pi: ExtensionAPI) {
           } else {
             await pi.sendUserMessage(frame.content, { deliverAs: frame.deliverAs ?? "steer" });
           }
-          send({ type: "delivered", meta: frame.meta });
+          const acceptedAtUnixMs = Date.now();
+          if (typeof messageId === "string") {
+            const accepted = state.accepted?.get(messageId);
+            if (accepted) accepted.acceptedAtUnixMs ??= acceptedAtUnixMs;
+          }
+          send({ type: "delivered", meta: frame.meta, acceptedAtUnixMs });
         } catch (error) {
           if (typeof messageId === "string" && state.accepted?.get(messageId)?.read) {
             send({ type: "delivered", meta: frame.meta });

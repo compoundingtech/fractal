@@ -36,7 +36,7 @@ standing_run=$(jq -er '.mission_run.subject' standing.json)
 fractal trace wait "$OWNER" --for running --timeout 1m >/dev/null
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-st3 --json missions start eval/review-escalation/work \
+fractal --json missions start eval/review-escalation/work \
   --id "eval/review-escalation/work/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
   --workspace "$PWD" \
   --input "source=resource/eval/review-escalation/source@${source_claim}" \

@@ -27,7 +27,7 @@ fn state(root: &Path) -> AppState {
     }
 }
 
-/// The clients st lists: a client that names itself and one that does not, a stream that
+/// The clients fractal lists: a client that names itself and one that does not, a stream that
 /// appears with what it follows and leaves when it closes. Listing only: nobody is refused.
 #[tokio::test]
 async fn clients_list_shows_streams_appearing_and_leaving_and_the_header_is_optional() {
@@ -109,7 +109,7 @@ async fn clients_list_shows_streams_appearing_and_leaving_and_the_header_is_opti
 }
 
 /// A quiet collection stream proves it is alive without a request: a WebSocket ping is answered,
-/// and the answer counts as heard. This is what lets a client stop asking st "are you there" on a
+/// and the answer counts as heard. This is what lets a client stop asking fractal "are you there" on a
 /// timer (Nathan, 2026-10-06: no polling).
 #[tokio::test]
 async fn a_collection_stream_answers_a_websocket_ping_without_a_request() {

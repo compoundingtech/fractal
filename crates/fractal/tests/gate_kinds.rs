@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-//! `st gate cargo-test` answers the way an exec gate reads it: 0 passes, 1 is not yet, 3 is
+//! `fractal gate cargo-test` answers the way an exec gate reads it: 0 passes, 1 is not yet, 3 is
 //! broken. A stand-in `cargo` plays each way a test target can fare on `origin/main`.
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -21,8 +21,13 @@ fn git(directory: &Path, arguments: &[&str]) {
 }
 
 fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
+    gate_with_worktree(root, mode, repository, &root.join("worktree"))
+}
+
+fn gate_with_worktree(root: &Path, mode: &str, repository: &Path, worktree: &Path) -> (Option<i32>, String) {
     std::fs::write(root.join("cargo-mode"), mode).unwrap();
     let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+        .current_dir(root)
         .env_clear()
         .env("HOME", root)
         .env(
@@ -44,7 +49,7 @@ fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
         ])
         .arg(repository)
         .arg("--worktree")
-        .arg(root.join("worktree"))
+        .arg(worktree)
         .output()
         .unwrap();
     (
@@ -160,6 +165,12 @@ echo 'test result: ok. 2 passed'
         output.contains("pass: test target `log_diet` passes at origin/main"),
         "{output}"
     );
+    assert!(root.join("worktree/CHANGELOG.md").exists());
+
+    let (code, output) = gate_with_worktree(
+        root, "passing", Path::new("./work"), Path::new("./worktree"),
+    );
+    assert_eq!(code, Some(0), "relative repository and worktree: {output}");
     assert!(root.join("worktree/CHANGELOG.md").exists());
 
     let (code, output) = gate(root, "passing", root);

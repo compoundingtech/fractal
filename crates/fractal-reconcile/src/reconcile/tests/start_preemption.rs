@@ -18,6 +18,7 @@ use super::*;
     verification_hidden: AtomicBool,
     provenance_error: AtomicBool,
     ending_unverified: AtomicBool,
+    end_before_result: AtomicBool,
     closed_operation: std::sync::OnceLock<String>,
 }
 
@@ -72,9 +73,9 @@ use super::*;
         }
     }
     fn start(&self, member: &MemberSpec) -> Result<()> {
-        self.start_guarded(member, &|| Ok(()))
+        self.start_guarded(member, None, &|| Ok(()))
     }
-    fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_guarded(&self, member: &MemberSpec, _operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         if member.runtime_id == "example.worker"
             || member.runtime_id == "example-worker.main"
             || member.runtime_id.starts_with("example.held")
@@ -110,6 +111,13 @@ use super::*;
                 .insert(member.runtime_id.clone());
         }
         self.inner.start(member)?;
+        if self.end_before_result.load(Ordering::Acquire) {
+            let mut observations = self.inner.ptys.lock().unwrap();
+            let observation = observations.iter_mut()
+                .find(|observation| observation.runtime_id == member.runtime_id).unwrap();
+            observation.status = "exited".into();
+            observation.exit_code = Some(23);
+        }
         let _ = self.started.send(member.runtime_id.clone());
         Ok(())
     }
@@ -282,6 +290,7 @@ use super::*;
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        end_before_result: AtomicBool::new(false),
         closed_operation: std::sync::OnceLock::new(),
     });
     let reconciler = Arc::new(Reconciler::new(
@@ -317,6 +326,140 @@ use super::*;
             None,
         )
         .unwrap()
+}
+
+#[tokio::test]
+async fn activation_lease_survives_non_waiting_dispatch_through_completion_publication() {
+    let (directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    let repository = crate::checkout::test_support::repository(directory.path());
+    apply_source(&store, &format!(
+        "version 2\nagent \"example/worker\" {{ workspace {:?}; command \"true\" }}",
+        repository.to_str().unwrap()), "leased-detached-start");
+    let pass_lease = reconciler.worktree_activation_lease(&repository, &repository).unwrap();
+    assert!(launch(&reconciler, "agent/example/worker"));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    drop(pass_lease);
+    let contend = || crate::checkout::activation_lease(&repository, &repository);
+    assert!(contend().is_err(), "the detached worker lost the pass's deletion fence");
+    release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+    assert!(store.observations_for("agent/example/worker", "runtime.action.succeeded").unwrap().is_empty());
+    assert!(contend().is_err(), "worker exit released admission before result adoption");
+    let owner = repository.clone();
+    *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(move || {
+        assert!(crate::checkout::activation_lease(&owner, &owner).is_err(),
+            "completion publication must remain fenced");
+    }));
+    let operation = store.runtime_start_for("agent/example/worker").unwrap().unwrap();
+    assert!(reconciler.apply_start_result(&operation.id, "agent/example/worker").unwrap());
+    assert!(!store.observations_for("agent/example/worker", "runtime.action.succeeded").unwrap().is_empty());
+    assert!(contend().is_ok(), "published completion did not release admission");
+}
+
+#[tokio::test]
+async fn activation_lease_is_reacquired_for_a_recovered_queued_start() {
+    let (directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let repository = crate::checkout::test_support::repository(directory.path());
+    apply_source(&store, &format!(
+        "version 2\nagent \"example/queued\" {{ workspace {:?}; command \"true\" }}",
+        repository.to_str().unwrap()), "leased-recovered-start");
+    store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "queued launches must keep their activation lease");
+    drop(reconciler);
+    let _released = crate::checkout::activation_lease(&repository, &repository).unwrap();
+    drop(_released);
+    let reopened = Arc::new(Store::open(&directory.path().join("claims.db"), "node").unwrap());
+    let restarted = Arc::new(Reconciler::new(reopened.clone(), runtime, "node".into(), Arc::new(Notify::new())));
+    restarted.wait_for_test_starts.store(false, Ordering::Release);
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "a recovered frozen queue must reacquire admission");
+    reopened.clear_launch_freeze("person/operator", "activation").unwrap();
+    restarted.reconcile_start_jobs().unwrap();
+    workers_done(&restarted).await;
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_err(),
+        "recovered worker completion is not publication");
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(reopened.runtime_start_for("agent/example/queued").unwrap().is_none());
+    assert!(crate::checkout::activation_lease(&repository, &repository).is_ok());
+}
+
+#[tokio::test]
+async fn launch_freeze_defers_a_durable_operation_then_launches_it_once() {
+    let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "freeze-queue");
+    let writer = store.clone();
+    tokio::task::spawn_blocking(move || writer.set_launch_freeze(
+        "person/operator", "activation", "replace daemon", 60_000, 5_000)).await.unwrap().unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    let operation = store.runtime_start_for("agent/example/queued").unwrap().unwrap();
+    assert!(!operation.dispatched);
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+    reconciler.reconcile_start_jobs().unwrap();
+    assert_eq!(store.runtime_start_for("agent/example/queued").unwrap().unwrap().id, operation.id);
+    let writer = store.clone();
+    tokio::task::spawn_blocking(move || writer.clear_launch_freeze(
+        "person/operator", "activation")).await.unwrap().unwrap();
+    reconciler.reconcile_start_jobs().unwrap();
+    workers_done(&reconciler).await;
+    reconciler.reconcile_start_jobs().unwrap();
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
+    assert!(store.runtime_start_for("agent/example/queued").unwrap().is_none());
+    reconciler.reconcile_start_jobs().unwrap();
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn launch_freeze_restart_adopts_the_same_queued_operation() {
+    let (directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "freeze-restart");
+    store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    let queued = store.runtime_start_for("agent/example/queued").unwrap().unwrap();
+    drop(reconciler);
+    let reopened = Arc::new(Store::open(&directory.path().join("claims.db"), "node").unwrap());
+    let restarted = Arc::new(Reconciler::new(reopened.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new())));
+    restarted.wait_for_test_starts.store(false, Ordering::Release);
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(!reopened.runtime_start_for("agent/example/queued").unwrap().unwrap().dispatched);
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+    reopened.clear_launch_freeze("person/operator", "activation").unwrap();
+    restarted.reconcile_start_jobs().unwrap();
+    workers_done(&restarted).await;
+    restarted.reconcile_start_jobs().unwrap();
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
+    assert!(reopened.runtime_start_for("agent/example/queued").unwrap().is_none());
+    let completed = reopened.pending_runtime_starts().unwrap();
+    assert!(completed.iter().all(|operation| operation.id != queued.id));
+}
+
+#[tokio::test]
+async fn launch_freeze_expiry_wakes_the_real_loop_without_an_external_event() {
+    let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "freeze-expiry");
+    store.set_launch_freeze("person/operator", "activation", "replace daemon", 100, 0).unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+    let task = tokio::spawn(reconciler.clone().run());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if runtime.inner.starts.lock().unwrap().len() == 1 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    task.abort();
+    let _ = task.await;
+    workers_done(&reconciler).await;
+    assert!(store.launch_freeze().unwrap().is_none());
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
 }
 
     #[test]
@@ -381,6 +524,7 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
     assert_eq!(store.selected_desired_token(subject).unwrap(), token);
     let member = stale.member.as_ref().unwrap().clone();
     let prepared = start_jobs::PreparedStart {
+        workspace_admission: None,
         subject: stale,
         launch_member: member.clone(),
         member,
@@ -405,6 +549,156 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
     );
     assert!(store.pending_runtime_starts().unwrap().is_empty());
     assert!(runtime.starts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_panicking_completion_is_isolated_without_dropping_the_broad_pass() {
+    let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/held-next\" { workspace \"/tmp\"; command \"true\" }",
+        "completion-panic-isolation",
+    );
+    let first = "agent/example/worker";
+    let second = "agent/example/held-next";
+    assert!(launch(&reconciler, first));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    let (pass_entered, mut pass_entered_rx) = mpsc::unbounded_channel();
+    let (pass_release, pass_held) = std::sync::mpsc::channel();
+    let pass_release = ReleaseOnDrop(pass_release);
+    *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(move || {
+        pass_entered.send(()).unwrap();
+        pass_held.recv().unwrap();
+    }));
+    *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(|| {
+        panic!("fixture completion application panic");
+    }));
+    let pass_reconciler = reconciler.clone();
+    let pass = tokio::spawn(async move {
+        pass_reconciler.blocking(|this| this.reconcile_once()).await
+    });
+    let completion_reconciler = reconciler.clone();
+    let task = tokio::spawn(async move { completion_reconciler.consume_start_results().await });
+    tokio::time::timeout(Duration::from_secs(5), pass_entered_rx.recv()).await.unwrap().unwrap();
+    release.0.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if store.observations_for(&format!("daemon/{}", reconciler.host), "reconcile.fault").unwrap().iter().any(|claim| {
+                claim.body["fields"]["scope"] == format!("start-completion:{first}")
+                    && claim.body["fields"]["status"] == "faulted"
+                    && claim.body["fields"]["reason"].as_str()
+                        .is_some_and(|reason| reason.contains("fixture completion application panic"))
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the completion panic was not recorded as an isolated item fault");
+    assert!(!pass.is_finished(), "the completion panic dropped the running broad pass");
+    // A later result must still be consumed while that same broad pass remains held.
+    assert!(launch(&reconciler, second));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    release.0.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !store.observations_for(second, "runtime.action.succeeded").unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the completion consumer stopped after an item panic");
+    assert!(!pass.is_finished(), "the original broad pass must remain active");
+    task.abort();
+    let _ = task.await;
+    pass_release.0.send(()).unwrap();
+    // The cfg(test) fault collector is shared across both lanes and reports at
+    // the end of a pass. Production records this isolated item fault without
+    // failing the pass; accept exactly the deliberately injected panic here.
+    assert_eq!(
+        pass.await.unwrap().unwrap_err().to_string(),
+        format!(
+            "reconcile faults: daemon/{} start-completion:{first}: panicked: fixture completion application panic",
+            reconciler.host
+        )
+    );
+    workers_done(&reconciler).await;
+}
+
+#[tokio::test]
+async fn start_results_are_adopted_while_the_broad_pass_is_held() {
+    for (stale, ended) in [(false, false), (true, false), (false, true)] {
+        // A superseded producer deliberately ignores its launch guard, so this
+        // exercises refusal at completion application, not just before launch.
+        let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, !stale);
+        runtime.end_before_result.store(ended, Ordering::Release);
+        let subject = "agent/example/worker";
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; one-shot }",
+            "prompt-start-adoption",
+        );
+        assert!(launch(&reconciler, subject));
+        tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+        let operation = store.runtime_start_for(subject).unwrap().unwrap();
+        assert!(operation.body["member"]["driver"].is_null(), "this must cover command-only seats");
+        assert_eq!(operation.body["member"]["one_shot"], true);
+        let (pass_entered, mut pass_entered_rx) = mpsc::unbounded_channel();
+        let (pass_release, pass_held) = std::sync::mpsc::channel();
+        // Release even on an assertion failure: no blocked worker leaks out of the test.
+        let pass_release = ReleaseOnDrop(pass_release);
+        *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(move || {
+            pass_entered.send(()).unwrap();
+            pass_held.recv().unwrap();
+        }));
+        let pass_reconciler = reconciler.clone();
+        let pass = tokio::spawn(async move {
+            pass_reconciler.blocking(|this| this.reconcile_once()).await
+        });
+        let completion_reconciler = reconciler.clone();
+        let task = tokio::spawn(async move { completion_reconciler.consume_start_results().await });
+        tokio::time::timeout(Duration::from_secs(5), pass_entered_rx.recv()).await.unwrap().unwrap();
+        if stale {
+            apply_source(&store, "version 2\nstop \"agent/example/worker\"", "stale-start-adoption");
+        }
+        release.0.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let applied = store.runtime_start_for(subject).unwrap().is_none_or(|start| start.applied);
+                let adopted = store.latest_observation(subject, "runtime.observed").unwrap()
+                    .is_some_and(|claim| claim.body["fields"]["adopted"] == true);
+                if applied && (stale || adopted) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("start-result adoption waited for the held broad pass");
+        let succeeded = store.observations_for(subject, "runtime.action.succeeded").unwrap();
+        assert_eq!(succeeded.len(), usize::from(!stale));
+        if !stale {
+            assert_eq!(succeeded[0].body["fields"]["operation"], operation.id);
+            let observed = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+            assert_eq!(observed.body["fields"]["incarnation_id"], "blocked-start-incarnation");
+            assert_eq!(observed.body["fields"]["adopted"], true);
+            assert_eq!(observed.body["fields"]["status"], if ended { "exited" } else { "running" });
+            if ended {
+                assert_eq!(observed.body["fields"]["exit_code"], 23);
+            }
+        } else {
+            assert!(!store.observations_for(subject, "runtime.observed").unwrap().iter()
+                .any(|claim| claim.body["fields"]["adopted"] == true));
+        }
+        // The same signal and the broad pass's start stage are both idempotent.
+        let before = store.observations_for(subject, "runtime.observed").unwrap().len();
+        assert!(!reconciler.apply_start_result(&operation.id, subject).unwrap());
+        reconciler.reconcile_start_jobs().unwrap();
+        assert_eq!(store.observations_for(subject, "runtime.observed").unwrap().len(), before);
+        assert_eq!(store.observations_for(subject, "runtime.action.succeeded").unwrap().len(), succeeded.len());
+        task.abort();
+        let _ = task.await;
+        pass_release.0.send(()).unwrap();
+        pass.await.unwrap().unwrap();
+        workers_done(&reconciler).await;
+    }
 }
 
     #[tokio::test]
@@ -703,6 +997,7 @@ agent "example/worker" { workspace "/tmp"; command "true" }
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        end_before_result: AtomicBool::new(false),
         closed_operation: std::sync::OnceLock::new(),
     });
     let notify = Arc::new(Notify::new());
@@ -1462,6 +1757,7 @@ async fn missing_or_repaired_original_request_prevents_real_native_start() {
             .environment
             .insert(start_jobs::OPERATION_ENV.into(), id.clone());
         let prepared = start_jobs::PreparedStart {
+            workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
             subject: desired.clone(),
             launch_member: member.clone(),
             member,
@@ -1559,13 +1855,18 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             Arc::new(Notify::new()),
         );
         // Exercise NativeRuntime's producer boundary directly through the durable jobs.
-        // The ordinary exec member preparation wraps its command in the st3 driver;
+        // The ordinary exec member preparation wraps its command in the Fractal driver;
         // a missing command inside that wrapper is a later readiness failure.
-        let dispatch = |desired: &DesiredSubject| {
+        let dispatch = |desired: &DesiredSubject, missing_cwd: bool| {
             let member = desired.member.as_ref().unwrap().clone();
+            let mut launch_member = member.clone();
+            if missing_cwd {
+                launch_member.cwd = root.path().join("missing-cwd").display().to_string();
+            }
             reconciler.dispatch_start(start_jobs::PreparedStart {
+                workspace_admission: None,
                 subject: desired.clone(),
-                launch_member: member.clone(),
+                launch_member,
                 member,
                 reason: "native producer closure regression".into(),
                 request: None,
@@ -1580,11 +1881,9 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
                 resume_operation: None,
             })
         };
-        let cwd = if failure == "missing-cwd" {
-            root.path().join("missing-cwd")
-        } else {
-            root.path().to_owned()
-        };
+        // Keep the admitted workspace valid; only the backend launch cwd is
+        // missing, so this exercises NativeRuntime's producer-closure boundary.
+        let cwd = root.path().to_owned();
         let program = if failure == "missing-program" {
             format!("missing-native-program-{}", uuid::Uuid::new_v4())
         } else {
@@ -1603,7 +1902,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             .desired_subjects_named(&["exec/example/rejected".into()])
             .unwrap()
             .remove(0);
-        let rejected = dispatch(&desired);
+        let rejected = dispatch(&desired, failure == "missing-cwd");
         assert!(rejected.is_err(), "{failure}: {rejected:?}");
         assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
         let result: String = store
@@ -1648,7 +1947,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             .desired_subjects_named(&["exec/example/rejected".into()])
             .unwrap()
             .remove(0);
-        assert!(dispatch(&desired).unwrap());
+        assert!(dispatch(&desired, false).unwrap());
         assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
         let observation = runtime
             .observe_exec(&desired.member.as_ref().unwrap().runtime_id)
@@ -1721,6 +2020,7 @@ fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
     let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry), &pty));
     let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
     let result = reconciler.dispatch_start(start_jobs::PreparedStart {
+        workspace_admission: None,
         subject: desired.clone(), launch_member: member.clone(), member,
         reason: "foreign PTY prelaunch regression".into(), request: None,
         desired_token: reconciler.launch_token(&desired.subject).unwrap(),
@@ -1798,7 +2098,7 @@ fn native_rollout_guard_rejection_proves_no_producer_was_created() {
     let runtime = NativeRuntime::new(&state, None, &pty);
     let guard_called = AtomicBool::new(false);
     let error = runtime
-        .start_guarded(&member, &|| {
+        .start_guarded(&member, Some(&fractal_runtime::LaunchOperation(member.tags[start_jobs::OPERATION_TAG].clone())), &|| {
             guard_called.store(true, Ordering::Release);
             anyhow::bail!("declaration changed before launch")
         })
@@ -1857,7 +2157,7 @@ fn native_pty_publication_guard_after_a_launcher_does_not_prove_producer_closure
     let runtime = NativeRuntime::new(&state, None, &pty);
     let guards = std::sync::atomic::AtomicUsize::new(0);
     let error = runtime
-        .start_guarded(&member, &|| {
+        .start_guarded(&member, Some(&fractal_runtime::LaunchOperation(member.tags[start_jobs::OPERATION_TAG].clone())), &|| {
             guards.fetch_add(1, Ordering::Relaxed);
             anyhow::ensure!(
                 !called.exists(),
@@ -1924,7 +2224,7 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
         let state = root.path().join("state");
         std::fs::create_dir(&state).unwrap();
         let runtime = NativeRuntime::new(&state, None, &pty);
-        let error = runtime.start_guarded(&member, &|| Ok(())).unwrap_err();
+        let error = runtime.start_guarded(&member, Some(&fractal_runtime::LaunchOperation("pty-operation".into())), &|| Ok(())).unwrap_err();
         assert_eq!(
             error.downcast_ref::<fractal_runtime::StartRejected>().is_some(),
             rejected,
@@ -2045,6 +2345,7 @@ exit 1
             format!("{}:${{PATH}}", self.root.path().join("bin").display()),
         );
         self.reconciler.dispatch_start(start_jobs::PreparedStart {
+            workspace_admission: None,
             subject: self.desired.clone(),
             member,
             launch_member,
@@ -2296,6 +2597,7 @@ fn native_scoped_pidless_start_retires_only_after_its_producer_scope_is_empty() 
         let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
             Arc::new(Notify::new()));
         assert!(reconciler.dispatch_start(start_jobs::PreparedStart {
+            workspace_admission: None,
             subject: desired.clone(), launch_member: member.clone(), member,
             reason: "native pidless scope regression".into(), request: None,
             desired_token: reconciler.launch_token(&desired.subject).unwrap(),
@@ -2337,6 +2639,154 @@ fn native_scoped_pidless_start_retires_only_after_its_producer_scope_is_empty() 
 }
 
 #[test]
+fn recovered_queued_workspace_refusals_retire_without_entering_the_backend() {
+    for kind in ["agent", "exec"] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.db"), "node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\n{kind} \"example/recovery\" {{ workspace {:?}; command \"true\" }}",
+            workspace.display().to_string(),
+        ), "refused-recovery");
+        let desired = store.desired_subjects_named(&[format!("{kind}/example/recovery")])
+            .unwrap().remove(0);
+        let member = desired.member.as_ref().unwrap().clone();
+        let prepared = start_jobs::PreparedStart {
+            workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
+            subject: desired.clone(),
+            launch_member: member.clone(),
+            member,
+            reason: "workspace refusal recovery regression".into(),
+            request: None,
+            desired_token: "refused-recovery".into(),
+            selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+            placement_evidence: Vec::new(),
+            start_request: String::new(),
+            start_request_receipt: None,
+            control_request: None,
+            control_request_receipt: None,
+            expected_incarnation: None,
+            resume_operation: None,
+        };
+        let mut operation = crate::store::RuntimeStartOperation {
+            id: uuid::Uuid::now_v7().to_string(),
+            subject: desired.subject.clone(),
+            owner: "previous-owner".into(),
+            body: serde_json::to_value(prepared).unwrap(),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        assert_eq!(store.admit_runtime_start(&mut operation, 2).unwrap(),
+            crate::store::RuntimeStartAdmission::Admitted);
+        std::fs::remove_dir(&workspace).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none(),
+            "{kind}: missing workspace must apply the queued cancellation in the same pass");
+        assert!(runtime.starts.lock().unwrap().is_empty());
+        let result: String = store.readers.get().query_row(
+            "SELECT result FROM local_runtime_starts WHERE id=?1",
+            [&operation.id], |row| row.get(0),
+        ).unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["closure_kind"], "never-dispatched");
+        assert_eq!(result["producer_closed"], true);
+        let (diagnostic_kind, field) = if kind == "agent" {
+            ("harness.diagnostic", "code")
+        } else {
+            ("runtime.reconcile-decision", "decision")
+        };
+        let diagnostic = store.latest_observation(&desired.subject, diagnostic_kind)
+            .unwrap().unwrap();
+        assert_eq!(diagnostic.body["fields"][field], "start-workspace-refused");
+    }
+}
+
+#[test]
+fn gate_workspace_refusal_retires_even_after_a_stop() {
+    for stopped in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.db"), "node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nexec \"example/gate-fixture\" {{ workspace {:?}; command \"true\" }}",
+            workspace.display().to_string(),
+        ), "gate-refusal");
+        let mut desired = store.desired_subjects_named(&["exec/example/gate-fixture".into()])
+            .unwrap().remove(0);
+        desired.subject = "gate-operation/workspace-refusal".into();
+        desired.kind = "gate".into();
+        desired.desired = Value::Null;
+        let member = desired.member.as_ref().unwrap().clone();
+        let prepared = start_jobs::PreparedStart {
+            workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
+            subject: desired.clone(), launch_member: member.clone(), member,
+            reason: "gate workspace refusal".into(), request: None,
+            desired_token: "gate-fixture".into(), selected_token: None,
+            placement_evidence: Vec::new(), start_request: String::new(),
+            start_request_receipt: None, control_request: None, control_request_receipt: None,
+            expected_incarnation: None, resume_operation: None,
+        };
+        let mut operation = crate::store::RuntimeStartOperation {
+            id: uuid::Uuid::now_v7().to_string(), subject: desired.subject.clone(),
+            owner: "previous-owner".into(), body: serde_json::to_value(prepared).unwrap(),
+            revoked_by: None, finished: false, result: None, applied: false,
+            cleanup_verified: false, dispatched: false, receipted: false,
+        };
+        assert_eq!(store.admit_runtime_start(&mut operation, 2).unwrap(),
+            crate::store::RuntimeStartAdmission::Admitted);
+        // This registered gate family permits lifecycle control but not the
+        // diagnostic whose rejection must never block producer retirement.
+        let refused_diagnostic = store.append_claim(&ClaimInput {
+            subject: desired.subject.clone(), kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("key".into(), Value::from(format!("start-workspace-refused:{}", operation.id))),
+                ("decision".into(), Value::from("start-workspace-refused")),
+                ("reason".into(), Value::from("the gate workspace is unavailable")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap_err();
+        assert_eq!(refused_diagnostic.code, "invalid-claim-subject");
+        if stopped {
+            let stop = store.append_claim(&ClaimInput {
+                subject: desired.subject.clone(), kind: "runtime.action.requested".into(),
+                actor: Some("person/operator".into()),
+                fields: BTreeMap::from([("action".into(), Value::from("stop"))]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.revoke_runtime_start(&operation.id, &stop.id).unwrap();
+        }
+        std::fs::remove_dir(&workspace).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none(),
+            "workspace refusal must not strand a gate producer, stopped={stopped}");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        let result: String = store.readers.get().query_row(
+            "SELECT result FROM local_runtime_starts WHERE id=?1",
+            [&operation.id], |row| row.get(0),
+        ).unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["closure_kind"], "never-dispatched");
+        assert_eq!(result["producer_closed"], true);
+    }
+}
+
+#[test]
 fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
     for kind in ["before-backend", "native-rejection", "never-dispatched"] {
         for change in [
@@ -2359,6 +2809,7 @@ fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
             let runtime_id = member.runtime_id.clone();
             let id = uuid::Uuid::now_v7().to_string();
             let prepared = start_jobs::PreparedStart {
+                workspace_admission: Some(start_jobs::WorkspaceAdmission::NonGit),
                 subject: desired.clone(),
                 member: member.clone(),
                 launch_member: member,
@@ -2502,4 +2953,108 @@ fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
             assert_eq!(ptys[0].status, "running");
         }
     }
+}
+
+#[tokio::test]
+async fn host_executor_duplicate_command_retains_the_original_durable_receipt() {
+    let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let subject = "agent/example/queued";
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "executor-duplicate");
+    assert!(launch(&reconciler, subject));
+    workers_done(&reconciler).await;
+    let completed = store.runtime_start_for(subject).unwrap().unwrap();
+    assert!(completed.finished);
+    let before = completed.result.clone().unwrap();
+    let starts = runtime.inner.starts.lock().unwrap().len();
+    let _lock = store.try_runtime_start_lock(subject).unwrap().unwrap();
+    let command = host_executor::StartCommand::recovered(&completed, completed.owner.clone()).unwrap();
+    assert!(host_executor::StartCommand::admit(&store, completed, start_jobs::MAX_START_JOBS)
+        .unwrap().is_none());
+    assert!(matches!(
+        command.dispatch(&store, runtime.as_ref(), &reconciler.host_observations, 0).unwrap(),
+        host_executor::StartReceipt::Persisted,
+    ));
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), starts);
+    assert_eq!(store.runtime_start_for(subject).unwrap().unwrap().result, Some(before));
+}
+
+#[tokio::test]
+async fn host_executor_cancel_before_physical_admission_survives_restart_and_stale_dispatch() {
+    let (directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let subject = "agent/example/queued";
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "executor-cancel");
+    store.set_launch_freeze("person/operator", "activation", "hold physical admission", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, subject));
+    let queued = store.runtime_start_for(subject).unwrap().unwrap();
+    assert!(!queued.dispatched);
+    reconciler.revoke_start(subject).unwrap();
+    drop(reconciler);
+    let reopened = Arc::new(Store::open(&directory.path().join("claims.db"), "node").unwrap());
+    reopened.clear_launch_freeze("person/operator", "activation").unwrap();
+    let restarted = Arc::new(Reconciler::new(
+        reopened.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    ));
+    restarted.wait_for_test_starts.store(false, Ordering::Release);
+    // The caller deliberately holds an old immutable command snapshot. The journal, not
+    // that snapshot or the new daemon owner, decides whether it may enter a backend.
+    restarted.start_queued_job(&queued).unwrap();
+    workers_done(&restarted).await;
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+    assert!(runtime.inner.stops.lock().unwrap().is_empty());
+    assert!(runtime.inner.kills.lock().unwrap().is_empty());
+    let result: String = reopened.readers.get().query_row(
+        "SELECT result FROM local_runtime_starts WHERE id=?1",
+        [&queued.id], |row| row.get(0),
+    ).unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["closure_kind"], "never-dispatched");
+    assert_eq!(result["producer_closed"], true);
+}
+
+#[tokio::test]
+async fn host_executor_cancel_before_durable_admission_preserves_failed_start_custody() {
+    let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    let subject = "agent/example/queued";
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "executor-cancel-admission");
+    store.set_launch_freeze("person/operator", "activation", "hold physical admission", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, subject));
+    let mut replacement = store.runtime_start_for(subject).unwrap().unwrap();
+    let failed_id = replacement.id.clone();
+    store.finish_runtime_start(&failed_id,
+        &serde_json::json!({"error": "unverified failure", "producer_closed": false})).unwrap();
+    store.runtime_start_applied(&failed_id).unwrap();
+    let restart = store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "runtime.action.requested".into(),
+        actor: Some("person/example".into()),
+        fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+        evidence: store.selected_desired_token(subject).unwrap().into_iter().collect(),
+        expected_subject: None, idempotency_key: Some("executor-stale-restart".into()),
+    }).unwrap();
+    replacement.id = uuid::Uuid::now_v7().to_string();
+    replacement.body["request"] = serde_json::to_value(&restart).unwrap();
+    replacement.body["stale_failed_start"] = Value::from(failed_id.clone());
+    store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "runtime.action.requested".into(), actor: None,
+        fields: BTreeMap::from([
+            ("action".into(), Value::from("terminate")),
+            ("runtime_id".into(), replacement.body["member"]["runtime_id"].clone()),
+            ("terminal".into(), replacement.body["member"]["terminal"].clone()),
+        ]),
+        evidence: vec![restart.id.clone()], expected_subject: None,
+        idempotency_key: Some("executor-cancel-before-admission".into()),
+    }).unwrap();
+    assert!(host_executor::StartCommand::admit(&store, replacement, start_jobs::MAX_START_JOBS)
+        .unwrap().is_none());
+    let retained = store.runtime_start_for(subject).unwrap().unwrap();
+    assert_eq!(retained.id, failed_id);
+    assert!(!retained.cleanup_verified);
+    assert!(store.operation_claim(&format!("agent-restart-attempt:{}", restart.id)).unwrap().is_none());
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
 }

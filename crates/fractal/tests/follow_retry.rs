@@ -13,17 +13,23 @@ const RUN: &str = "mission-run/example/follow-fixture";
 const RUN_PATH: &str = "/v1/mission-runs/mission-run%2Fexample%2Ffollow-fixture";
 const TREE_PATH: &str =
     "/v1/mission-runs/tree?root=mission-run%2Fexample%2Ffollow-fixture&limit=50";
+const SOURCE_PATH: &str =
+    "/v1/claims?subject=mission%2Fexample%2Ffollow-fixture%40fixture&kind=mission.provenance&order=asc&limit=1";
+const CREATED_PATH: &str =
+    "/v1/claims?subject=mission-run%2Fexample%2Ffollow-fixture&kind=mission-run.created&order=asc&limit=1";
 
 enum Reply {
     Value(Value),
     Error(u16),
     CursorGap,
+    Restart,
 }
 
 async fn scripted_cli(args: &[&str], script: Vec<(String, Reply)>) -> Output {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let mut listener = UnixListener::bind(&socket).unwrap();
+    let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         for (expected, reply) in script {
             let (mut caller, _) = listener.accept().await.unwrap();
@@ -38,6 +44,15 @@ async fn scripted_cli(args: &[&str], script: Vec<(String, Reply)>) -> Output {
                 request.lines().next().unwrap(),
                 format!("GET {expected} HTTP/1.1")
             );
+            if matches!(reply, Reply::Restart) {
+                // Tear down the in-flight wait and the listening socket, then
+                // replace the daemon at the same endpoint without a timer.
+                drop(caller);
+                drop(listener);
+                std::fs::remove_file(&server_socket).unwrap();
+                listener = UnixListener::bind(&server_socket).unwrap();
+                continue;
+            }
             let (status, body) = match reply {
                 Reply::Value(value) => (
                     200,
@@ -59,6 +74,7 @@ async fn scripted_cli(args: &[&str], script: Vec<(String, Reply)>) -> Output {
                         "details":{"resume_floor":30,"frontier":50,"full_resync":true}
                     }),
                 ),
+                Reply::Restart => unreachable!("restart handled before writing a response"),
             };
             let body = serde_json::to_vec(&body).unwrap();
             caller.write_all(format!(
@@ -97,6 +113,7 @@ fn run(status: &str, phase: &str) -> Value {
         "generation": "run-generation/fixture", "initial_revision": "fixture", "revision": "fixture",
         "root_revision": "fixture", "root_mission_run": RUN, "workspace": "/tmp/follow-fixture",
         "requester": "person/avery", "mode": "run", "status": status, "phase": phase,
+        "inputs": {},
         "created_at_unix_ms": 0, "updated_at_unix_ms": 0, "steps": [],
     })
 }
@@ -175,9 +192,12 @@ async fn follow_auth_not_found_and_validation_errors_stop_at_once() {
         )
         .await;
         assert_refusal(&output, 0);
-        for path in [RUN_PATH, TREE_PATH] {
-            let mut script = vec![(RUN_PATH.into(), Reply::Value(run("running", "normal")))];
-            if path == RUN_PATH {
+        for path in [RUN_PATH, TREE_PATH, SOURCE_PATH, CREATED_PATH] {
+            let mut script = vec![
+                ("/v1/health".into(), Reply::Value(json!({"store_index":10}))),
+                (RUN_PATH.into(), Reply::Value(run("running", "normal"))),
+            ];
+            if path != TREE_PATH {
                 script.push((
                     TREE_PATH.into(),
                     Reply::Value(json!({
@@ -188,9 +208,108 @@ async fn follow_auth_not_found_and_validation_errors_stop_at_once() {
                     })),
                 ));
             }
+            if path == RUN_PATH || path == CREATED_PATH {
+                script.push((SOURCE_PATH.into(), Reply::Value(json!({
+                    "claims": [], "next_cursor": null,
+                }))));
+            }
+            if path == RUN_PATH {
+                script.push((CREATED_PATH.into(), Reply::Value(json!({
+                    "claims": [], "next_cursor": null,
+                }))));
+                script.push((
+                    "/v1/events/page?after=10&wait=true&timeout_ms=30000".into(),
+                    Reply::Value(json!({
+                        "items":[{"store_index":11,"kind":"mission-run.state","subject":RUN,"body":{}}],
+                        "next_after":11,
+                    })),
+                ));
+            }
             script.push((path.into(), Reply::Error(status)));
             let output = scripted_cli(&["missions", "show", RUN, "--follow"], script).await;
             assert_refusal(&output, 0);
         }
     }
+}
+
+#[tokio::test]
+async fn mission_follow_preserves_terminal_exit_codes_and_json_output() {
+    for status in ["completed", "standing", "failed", "cancelled"] {
+        for json_output in [false, true] {
+            let running = run("running", "normal");
+            let terminal = run(status, "normal");
+            let mut script = vec![
+                ("/v1/health".into(), Reply::Value(json!({"store_index":10}))),
+                (RUN_PATH.into(), Reply::Value(running.clone())),
+            ];
+            if !json_output {
+                script.push((TREE_PATH.into(), Reply::Value(json!({
+                    "runs":[running], "has_more":false, "next_cursor":null, "frontier":10,
+                }))));
+                script.push((SOURCE_PATH.into(), Reply::Value(json!({
+                    "claims": [], "next_cursor": null,
+                }))));
+                script.push((CREATED_PATH.into(), Reply::Value(json!({
+                    "claims": [], "next_cursor": null,
+                }))));
+            }
+            script.extend([
+                (
+                    "/v1/events/page?after=10&wait=true&timeout_ms=30000".into(),
+                    Reply::Value(json!({
+                        "items":[{"store_index":11,"kind":"mission-run.state","subject":RUN,"body":{}}],
+                        "next_after":11,
+                    })),
+                ),
+                (RUN_PATH.into(), Reply::Value(terminal.clone())),
+            ]);
+            if !json_output {
+                script.push((TREE_PATH.into(), Reply::Value(json!({
+                    "runs":[terminal], "has_more":false, "next_cursor":null, "frontier":11,
+                }))));
+            }
+            let args = if json_output {
+                vec!["--json", "missions", "show", RUN, "--follow"]
+            } else {
+                vec!["missions", "show", RUN, "--follow"]
+            };
+            let output = scripted_cli(&args, script).await;
+            let success = matches!(status, "completed" | "standing");
+            assert_eq!(output.status.code(), Some(if success { 0 } else { 2 }), "{}", stderr(&output));
+            if json_output && success {
+                assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), terminal);
+            } else if json_output {
+                assert!(output.stdout.is_empty());
+            }
+            if !success {
+                assert!(stderr(&output).contains(&format!("mission run {RUN} is {status}")));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn mission_follow_reconnects_after_the_daemon_socket_is_replaced() {
+    let terminal = run("completed", "normal");
+    let event_path = "/v1/events/page?after=10&wait=true&timeout_ms=30000";
+    let output = scripted_cli(
+        &["--json", "missions", "show", RUN, "--follow"],
+        vec![
+            ("/v1/health".into(), Reply::Value(json!({"store_index":10}))),
+            (RUN_PATH.into(), Reply::Value(run("running", "normal"))),
+            (event_path.into(), Reply::Restart),
+            (
+                event_path.into(),
+                Reply::Value(json!({
+                    "items":[{"store_index":11,"kind":"mission-run.state","subject":RUN,"body":{}}],
+                    "next_after":11,
+                })),
+            ),
+            (RUN_PATH.into(), Reply::Value(terminal.clone())),
+        ],
+    ).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), terminal);
+    assert!(stderr(&output).contains("follow gap:"));
+    assert!(stderr(&output).contains("follow recovered after"));
 }

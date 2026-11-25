@@ -12,6 +12,8 @@ use crate::peer::{ClientRelay, ReceivedSeatFreshness, SEAT_FRESHNESS_FEATURE, Se
 use crate::peer::{MessageMarksAnswer, MessageMarksAnswers, ReceivedSeatFreshnessRead, RelayedMark, SeatFreshnessRead};
 use crate::store::RelayedFreshness;
 
+mod message_mark_events;
+
 /// After a commit wakes the pusher, how long it gathers further commits before one round.
 pub const SEAT_FRESHNESS_COALESCE: Duration = Duration::from_secs(10);
 /// How long one member may take to accept a push before this round moves on without it.
@@ -34,12 +36,8 @@ pub async fn seat_freshness(
         .map_err(|error| validation(format!("{error:#}")))?;
     let store = state.store.clone();
     blocking_store(move || {
-        let hosted = store
-            .desired_subjects()?
-            .into_iter()
-            .filter(|desired| desired.member.as_ref().is_some_and(|member| member.host == received.from))
-            .map(|desired| desired.subject)
-            .collect::<BTreeSet<_>>();
+        let subjects = received.seats.iter().map(|seat| seat.agent.as_str()).collect::<Vec<_>>();
+        let hosted = store.hosted_subjects(&subjects, &received.from)?;
         // A host's clock may run ahead: a time past this node's now plus a minute is taken as
         // that, so a skewed clock cannot keep a seat looking fresh.
         let latest = smallclaims::store::now_ms() + SEAT_FRESHNESS_CLOCK_SKEW.as_millis();
@@ -68,22 +66,14 @@ pub async fn seat_freshness_read(
         .read
         .validate()
         .map_err(|error| validation(format!("{error:#}")))?;
+    if let SeatFreshnessRead::MessageMarkEvents { cursor, max } = &received.read {
+        return message_mark_events::read(&state.store, cursor.as_deref(), *max).await.map(Json);
+    }
     let store = state.store.clone();
     blocking_store(move || {
-        let hosted = store
-            .desired_subjects()?
-            .into_iter()
-            .filter(|desired| {
-                desired
-                    .member
-                    .as_ref()
-                    .is_some_and(|member| member.host == store.origin())
-            })
-            .map(|desired| desired.subject)
-            .collect::<BTreeSet<_>>();
         match received.read {
             SeatFreshnessRead::MessageMarks { messages } => {
-                let answers = crate::store::message_marks::host_marks(&store, &messages, &hosted)?;
+                let answers = crate::store::message_marks::host_marks(&store, &messages)?;
                 let messages = messages
                     .into_iter()
                     .zip(answers)
@@ -103,6 +93,7 @@ pub async fn seat_freshness_read(
                     .collect();
                 Ok(serde_json::to_value(MessageMarksAnswers { messages })?)
             }
+            SeatFreshnessRead::MessageMarkEvents { .. } => unreachable!("event reads wait outside the blocking store"),
         }
     })
     .await
@@ -279,7 +270,7 @@ pub async fn push_seat_freshness(
                 round.unreachable.insert(member);
             }
             Err(error) => {
-                eprintln!("st3: seat freshness to {member}: {error:#}");
+                eprintln!("fractal: seat freshness to {member}: {error:#}");
                 round.failed.insert(member);
             }
         }
@@ -324,14 +315,14 @@ impl Default for SeatFreshnessPace {
     }
 }
 
-/// Push this node's seats' freshness to the other members whenever it commits, in rounds at
-/// least [`SEAT_FRESHNESS_COALESCE`] apart. A round that failed a member, or left a seat owed, is
-/// retried after [`SEAT_FRESHNESS_RETRY`] even with no new commit, then less often.
+/// Push this node's seats' freshness when local reports, declarations or peer authority
+/// change, in rounds at least [`SEAT_FRESHNESS_COALESCE`] apart. A round that failed a member,
+/// or left a seat owed, is retried after [`SEAT_FRESHNESS_RETRY`] even with no new commit.
 pub fn start_seat_freshness_push(state: &AppState) {
     let Some(relay) = state.client_relay.clone() else {
         // Not in a fleet: no other member reads this node's re-stamps.
         if let Err(error) = state.store.set_fleet_hears_seats(true) {
-            eprintln!("st3: seat freshness: {error:#}");
+            eprintln!("fractal: seat freshness: {error:#}");
         }
         return;
     };
@@ -343,7 +334,12 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
     let wake = Arc::new(tokio::sync::Notify::new());
     let observer = {
         let wake = Arc::clone(&wake);
-        store.observe_commits(move |_| wake.notify_one())
+        store.observe_tables(&[
+            "local_observations", "desired", "claims", "claim_positions",
+            "batches", "replica_records", "replica_envelopes", "released_envelopes",
+            "claim_verdicts", "claim_signature_judging", "claim_verdict_queue",
+            "replica_envelope_signatures", "replica_restore_quarantine",
+        ], move |_| wake.notify_one())
     };
     tokio::spawn(crate::task_cpu::account("seat_freshness.push", async move {
         let _observer = observer;
@@ -379,7 +375,7 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
                     !round.failed.is_empty() || !round.owed.is_empty()
                 }
                 Err(error) => {
-                    eprintln!("st3: seat freshness push failed: {error:#}");
+                    eprintln!("fractal: seat freshness push failed: {error:#}");
                     true
                 }
             };
@@ -394,7 +390,7 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
                 .await
             };
             if let Err(error) = flag.map_err(anyhow::Error::from).and_then(|result| result) {
-                eprintln!("st3: seat freshness: {error:#}");
+                eprintln!("fractal: seat freshness: {error:#}");
             }
             retry = again.then(|| retry.map_or(pace.retry, |after| (after * 2).min(pace.longest_retry)));
         }

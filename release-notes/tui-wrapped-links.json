@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the full link target clickable across wrapped request, agent, conversation and Markdown content in Fractal TUI",
+  "replay": {"status": "none", "detail": "Rendering only; no replay."},
+  "schema": {"status": "none", "detail": "No client-v0 schema or generated client changes."},
+  "rules": {"status": "none", "detail": "No authoring or runtime policy changes."},
+  "compatibility": {"status": "none", "detail": "Visible text and card layout are unchanged. OSC 8 segments share an explicit ID and full target; terminals without OSC 8 retain ordinary text and app click-to-copy."},
+  "downtime": {"status": "none", "detail": "No restart-time work."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Revert the rendering change; no stored data changes."}
+}

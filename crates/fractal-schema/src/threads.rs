@@ -8,7 +8,7 @@ pub const READ_PRIVACY_VERSION: u32 = 3;
 // A causal reader's same-store floor prevents a timestamp-only binary reopening that store.
 // Fleet readiness remains a separate prerequisite: this floor cannot stop a fresh old peer.
 const _: () =
-    assert!(!read_privacy_supports_writes(READ_PRIVACY_VERSION) || super::STORAGE_VERSION >= 23);
+    assert!(!read_privacy_supports_writes(READ_PRIVACY_VERSION) || super::STORAGE_VERSION >= 28);
 
 pub const fn read_privacy_supports_writes(version: u32) -> bool {
     version >= 3

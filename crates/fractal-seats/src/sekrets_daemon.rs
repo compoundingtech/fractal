@@ -30,8 +30,8 @@ pub fn seat_for_scope(pty_root: &Path, scope: &str) -> Result<Option<String>, Fr
         .and_then(|observation| observation.tags.get("st3.subject").cloned()))
 }
 
-/// The seat whose terminal st started in `scope`, read from that one terminal's registry file.
-/// st names a terminal's scope `st3-ID-PID-SEQ.scope` after the terminal's ID, so a busy host
+/// The seat whose terminal Fractal started in `scope`, read from that one terminal's registry file.
+/// Fractal names a terminal's scope `st3-ID-PID-SEQ.scope` after the terminal's ID, so a busy host
 /// with hundreds of terminals answers without reading them all. The file must name this scope,
 /// and its PTY daemon must still be alive.
 fn seat_from_registry_file(pty_root: &Path, scope: &str) -> Option<String> {
@@ -236,7 +236,7 @@ pub fn spawn_importer(
                     Ok(()) => {}
                     Err(error) => {
                         if !reported {
-                            eprintln!("st3: sekrets: cannot record the gateway's log: {error:#}");
+                            eprintln!("fractal: sekrets: cannot record the gateway's log: {error:#}");
                             reported = true;
                         }
                         std::thread::sleep(std::time::Duration::from_secs(30));
@@ -297,7 +297,7 @@ fn import_entries(
                     return Err(error.into());
                 }
                 Err(error) => eprintln!(
-                    "st3: sekrets: skipped gateway log entry {}: {error:#}",
+                    "fractal: sekrets: skipped gateway log entry {}: {error:#}",
                     entry.seq
                 ),
             }

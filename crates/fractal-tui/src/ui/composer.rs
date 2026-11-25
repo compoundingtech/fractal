@@ -1,6 +1,6 @@
 //! The text and focus treatment shared by conversation composers.
 
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 
 use super::{edit, text, theme};
 

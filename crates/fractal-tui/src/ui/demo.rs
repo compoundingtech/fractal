@@ -148,10 +148,10 @@ pub(super) fn loading_from(mut world: World) -> World {
     world
 }
 
-pub fn terminal(owner: &str) -> Vec<ratatui::text::Line<'static>> {
+pub fn terminal(owner: &str) -> Vec<fractal_conversation_ui::text::Line<'static>> {
     match load().unwrap_or_else(|error| panic!("Cannot open scenario demo: {error:#}")).terminals.remove(owner) {
-        Some(screen) => screen.lines.into_iter().map(|line| ratatui::text::Line::raw(line.text)).collect(),
-        None => vec![ratatui::text::Line::raw("This scenario has no recorded terminal for this subject.")],
+        Some(screen) => screen.lines.into_iter().map(|line| fractal_conversation_ui::text::Line::raw(line.text)).collect(),
+        None => vec![fractal_conversation_ui::text::Line::raw("This scenario has no recorded terminal for this subject.")],
     }
 }
 

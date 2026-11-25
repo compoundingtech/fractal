@@ -1,21 +1,21 @@
 //! Permanent deletion knowledge, kept apart from the checkpoint tables that record it today.
 //!
 //! `retired_claim_ids` and `retired_envelopes` are exact identity sets: every claim ID and
-//! envelope identity a checkpoint table has ever held, whatever later happens to that table's
-//! row. Adoption keeps only an adopted manifest's tombstones and deletes the rest
-//! (`keep_only_tombstones_tx`), so the checkpoint tables can forget a deletion; this ledger does
-//! not. Such a withdrawal is labeled in `retired_*_withdrawals` with the checkpoint that recorded
-//! it, because a withdrawn legacy recording is not by itself a committed deletion.
+//! envelope identity a checkpoint table has ever held, whatever later happens to that table's row.
+//! Adoption by older builds kept only an adopted manifest's tombstones and deleted the rest, so
+//! the checkpoint tables can have forgotten a deletion; this ledger does not. Such a withdrawal is
+//! labeled in `retired_*_withdrawals` with the checkpoint that recorded it, because a withdrawn
+//! legacy recording is not by itself a committed deletion.
 //!
-//! While a member trims locally (`[trim] local`) it adopts nothing, so nothing is withdrawn, and
-//! the ledger is its authority: admission refuses a retired identity, the inventory lists it as
-//! held without payload so no peer sends it, and it is served to no peer. Becoming the authority
-//! judges the ledger once (`judge_tx`): what adoption withdrew, or only an uncommitted checkpoint
+//! While a member trims (`[trim] local`, the default) nothing is withdrawn, and the ledger is its
+//! authority: admission refuses a retired identity, the inventory lists it as held without payload
+//! so no peer sends it, and it is served to no peer. Becoming the authority judges the ledger once
+//! (`judge_tx`): what an older build's adoption withdrew, or only an uncommitted checkpoint
 //! recorded, was never a deletion and leaves it. From then on the checkpoint tables no longer
 //! write it: each identity enters as it is deleted, in the deleting transaction, so a cut that is
 //! recorded but never trims teaches no peer to refuse what this member still holds. Otherwise the
-//! ledger only grows. An ordinary
-//! member's admission and every member's evidence still read the checkpoint tables.
+//! ledger only grows. A member with trimming off reads the checkpoint tables for admission, and
+//! every member's evidence still reads them.
 //!
 //! A SHA-256 identity, as 64 lowercase hex digits, is stored as its 32 bytes. Any other value is
 //! stored as the original TEXT: SQLite never equates a TEXT value with a BLOB, so the two forms
@@ -149,13 +149,18 @@ pub fn authoritative(connection: &Connection) -> Result<bool> {
 }
 
 /// Whether admission refuses this claim here: a checkpoint dropped it, or, where the ledger is
-/// the authority, it was ever deleted here or on a member this one learned it from.
+/// the authority, it was ever deleted here or on a member this one learned it from. A claim
+/// retired here only on a peer's word and never held is taken when a peer supplies it, so this
+/// member's own trim makes its tombstone (`retirement_wins`).
 pub fn claim_refused(connection: &Connection, id: &str) -> Result<bool> {
     Ok(checkpoint::claim_tombstoned(connection, id)?
-        || (authoritative(connection)? && claim_retired(connection, id)?))
+        || (authoritative(connection)?
+            && claim_retired(connection, id)?
+            && !super::retirement_wins::retired_unheld(connection, id)?))
 }
 
-/// Whether admission refuses this envelope here, by the same rule as `claim_refused`.
+/// Whether admission refuses this envelope here, by the same rule as `claim_refused`, or because
+/// this member released it (`envelope_release`): its identity already stands for it.
 pub fn envelope_refused(
     connection: &Connection,
     writer: &str,
@@ -163,6 +168,7 @@ pub fn envelope_refused(
     envelope_hash: &str,
 ) -> Result<bool> {
     Ok(checkpoint::envelope_tombstoned(connection, writer, sequence, envelope_hash)?
+        || super::envelope_release::envelope_released(connection, writer, sequence, envelope_hash)?
         || (authoritative(connection)?
             && envelope_retired(connection, writer, sequence, envelope_hash)?))
 }
@@ -408,7 +414,9 @@ impl Store {
         super::inventory_generation::bump(&transaction)?;
         transaction.commit()?;
         drop(connection);
-        self.replica_rows_changed();
+        // Authority changes admission and inventory, not live claims or their projections.
+        // In particular, the background startup import must not withdraw published views.
+        self.replica_inventory_changed();
         Ok(())
     }
 }

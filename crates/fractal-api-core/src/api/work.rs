@@ -2,7 +2,6 @@ use crate::AdhocWorkStore;
 use crate::MissionsStore;
 use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
-use crate::SeatsStoreCore;
 use super::*;
 use super::client_v0::{ClientSession, require_scope};
 
@@ -348,6 +347,15 @@ pub async fn wake_work(
             .ok_or_else(|| ApiError::internal("the wake operation message is unavailable"))?;
         return Ok(Json(message));
     }
+    // A wake that went to the stream is no graph operation; its subject names it.
+    if let Some(message) = crate::store::messages_shard::message_view(
+        &state.store,
+        &crate::reconcile::work_wake_subject(&request.idempotency_key),
+    )
+    .map_err(ApiError::internal)?
+    {
+        return Ok(Json(message));
+    }
     if step.status != "ready" {
         return Err(ApiError::bad(FractalError::new(
             "work-not-ready",
@@ -514,6 +522,8 @@ pub async fn publish_work_mission(
             format!("step `{}` does not declare produces-mission", step.step),
         ))
     })?;
+    let expected_mission =
+        crate::mission::resolve_produced_mission(expected_mission, &run.id).map_err(ApiError::bad)?;
 
     let initial = parse_intent(&request.intent.kdl, &state.node).map_err(ApiError::bad)?;
     if initial.missions.len() != 1 {
@@ -589,7 +599,7 @@ pub async fn publish_work_mission(
             &step.subject,
             &actor,
             request.incarnation.as_deref(),
-            expected_mission,
+            &expected_mission,
             mission,
             &format!("{}:bind", request.idempotency_key),
         )

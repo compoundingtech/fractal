@@ -143,7 +143,18 @@ impl Windows {
         let observed_store = store_key.clone();
         // Register before any snapshot. The callback does no SQL or publication; a shared
         // snapshot reader weighs bounded kind metadata once for all equivalent sockets.
-        let observer = store.observe_commits(move |_| {
+        let observer = store.observe_tables(&[
+            "claims", "claim_positions", "batches", "replica_records", "desired",
+            "identity_names", "identity_heads", "meta", "local_observations",
+            "mission_definitions", "mission_runs", "run_generations", "step_runs",
+            "planning_sessions", "revision_proposals", "read_positions",
+            "arrangements", "arrangement_registers", "ivm_heads", "ivm_contributions",
+            "local_agent_harness_rows", "projection_digest_repaired_claims",
+            "operations", "card_actual_revisions", "projection_health", "documents", "blobs",
+            "custom_sources", "local_host_holds", "local_latest_slots", "local_stop_deferral_backfill",
+            "mission_run_after", "mission_run_deadlines", "ordered_reassignments", "stop_deferral_claims",
+            "ordered_membership_counts",
+        ], move |_| {
             if let Some(windows) = weak.upgrade() {
                 let mut observed = windows
                     .observed
@@ -409,9 +420,6 @@ impl Windows {
         // Work uses its selected projection time. Missions and attention use exact
         // transition fences, not a coarse shared wall-clock bucket.
         let period = match request.collection.as_str() {
-            // Summary windows keep the shared wall-clock bucket; missions and attention
-            // above use exact transition fences instead.
-            "summary" | "summary-missions" => now / ATTENTION_CLOCK_INTERVAL.as_millis(),
             // Work's deterministic selected projection time is itself an input, even if a
             // claim kind does not otherwise change its rows (elapsed budgets/lease expiry).
             "work" => state.store.projection_time_at(index)?,

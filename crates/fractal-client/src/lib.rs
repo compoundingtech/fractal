@@ -784,7 +784,7 @@ impl CollectionStream {
     pub async fn close(mut self) {
         let _ = match &mut self.socket {
             TerminalSocket::Unix(socket) => socket.close(None).await,
-            TerminalSocket::Remote(socket) => socket.close(None).await,
+            TerminalSocket::Remote(socket) => socket.as_mut().close(None).await,
         };
     }
 }
@@ -802,7 +802,7 @@ impl ConversationStream {
     pub async fn close(mut self) {
         let _ = match &mut self.socket {
             TerminalSocket::Unix(socket) => socket.close(None).await,
-            TerminalSocket::Remote(socket) => socket.close(None).await,
+            TerminalSocket::Remote(socket) => socket.as_mut().close(None).await,
         };
     }
 }
@@ -1145,9 +1145,12 @@ impl CollectionEvent {
     }
 }
 
+// Keep the 312-byte Unix socket inline for allocation-free local terminals.
+// Boxing only the 1376-byte remote TLS socket intentionally leaves unequal variants.
+#[allow(clippy::large_enum_variant)]
 enum TerminalSocket {
     Unix(WebSocketStream<tokio::net::UnixStream>),
-    Remote(WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>),
+    Remote(Box<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>),
 }
 
 impl TerminalStream {
@@ -1171,7 +1174,7 @@ impl TerminalStream {
     pub async fn close(mut self) {
         let _ = match &mut self.socket {
             TerminalSocket::Unix(websocket) => websocket.close(None).await,
-            TerminalSocket::Remote(websocket) => websocket.close(None).await,
+            TerminalSocket::Remote(websocket) => websocket.as_mut().close(None).await,
         };
     }
 }
@@ -4876,7 +4879,7 @@ impl Client {
                 })?
                 .map_err(|error| ClientError::Transport(error.to_string()))?;
                 validate_terminal_subprotocol(&response)?;
-                TerminalSocket::Remote(websocket)
+                TerminalSocket::Remote(Box::new(websocket))
             }
         };
         Ok(TerminalStream {
@@ -4945,7 +4948,7 @@ impl Client {
                 })?
                 .map_err(|error| ClientError::Transport(error.to_string()))?;
                 validate_collection_subprotocol(&response)?;
-                TerminalSocket::Remote(socket)
+                TerminalSocket::Remote(Box::new(socket))
             }
         };
         let heard = Heard::new();
@@ -5050,7 +5053,7 @@ impl Client {
                 })?
                 .map_err(|error| ClientError::Transport(error.to_string()))?;
                 validate_conversation_subprotocol(&response)?;
-                TerminalSocket::Remote(socket)
+                TerminalSocket::Remote(Box::new(socket))
             }
         };
         Ok(ConversationStream {

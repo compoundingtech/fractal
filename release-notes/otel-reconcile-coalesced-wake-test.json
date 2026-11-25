@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: bind the daemon reconcile export proof to the real API write's span timing instead of requiring a coalesced pass to retain the API wake label.",
+  "replay": {"status": "none", "detail": "No runtime or replay behavior changes."},
+  "schema": {"status": "none", "detail": "No persistent data or schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes."},
+  "compatibility": {"status": "none", "detail": "The existing last-recorded wake cause contract is unchanged; API wake counters and independent reconcile root assertions remain covered."},
+  "downtime": {"status": "none", "detail": "No startup work or service interruption."},
+  "manual": {"status": "none", "detail": "No operator action or configuration changes."},
+  "recovery": {"status": "none", "detail": "Test-only change; reverting requires no state recovery."}
+}

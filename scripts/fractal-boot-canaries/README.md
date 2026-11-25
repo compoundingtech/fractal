@@ -8,12 +8,22 @@ message.
 
 `HARNESS` is `claude`, `codex`, `pi`, `omp` or `opencode`. `SCENARIO` is one of `fresh`,
 `restart`, `daemon-restart`, `reexec`, `concurrent`, `suspend`, `claim-socket-denied`,
-`access-auto`, `access-bypass`, `idle-hold` (Codex/OpenCode), `utf8` and `import` (Codex),
+`access-auto`, `access-bypass`, `idle-hold` (Codex/OpenCode), `idle-suspend` (OMP), `utf8` and `import` (Codex),
 or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
 `run --help` says what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
 back on the session it suspended on, holds mail older than seven days, and consumes recent never-offered
 mail exactly once. The Rust wrapper
-`crates/fractal/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
+`crates/fractal/tests/boot_canaries.rs` runs every pair as its own test. Most boot canaries are
+daily-only: ordinary PR nextest runs exclude them. Run unfiltered nextest or the daily lane
+to obtain actual native boot proof.
+
+OMP's `idle-suspend` completes the seat's work, waits for automatic policy suspension, then sends
+person-authored wake mail. It requires the same native session, a ready channel, and a native first
+turn that reads the pending mail, without an explicit resume command. The pi-family stand-in
+reports `agent_start` and terminal `agent_end` around each model action, with a truthful `isIdle`
+probe, so the real extension—not the fixture—publishes the busy-to-idle transition.
+Pi additionally receives its native `agent_settled` edge; OMP proves idle by sampling after
+`agent_end`, because its protocol has no settled event.
 
 OMP also runs `ask-sigterm` and `ask-sigkill`. Each opens an unanswered ask, stops the private
 daemon with the named signal, removes its PTY processes to model a host shutdown, and starts

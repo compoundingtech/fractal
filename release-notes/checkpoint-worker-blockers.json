@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show checkpoint worker phases and participant blockers in status and doctor",
+  "replay": {"status": "none", "detail": "Worker evidence is process-local display metadata; no replay changes."},
+  "schema": {"status": "none", "detail": "Status adds optional worker metadata; local failed-proof detail adds defaulted mismatch metadata. Older records and status responses remain readable. No claim or database schema changes."},
+  "rules": {"status": "none", "detail": "No change to participant selection, leave or excusal authority, checkpoint rules, proof or trim."},
+  "compatibility": {"status": "none", "detail": "Status and doctor show seal/verification disagreement, retained worker failures and halted trims even without pending work. Proof failure reasons survive retry refusal and restart. Reads do not start capture or proof."},
+  "downtime": {"status": "none", "detail": "Diagnostics appear after the normal binary rollout; this change does not restart any daemon."},
+  "manual": {"status": "none", "detail": "Checkpoint enablement remains an explicit per-member configuration choice; no configuration is changed."},
+  "recovery": {"status": "none", "detail": "No automatic excusal, checkpoint resume, deletion or recovery action is introduced."}
+}

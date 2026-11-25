@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Prove that onboarding stays out of the folders macOS guards, and that uninstall keeps the work
 # root. A throwaway HOME holds Documents, Desktop and Downloads with a canary file each. setup, a
-# daemon, a few reads and `st uninstall` run under strace, which records every file the programs
+# daemon, a few reads and `fractal uninstall` run under strace, which records every file the programs
 # open, stat or list. The trace must not name any guarded folder, and no program may list HOME
 # itself. The work root is created by setup, keeps a file the person made, and survives uninstall.
 #
-# Usage: run ST3_BINARY PTY_BINARY [OUT_DIR]
+# Usage: run FRACTAL_BINARY PTY_BINARY [OUT_DIR]
 #
 # The daemon refuses a process that descends from another seat, so run this outside a seat's
 # process tree, for example with `systemd-run --user --wait --pipe --collect`.
@@ -16,17 +16,17 @@ set -Eeuo pipefail
 signal_helper="$(cd "$(dirname "$0")/.." && pwd)/script_process.py"
 python3 "$signal_helper" --check-platform
 
-st3="$(readlink -f "$1")"
+fractal="$(readlink -f "$1")"
 pty="$(readlink -f "$2")"
 out="${3:-$(mktemp -d)}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
-home="$(mktemp -d "${TMPDIR:-/var/tmp}/st-work-root.XXXXXX")"
+home="$(mktemp -d "${TMPDIR:-/var/tmp}/fractal-work-root.XXXXXX")"
 tools="$(dirname "$home")/$(basename "$home").tools"
 mkdir -p "$tools"
 cp --reflink=auto "$pty" "$tools/pty"
-cp --reflink=auto "$st3" "$tools/st3"
-st3="$tools/st3"
+cp --reflink=auto "$fractal" "$tools/st3"
+fractal="$tools/st3"
 for profile in .bash_profile .zprofile; do
   printf 'export PATH="%s:$PATH"\n' "$tools" >"$home/$profile"
 done
@@ -46,12 +46,12 @@ trace="$out/trace.txt"
 # Follow every child and record the calls that name a path or list a directory.
 traced=(strace -f -qq -A -s 512 -o "$trace"
   -e trace=openat,open,stat,lstat,newfstatat,statx,access,faccessat,faccessat2,readlink,readlinkat,getdents64,chdir,execve)
-st=(env -i HOME="$home" PATH="$path" USER="$(id -un)" LANG=C.UTF-8 SHELL=/bin/sh
-  HOSTNAME=proofhost "$st3")
+fractal_command=(env -i HOME="$home" PATH="$path" USER="$(id -un)" LANG=C.UTF-8 SHELL=/bin/sh
+  HOSTNAME=proofhost "$fractal")
 
 {
   echo "== setup, daemon and reads, traced"
-  "${traced[@]}" "${st[@]}" setup --person avery --yes --service false --start false --harness none \
+  "${traced[@]}" "${fractal_command[@]}" setup --person avery --yes --service false --start false --harness none \
     >"$out/setup.txt" 2>&1 || { echo "FAIL: setup"; cat "$out/setup.txt"; exit 1; }
   cat "$out/setup.txt"
   grep -q "^Work folder: $home/st\." "$out/setup.txt" \
@@ -60,12 +60,12 @@ st=(env -i HOME="$home" PATH="$path" USER="$(id -un)" LANG=C.UTF-8 SHELL=/bin/sh
     || { echo "FAIL: setup printed the work folder more than once"; exit 1; }
   test -d "$home/st" || { echo "FAIL: setup did not create the work folder"; exit 1; }
   # A daemon under the same trace, until it answers and does its first reads.
-  "${traced[@]}" "${st[@]}" up >"$out/daemon.log" 2>&1 &
+  "${traced[@]}" "${fractal_command[@]}" up >"$out/daemon.log" 2>&1 &
   for _ in $(seq 1 60); do
-    "${st[@]}" --daemon-wait 0 agents ls >/dev/null 2>&1 && break
+    "${fractal_command[@]}" --daemon-wait 0 agents ls >/dev/null 2>&1 && break
     sleep 0.5
   done
-  "${st[@]}" --daemon-wait 0 agents ls >/dev/null || { echo "FAIL: the daemon did not start"; tail -20 "$out/daemon.log"; exit 1; }
+  "${fractal_command[@]}" --daemon-wait 0 agents ls >/dev/null || { echo "FAIL: the daemon did not start"; tail -20 "$out/daemon.log"; exit 1; }
   # Something a person made in the work folder, with a nested folder as an agent leaves.
   mkdir -p "$home/st/agents/site"
   echo "my notes" >"$home/st/agents/site/notes.txt"
@@ -73,7 +73,7 @@ st=(env -i HOME="$home" PATH="$path" USER="$(id -un)" LANG=C.UTF-8 SHELL=/bin/sh
   sleep 2
 
   echo "== uninstall, traced"
-  "${traced[@]}" "${st[@]}" uninstall --yes --erase-local-graph >"$out/uninstall.txt" 2>&1 \
+  "${traced[@]}" "${fractal_command[@]}" uninstall --yes --erase-local-graph >"$out/uninstall.txt" 2>&1 \
     || { echo "FAIL: uninstall"; cat "$out/uninstall.txt"; exit 1; }
   cat "$out/uninstall.txt"
   grep -q "^kept.*$home/st" "$out/uninstall.txt" \
@@ -83,7 +83,7 @@ st=(env -i HOME="$home" PATH="$path" USER="$(id -un)" LANG=C.UTF-8 SHELL=/bin/sh
   echo "PASS: uninstall kept the work folder and said so"
 
   echo "== an instance keeps its work folder too"
-  inst=("${st[@]}" --instance kept)
+  inst=("${fractal_command[@]}" --instance kept)
   "${inst[@]}" setup --person avery --yes --service false --start false --harness none \
     >"$out/instance-setup.txt" 2>&1 || { echo "FAIL: instance setup"; cat "$out/instance-setup.txt"; exit 1; }
   grep -q "^Work folder: $home/.st-instance/kept/work\." "$out/instance-setup.txt" \

@@ -93,6 +93,19 @@ later accepted heads before rebuilding.
 Tree-cache identities include the integrator version, so upgrading the attribution
 logic does not replay an older unattributed failure.
 
+The public development gateway accepts explicit edge configuration:
+`webfractalGateway({ edgeHost: 'preview.example.test', edgeAliases: ['alias.example.test'] })`.
+Without these options it admits direct loopback requests only. Custom listeners can use
+`devAdmission({ edgeHost, edgeAliases, port })` from `server/devAdmission.mts`, where
+`port()` returns the actual bound port or `undefined` before binding, and pass the
+predicate as `edge` to `edgeOrTailnetAdmission`. Both paths require a loopback peer
+and the actual listener Host port. Edge traffic requires an exact configured forwarded
+host, HTTPS forwarded protocol and IPv4 listener Host. Any Origin must match that
+particular forwarded host; upgrades also accept the IPv4 listener Origin normalized
+by the trusted proxy, but cannot omit Origin. Caller credentials, duplicated authority
+headers, unsupported forwarded metadata, cross-site fetch metadata and non-origin-form
+targets are rejected. This policy does not authenticate local proxy processes.
+
 Deployment overlays can import `edgeOrTailnetAdmission` from `server/host.mts` and
 pass their existing edge admission as `edge`. With `origin: undefined`, it returns
 that exact policy. With a published HTTPS origin and a nonempty login allowlist,

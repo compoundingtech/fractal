@@ -47,6 +47,45 @@ only devices presenting a real signing public key enroll one. Devices can be
 revoked through the existing device revocation action, and a browser can revoke
 its own grant through `POST /v1/client/pairing/browser-requests/revoke-current`.
 
+### Idle residency policy
+
+The daemon accepts these optional settings in its local configuration:
+
+```toml
+[reconcile]
+idle_suspend_after = "off"
+idle_resume_concurrency = 2
+```
+
+`idle_suspend_after` defaults to `"off"`. A configured duration, such as `"30m"`,
+must be at least one minute; supported units are `s`, `m`, `h`, and `d`.
+`idle_resume_concurrency` defaults to `2` and must be a positive integer,
+including when the threshold is off.
+
+Setting a threshold enables automatic idle suspension only after every active
+fleet member's current incarnation has signed `features.idle_residency = 1` in
+its latest `daemon.started` advertisement. Missing or withdrawn support fails
+closed. Only OMP seats with a confirmed native delivery channel are eligible.
+The same cutover provides bounded, person-first wake admission and strict
+native-session resume before held wake mail can be offered.
+
+The kill switch is `idle_suspend_after = "off"`. It prevents new automatic
+stops but keeps waking existing idle suspensions. An agent declaration's
+`idle-suspend "never"` has the same no-new-stops behavior for that agent.
+Manual suspensions never auto-wake.
+
+Enabling the threshold starts a new local policy epoch: prior idle time does not
+count toward it. An enabled threshold edit retains that epoch; turning the
+threshold off clears it. A replacement daemon starts a fresh epoch when loading
+an enabled policy, so every seat waits the full threshold again.
+
+Both settings reload with the daemon policies on the existing two-minute loop;
+no daemon restart is needed. Missing, unreadable, malformed, or invalid
+configuration keeps the last valid policies. Removing these settings restores
+the defaults on the next valid reload. Older binaries reject the new keys, so
+remove them before downgrading a configuration reader.
+
+
 ## KDL documents
 
 Every declaration file starts with `version 2`. Declarations follow directly:

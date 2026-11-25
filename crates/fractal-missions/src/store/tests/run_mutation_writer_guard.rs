@@ -71,6 +71,14 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [3, 0, 0, 0, 1],
         },
         Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install launch_freeze schema before returning the store; these constructor-only writers make no run action decision",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install the selected home's run-authority, monotonic epoch fence and request-receipt schema before returning the store; these constructor-only acquisitions do not admit an execution or apply a request effect",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
             reason: "finish_open, open_with_ivm_views and open_shared_memory install host-local hold schema at startup; no run action decision",
             counts: [3, 0, 0, 0, 0],
         },
@@ -87,12 +95,24 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [3, 0, 0, 0, 0],
         },
         Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install runtime_cleanup schema before returning the store; these constructor-only writers make no run action decision",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install connection-local storage census counters before returning the store; these constructor-only writers neither mutate mission-run records nor make run action decisions",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
+            reason: "initialize_native_source_lifecycle installs existing canonical source schema, cut and event identity metadata; it neither reads nor mutates mission-run records and makes no run admission or payload-release decision",
+            counts: [1, 0, 0, 1, 0],
+        },
+        Exception {
             reason: "repair_operation_projection_drift_from_audit and rebuild_claim_projections are internal projection/replay maintenance",
             counts: [2, 0, 0, 2, 0],
         },
         Exception {
-            reason: "run_projection_pending, claim_ids_at_after_first_row and claims_summary_at pin read-only snapshots; they acquire no writer",
-            counts: [0, 0, 0, 0, 3],
+            reason: "run_projection_pending, pending_projection_runs, claim_ids_at_after_first_row and claims_summary_at pin read-only reader snapshots; they acquire no writer",
+            counts: [0, 0, 0, 0, 4],
         },
         Exception {
             reason: "apply_as_impl raw publication branch is reachable only when intent.mission_runs is empty; run mutations use the all-runs wrapper",

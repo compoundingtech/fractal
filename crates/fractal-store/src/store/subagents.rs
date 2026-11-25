@@ -54,6 +54,8 @@ pub fn text(fields: &Value, name: &str) -> Option<String> {
 #[derive(Clone, Copy)]
 pub enum Scope<'a> {
     Seat(&'a str),
+    /// The same authoritative open/ended fold at a fixed client snapshot.
+    SeatAt(&'a str, u64),
     /// Recorded on this node from this claim on.
     RecordedOn(&'a str, u64),
     /// Whose lease runs past this time.
@@ -65,6 +67,7 @@ pub enum Scope<'a> {
 fn open_subagents_sql(scope: Scope<'_>) -> String {
     let (live, from, filter) = match scope {
         Scope::Seat(_) => ("", "FROM claims", "AND claims.subject=?1"),
+        Scope::SeatAt(_, _) => ("", "FROM claims", "AND claims.subject=?1"),
         // The sweep's own bound on this node's claims, not an order.
         Scope::RecordedOn(..) => (
             "",
@@ -91,19 +94,29 @@ fn open_subagents_sql(scope: Scope<'_>) -> String {
         ),
         Scope::All => ("", "FROM claims", ""),
     };
+    let (appeared_cut, renewed_cut, ended_cut) = match scope {
+        Scope::SeatAt(_, cut) => (
+            format!("AND claims.store_index<={cut}"),
+            format!("AND renewed.store_index<={cut}"),
+            format!("AND ended.store_index<={cut}"),
+        ),
+        _ => (String::new(), String::new(), String::new()),
+    };
     canonical_sql(&format!(
         "{live} SELECT claims.subject, claims.id, claims.origin, claims.body, claims.store_index,
              (SELECT MAX(CAST(json_extract(renewed.body, '$.fields.lease_expires_at_unix_ms')
                   AS INTEGER))
               FROM claims renewed INDEXED BY claims_subagent_renewed_max_lease_index
               WHERE renewed.kind='subagent.renewed' AND renewed.subject=claims.subject
+                {renewed_cut}
                 AND json_extract(renewed.body, '$.fields.subagent_id')
                     =json_extract(claims.body, '$.fields.subagent_id'))
          {from}
-         WHERE claims.kind='subagent.appeared' {filter}
+         WHERE claims.kind='subagent.appeared' {filter} {appeared_cut}
            AND NOT EXISTS (
                SELECT 1 FROM claims ended INDEXED BY claims_subagent_ended_index
                WHERE ended.kind='subagent.ended' AND ended.subject=claims.subject
+                 {ended_cut}
                  AND json_extract(ended.body, '$.fields.subagent_id')
                      =json_extract(claims.body, '$.fields.subagent_id'))
          ORDER BY CANONICAL_ASC(claims)"
@@ -124,7 +137,7 @@ pub fn open_subagents_at(connection: &Connection, scope: Scope<'_>) -> Result<Ve
         ))
     };
     let rows = match scope {
-        Scope::Seat(agent) => statement.query_map([agent], read)?.collect::<Vec<_>>(),
+        Scope::Seat(agent) | Scope::SeatAt(agent, _) => statement.query_map([agent], read)?.collect::<Vec<_>>(),
         Scope::Running(now) => statement
             .query_map([i64::try_from(now).unwrap_or(i64::MAX)], read)?
             .collect::<Vec<_>>(),

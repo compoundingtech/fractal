@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 use crate::github_http::GithubAuth;
 use super::{
     GITHUB_AUTH_REMEDY, GithubListing, ObservationRequest, ProviderObservation, github_cache_for,
-    github_client, github_graphql_with_cache_eligibility, github_json, github_listing,
+    github_client, github_graphql_nodes, github_graphql_with_cache_eligibility, github_json, github_listing,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -96,6 +96,9 @@ pub struct RepositoryCursor {
     /// stay at their original locations even when GitHub's node now lives elsewhere.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     identities: BTreeMap<String, ItemIdentity>,
+    /// Unavailable identities retain their original subject so refresh can resolve them again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tombstones: BTreeMap<String, ItemIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail_after: Option<String>,
     /// Where the open listing a resume reads for identities continues, when it had more pages
@@ -197,11 +200,13 @@ struct ItemIdentity {
 /// listing once, for the identities of open items. The version maps, which are most of a
 /// cursor's bytes, stay with the member that polled. `None` when the observer has read nothing
 /// yet.
+/// Repository-scoped unavailable identities also travel with the claim for safe takeover.
 pub fn replicated_cursor(cursor: &str) -> Option<String> {
     let cursor = RepositoryCursor::parse(Some(cursor));
     let position = RepositoryCursor {
         items_since: cursor.items_since,
         comments_since: cursor.comments_since,
+        tombstones: cursor.tombstones,
         ..RepositoryCursor::default()
     };
     (position != RepositoryCursor::default())
@@ -234,13 +239,16 @@ struct PullRequestCheck {
     changed: bool,
     open: Arc<Vec<serde_json::Map<String, Value>>>,
     resolved: Arc<Vec<Value>>,
+    not_found: Arc<Vec<String>>,
     emit_pulls: bool,
 }
 
 struct RepositoryDetails {
     open: Arc<Vec<serde_json::Map<String, Value>>>,
     resolved: Arc<Vec<Value>>,
+    not_found: Arc<Vec<String>>,
     identities_read: usize,
+    fresh: bool,
 }
 
 fn pull_request_checks() -> &'static Mutex<HashMap<String, PullRequestCheck>> {
@@ -508,6 +516,8 @@ fn resolved_item(
     let closed = state == "closed" || state == "merged";
     let event = node.pointer("/timelineItems/nodes/0");
     if identity.pull {
+        insert(&mut facts, "head", node.get("headRefOid"));
+        insert(&mut facts, "head_sha", node.get("headRefOid"));
         let merged = node.get("merged").and_then(Value::as_bool) == Some(true);
         facts.insert("merged".into(), json!(merged));
         facts.insert(
@@ -761,7 +771,7 @@ const RESOLVED_PULLS: &str = "query($ids: [ID!]!) {
   nodes(ids: $ids) {
     id
     ... on PullRequest {
-      number url state updatedAt merged mergedAt mergedBy { login } mergeCommit { oid url }
+      number url state updatedAt headRefOid merged mergedAt mergedBy { login } mergeCommit { oid url }
       timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
         createdAt closer {
           ... on PullRequest { url }
@@ -788,7 +798,7 @@ const RESOLVED_ITEMS: &str = "query($ids: [ID!]!) {
       } } }
     }
     ... on PullRequest {
-      number url state updatedAt merged mergedAt mergedBy { login } mergeCommit { oid url }
+      number url state updatedAt headRefOid merged mergedAt mergedBy { login } mergeCommit { oid url }
       timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
         createdAt closer {
           ... on PullRequest { url }
@@ -813,10 +823,11 @@ enum CheckOutcome {
     Pending,
     Passed,
     Failed,
+    Cancelled,
 }
 
 /// One check run or commit status on a head: its name, the app that reported a check run, and how
-/// it stands. Success, neutral and skipped pass; any other finished result fails.
+/// it stands. Success, neutral and skipped pass; cancellation is distinct from failure.
 fn check_outcome(context: &Value) -> (String, Option<u64>, CheckOutcome) {
     let upper = |name: &str| {
         context
@@ -855,6 +866,8 @@ fn check_outcome(context: &Value) -> (String, Option<u64>, CheckOutcome) {
                 "SUCCESS" | "NEUTRAL" | "SKIPPED"
             ) {
                 CheckOutcome::Passed
+            } else if upper("conclusion") == "CANCELLED" {
+                CheckOutcome::Cancelled
             } else {
                 CheckOutcome::Failed
             },
@@ -1039,8 +1052,9 @@ fn required_checks_for_pull_request(
 /// counts, as GitHub requires; a commit status carries no app, so it counts only for a rule that
 /// names none.
 /// Without them, because the base requires none or its rules could not be read, every check on
-/// the head counts. `fail` needs one counted check finished and failing, `pass` needs every one
-/// finished and passing, and anything else is `pending`; `none` says there is nothing to count.
+/// the head counts. `fail` needs one counted failure; otherwise unfinished checks are `pending`,
+/// finished cancellations are `cancelled`, and every counted check passing is `pass`.
+/// `none` says there is nothing to count.
 fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Value {
     let checks = contexts.iter().map(check_outcome).collect::<Vec<_>>();
     // Every check and status that shares a counted name must pass, so one that finished and
@@ -1051,6 +1065,8 @@ fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Va
             CheckOutcome::Failed
         } else if outcomes.is_empty() || outcomes.contains(&CheckOutcome::Pending) {
             CheckOutcome::Pending
+        } else if outcomes.contains(&CheckOutcome::Cancelled) {
+            CheckOutcome::Cancelled
         } else {
             CheckOutcome::Passed
         }
@@ -1097,6 +1113,8 @@ fn required_checks(contexts: &[Value], required: Option<&[RequiredCheck]>) -> Va
         .any(|outcome| *outcome == CheckOutcome::Pending)
     {
         "pending"
+    } else if counted.values().any(|outcome| *outcome == CheckOutcome::Cancelled) {
+        "cancelled"
     } else {
         "pass"
     };
@@ -1225,17 +1243,17 @@ fn open_pull_request(
 }
 
 /// A pull request is settling while a check has not finished, while a check its base requires
-/// has failed, or while it waits in the merge queue. A rerun of a failed check changes nothing the
-/// REST reads see, so only reading again finds it running and then passing.
+/// has failed or been cancelled, or while it waits in the merge queue. A rerun changes nothing
+/// the REST reads see, so only reading again finds it running and then passing.
 fn settling(facts: &serde_json::Map<String, Value>) -> bool {
     matches!(
         facts.get("checks_state").and_then(Value::as_str),
         Some("pending" | "expected")
-    ) || facts
+    ) || matches!(facts
         .get("required_checks")
         .and_then(|checks| checks.get("state"))
-        .and_then(Value::as_str)
-        == Some("fail")
+        .and_then(Value::as_str),
+        Some("fail" | "cancelled"))
         || facts
             .get("merge_queue")
             .is_some_and(|entry| !entry.is_null())
@@ -1366,7 +1384,14 @@ async fn observe_poll(
     // A renamed repository answers through a redirect. Its numeric ID proves that the locator
     // still names the repository whose items were observed before.
     let repository_data = github_json(&client, base.clone(), token, cache_for)
-        .await?
+        .await
+        .map_err(|error| {
+            if http_not_found(&error) {
+                error.context(super::ProviderRepositoryNotFound { locator: request.locator.clone() })
+            } else {
+                error
+            }
+        })?
         .value;
     let repository_id = repository_data
         .get("id")
@@ -1393,6 +1418,14 @@ async fn observe_poll(
     let started = watermark_at(started_at);
     let initial = watermark_at(started_at.checked_sub(WATERMARK_SKEW).unwrap_or(UNIX_EPOCH));
     let mut cursor = RepositoryCursor::parse(request.cursor.as_deref());
+    let cache_for = if cursor.tombstones.is_empty() { cache_for } else { Duration::ZERO };
+    // Explicit refreshes (including webhook refreshes) retry unavailable identities. A failed
+    // resolution will tombstone them again; restored access or a transfer back can recover.
+    let mut recovered = BTreeSet::new();
+    if request.refresh {
+        recovered.extend(cursor.tombstones.keys().cloned());
+        cursor.identities.append(&mut cursor.tombstones);
+    }
     // A cursor an earlier build moved past its look's start reads on from now instead.
     for since in [&mut cursor.items_since, &mut cursor.comments_since].into_iter().flatten() {
         if *since > started {
@@ -1408,6 +1441,7 @@ async fn observe_poll(
     let resuming = cursor.resume_next.is_some()
         || (watermark.is_some() && cursor.seen.is_empty() && cursor.identities.is_empty());
     let mut items = BTreeMap::<u64, Item>::new();
+    let mut await_prs_not_found = Vec::new();
     let mut more = false;
     let mut changed_open_pull = false;
     // The open pull requests the REST reads named. GraphQL must know each one before its answer
@@ -1450,6 +1484,16 @@ async fn observe_poll(
                 .seen
                 .insert("open-reactions".into(), listing_digest(&listing));
         }
+        // Presence in a revalidated REST listing is authoritative even if updated_at did not
+        // change while access was unavailable. Bypass the old GraphQL answer for recovered IDs.
+        for issue in &listing.values {
+            if let Some(id) = issue.get("node_id").and_then(Value::as_str)
+                && let Some(identity) = cursor.tombstones.remove(id)
+            {
+                cursor.identities.insert(id.into(), identity);
+                recovered.insert(id.to_owned());
+            }
+        }
         if !cursor.already_seen("items", listing_digest(&listing)) {
             for issue in changed_versions(&mut cursor.item_versions, &listing.values) {
                 let mut item = listed_item(issue, fields, watermark.as_deref());
@@ -1459,6 +1503,7 @@ async fn observe_poll(
                         issue.get("number").and_then(Value::as_u64),
                     )
                 {
+                    cursor.tombstones.remove(id);
                     let identity = cursor.identities.entry(id.into()).or_insert(ItemIdentity {
                         number,
                         pull: item.pull,
@@ -1545,6 +1590,10 @@ async fn observe_poll(
                     issue.get("node_id").and_then(Value::as_str),
                     issue.get("number").and_then(Value::as_u64),
                 ) {
+                    if let Some(identity) = cursor.tombstones.remove(id) {
+                        cursor.identities.insert(id.into(), identity);
+                        recovered.insert(id.to_owned());
+                    }
                     cursor.identities.entry(id.into()).or_insert(ItemIdentity {
                         number,
                         pull: issue.get("pull_request").is_some(),
@@ -1639,6 +1688,7 @@ async fn observe_poll(
         }
     }
 
+
     if fields.contains("pull_requests")
         || (fields.contains("issues") && !cursor.identities.is_empty())
     {
@@ -1663,7 +1713,7 @@ async fn observe_poll(
             cache_for,
             &request.locator,
             current_location,
-            request.refresh,
+            request.refresh || !recovered.is_empty(),
             request.webhook_covered,
             changed_open_pull
                 || !cursor.seen.contains_key("pull-requests")
@@ -1677,6 +1727,23 @@ async fn observe_poll(
         .await?;
         if details.identities_read > 0 {
             cursor.detail_after = identities.get(details.identities_read - 1).map(|(id, _)| id.clone());
+        }
+        for id in details.not_found.iter() {
+            let Some(identity) = cursor.identities.remove(id) else { continue; };
+            cursor.tombstones.insert(id.clone(), identity.clone());
+            cursor.seen.remove(&format!("identity/{id}"));
+            // A missing node says nothing about who closed it or where it moved.
+            // Use the existing closed-subject lifecycle, but retain the reason.
+            merge(&mut items, Item {
+                pull: identity.pull,
+                listed: false,
+                facts: serde_json::Map::from_iter([
+                    ("number".into(), json!(identity.number)),
+                    ("node_id".into(), json!(id)),
+                    ("state".into(), json!("closed")),
+                    ("state_reason".into(), json!("not_found")),
+                ]),
+            });
         }
         for node in details.resolved.iter() {
             let Some(id) = node.get("id").and_then(Value::as_str) else {
@@ -1726,7 +1793,10 @@ async fn observe_poll(
         let digest = hex::encode(Sha256::digest(
             serde_json::to_vec(details.open.as_slice()).unwrap_or_default(),
         ));
-        if !cursor.already_seen("pull-requests", digest) && fields.contains("pull_requests") {
+        if (!cursor.already_seen("pull-requests", digest)
+            || (details.fresh && !cursor.tombstones.is_empty()))
+            && fields.contains("pull_requests")
+        {
             for facts in details.open.iter() {
                 let mut facts = facts.clone();
                 if let Some(number) = facts.get("number").and_then(Value::as_u64) {
@@ -1738,6 +1808,14 @@ async fn observe_poll(
                         continue;
                     }
                     if let Some(id) = facts.get("node_id").and_then(Value::as_str) {
+                        if cursor.tombstones.contains_key(id)
+                            && (!details.fresh || details.not_found.iter().any(|missing| missing == id))
+                        {
+                            continue;
+                        }
+                        if cursor.tombstones.remove(id).is_some() {
+                            recovered.insert(id.to_owned());
+                        }
                         cursor
                             .identities
                             .entry(id.into())
@@ -1767,6 +1845,32 @@ async fn observe_poll(
         }
     }
 
+    // Active exact-head waits revalidate their targets within this observer's normal cadence.
+    // Keep REST acquisition proof separate from GraphQL head/queue observations: REST does
+    // not read merge-queue membership, so its newer head must never relabel an older queue.
+    for target in &request.await_prs {
+        let number = target.pr;
+        let pull = match github_json(&client, format!("{base}/pulls/{number}"), token, Duration::ZERO).await {
+            Ok(pull) => pull.value,
+            Err(error) if http_not_found(&error) => {
+                await_prs_not_found.push(json!({"pr": number, "registrations": target.registrations}));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let id = pull.get("node_id").and_then(Value::as_str)
+            .context("the GitHub pull request response has no node ID")?;
+        anyhow::ensure!(pull.get("number").and_then(Value::as_u64) == Some(number),
+            "the GitHub pull request response names another PR");
+        cursor.identities.insert(id.to_owned(), ItemIdentity { number, pull: true });
+        let facts = serde_json::Map::from_iter([
+            ("number".into(), json!(number)),
+            ("node_id".into(), json!(id)),
+            ("await_pr_observation".into(), await_pr_observation(&pull, &target.registrations)?),
+        ]);
+        merge(&mut items, Item { pull: true, listed: false, facts });
+    }
+
     let mut facts =
         serde_json::Map::from_iter([("repository_id".to_owned(), Value::from(repository_id))]);
     insert(&mut facts, "node_id", repository_data.get("node_id"));
@@ -1782,6 +1886,14 @@ async fn observe_poll(
     let mut issues = Vec::new();
     for (_, item) in items {
         let mut item_facts = item.facts;
+        // Recovery reopens the subject, not its old unavailable resolution. Every acquisition
+        // path must explicitly clear the reason so the stored partial-fact overlay removes it.
+        if !recovered.is_empty()
+            && item_facts.get("state").and_then(Value::as_str) == Some("open")
+            && item_facts.get("node_id").and_then(Value::as_str).is_some_and(|id| recovered.contains(id))
+        {
+            item_facts.insert("state_reason".into(), Value::Null);
+        }
         if !item.listed {
             item_facts.insert("new".into(), Value::Bool(false));
         }
@@ -1802,6 +1914,9 @@ async fn observe_poll(
     if !issues.is_empty() {
         facts.insert("issues".into(), Value::Array(issues));
     }
+    // Unlike incremental pull_requests, this is explicit evidence of a targeted 404.
+    // Always reset it, including when a formerly missing PR becomes readable.
+    facts.insert("await_prs_not_found".into(), json!(await_prs_not_found));
     if fields.contains(super::github_workflows::PERFORMANCE_FAILURES_FIELD) {
         let repository = format!("{}/{}", current_location.0, current_location.1);
         let failures = super::github_workflows::main_performance_failures(
@@ -1817,20 +1932,61 @@ async fn observe_poll(
             ).await;
         }
     }
+    // History shares this observer's authenticated acquisition budget and deadline,
+    // but never its operational facts: replay must not wake old watch events.
+    // Like workflow-run publication above, a capture failure is reported separately:
+    // a fenced or broken history source must not discard already-read live changes.
+    // The ledger owns durable coverage; a failed step makes no claim of completeness
+    // and requests no accelerated continuation for a source configuration defect.
+    let capture_delay = if let Some(ledger) = request.github_capture.as_deref() {
+        // Select the authored source by its locator, not GitHub's redirected name.
+        // The ledger resolves committed node identity for renamed repositories.
+        let repository = &request.locator;
+        match ledger.step(api_base, repository, token).await {
+            Ok(progress) => progress.continue_after_ms.filter(|_| progress.active),
+            Err(error) => {
+                tracing::warn!(
+                    repository, capture_status = "failed", error = %format_args!("{error:#}"),
+                    "could not acquire or publish GitHub capture"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Once either listing exhausts its reconciliation burst, throttle the observation,
     // including pagination in the other listing. Keep every frozen watermark and cursor.
     let reconcile_backoff = [&cursor.items_scan, &cursor.comments_scan].into_iter()
         .flatten().any(|scan| scan.unstable_sweeps >= IMMEDIATE_RECONCILIATION_SWEEPS);
+    let normal_delay = if more && !reconcile_backoff {
+        super::PROVIDER_CONTINUE_MS
+    } else {
+        300_000
+    };
+    let delay = capture_delay.map_or(normal_delay, |delay| normal_delay.min(u128::from(delay)));
     Ok(ProviderObservation {
         facts: Value::Object(facts),
         cursor: Some(serde_json::to_string(&cursor)?),
-        // Large listings continue immediately only while the reconciliation burst permits it.
-        next_check_unix_ms: now_ms().saturating_add(if more && !reconcile_backoff {
-            super::PROVIDER_CONTINUE_MS
-        } else {
-            300_000
-        }),
+        next_check_unix_ms: now_ms().saturating_add(delay),
     })
+}
+
+/// A single acquisition's native proof, kept opaque so queue facts retain their own head.
+fn await_pr_observation(pull: &Value, registrations: &[String]) -> Result<Value> {
+    let head = pull.pointer("/head/sha").and_then(Value::as_str)
+        .context("the GitHub pull request response has no head SHA")?;
+    let merged = pull.get("merged").and_then(Value::as_bool)
+        .context("the GitHub pull request response has no merged flag")?;
+    Ok(json!({
+        "registrations": registrations, "head": head, "merged": merged,
+        "merge_commit_sha": pull.get("merge_commit_sha").unwrap_or(&Value::Null),
+    }))
+}
+
+fn http_not_found(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status)
+        == Some(reqwest::StatusCode::NOT_FOUND)
 }
 
 /// An installation without statuses:read sees an app-only rollup, which is not complete.
@@ -1928,11 +2084,14 @@ async fn open_pull_requests(
         return Ok(RepositoryDetails {
             open: previous.open,
             resolved: previous.resolved,
+            not_found: previous.not_found,
             identities_read: 0,
+            fresh: false,
         });
     }
     let mut nodes = Vec::new();
     let mut resolved = Vec::new();
+    let mut not_found = Vec::new();
     let mut after = Value::Null;
     let mut identities_read = 0;
     let mut page_size = PULL_REQUEST_PAGE_SIZE;
@@ -2007,7 +2166,8 @@ async fn open_pull_requests(
                 Some(false) => (&issue_token, RESOLVED_ISSUES),
                 None => (&read_token, RESOLVED_ITEMS),
             };
-            let (resolved_data, request_cacheable) = github_graphql_with_cache_eligibility(client, api_base, auth, query, json!({"ids": ids})).await?;
+            let (resolved_data, missing, request_cacheable) = github_graphql_nodes(client, api_base, auth, query, &ids).await?;
+            not_found.extend(missing);
             cacheable &= request_cacheable;
             resolved.extend(resolved_data.get("nodes").and_then(Value::as_array).into_iter().flatten().cloned());
         }
@@ -2085,6 +2245,7 @@ async fn open_pull_requests(
     open.sort_by_key(|facts| facts.get("number").and_then(Value::as_u64));
     let open = Arc::new(open);
     let resolved = Arc::new(resolved);
+    let not_found = Arc::new(not_found);
     if cacheable { pull_request_checks()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -2096,13 +2257,16 @@ async fn open_pull_requests(
                 changed: false,
                 open: open.clone(),
                 resolved: resolved.clone(),
+                not_found: not_found.clone(),
                 emit_pulls,
             },
         ); }
     Ok(RepositoryDetails {
         open,
         resolved,
+        not_found,
         identities_read,
+        fresh: true,
     })
 }
 
@@ -2227,7 +2391,126 @@ mod tests {
             refresh: false,
             webhook_covered: false,
             workflow_runs: None,
+            github_capture: None,
+            await_prs: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn exact_pr_registration_reads_a_previously_unseen_merged_pull_request() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/pulls/42", json!({
+            "number": 42, "node_id": "PR_42", "state": "closed", "head": {"sha": "head"},
+            "merged": true, "merge_commit_sha": "merge", "merged_at": "2026-11-19T09:00:00Z"}));
+        let mut input = request(&[], None, None);
+        input.await_prs = vec![crate::resource::AwaitPrTarget {
+            pr: 42, registrations: vec!["registration-42".into()],
+        }];
+        let observed = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        let pull = item(&observed.facts, "pull_requests", 42);
+        assert_eq!(pull["await_pr_observation"], json!({
+            "registrations": ["registration-42"], "head": "head",
+            "merged": true, "merge_commit_sha": "merge",
+        }));
+        assert_eq!(observed.facts["await_prs_not_found"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn exact_pr_absence_is_explicit_and_resets_after_a_successful_lookup() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let mut input = request(&[], None, None);
+        input.await_prs = vec![crate::resource::AwaitPrTarget {
+            pr: 42, registrations: vec!["registration-42".into()],
+        }];
+        let missing = observe_at(input.clone(), &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(missing.facts["await_prs_not_found"],
+            json!([{"pr": 42, "registrations": ["registration-42"]}]));
+        github.route("/repos/acme/garden/pulls/42", json!({
+            "number": 42, "node_id": "PR_42", "state": "open", "head": {"sha": "head"},
+            "merged": false}));
+        input.previous_facts = Some(missing.facts);
+        let found = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(found.facts["await_prs_not_found"], json!([]));
+        assert_eq!(item(&found.facts, "pull_requests", 42)["await_pr_observation"]["head"], "head");
+    }
+
+    #[test]
+    fn fresh_rest_head_does_not_relabel_a_cached_graphql_queue_entry() {
+        let mut items = BTreeMap::new();
+        merge(&mut items, Item { pull: true, listed: true, facts: serde_json::Map::from_iter([
+            ("number".into(), json!(42)),
+            ("head".into(), json!("queued-A")),
+            ("head_sha".into(), json!("queued-A")),
+            ("merge_queue".into(), json!({"state": "QUEUED"})),
+        ]) });
+        let proof = await_pr_observation(&json!({
+            "head": {"sha": "unqueued-B"}, "merged": false,
+        }), &["registration-B".into()]).unwrap();
+        merge(&mut items, Item { pull: true, listed: false, facts: serde_json::Map::from_iter([
+            ("number".into(), json!(42)), ("await_pr_observation".into(), proof),
+        ]) });
+        let queued = &items[&42].facts;
+        assert_eq!(queued["head_sha"], "queued-A",
+            "the entry remains A's even though REST already acquired B");
+        assert_eq!(queued["await_pr_observation"]["head"], "unqueued-B");
+        assert!(!queued.contains_key("merged"), "REST proof does not rewrite GraphQL state");
+        merge(&mut items, Item { pull: true, listed: false, facts: serde_json::Map::from_iter([
+            ("number".into(), json!(42)), ("head".into(), json!("unqueued-B")),
+            ("head_sha".into(), json!("unqueued-B")), ("merge_queue".into(), Value::Null),
+        ]) });
+        assert_eq!(items[&42].facts["head_sha"], "unqueued-B");
+        assert!(items[&42].facts["merge_queue"].is_null(),
+            "a later unqueued B has no earlier B entry to prove a B dequeue");
+    }
+
+    #[test]
+    fn tracked_merged_details_bind_the_final_head_and_merge_commit_together() {
+        assert!(RESOLVED_PULLS.contains("headRefOid"));
+        assert!(RESOLVED_ITEMS.contains("headRefOid"));
+        let facts = resolved_item(&json!({
+            "id": "PR_42", "number": 42, "state": "MERGED", "headRefOid": "new-head",
+            "merged": true, "mergeCommit": {"oid": "final-merge"},
+        }), &ItemIdentity { number: 42, pull: true }, "acme/garden");
+        assert_eq!(facts["head_sha"], "new-head");
+        assert_eq!(facts["merge_commit_sha"], "final-merge");
+    }
+
+    #[tokio::test]
+    async fn active_target_revalidates_cached_heads_and_pairs_a_later_merge_with_its_new_head() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/pulls/42", json!({
+            "number": 42, "node_id": "PR_42", "state": "open", "head": {"sha": "old-head"},
+            "merged": false}));
+        let mut input = request(&[], None, None);
+        input.every_ms = Some(300_000);
+        input.await_prs = vec![crate::resource::AwaitPrTarget {
+            pr: 42, registrations: vec!["registration-42".into()],
+        }];
+        let first = observe_at(input.clone(), &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(item(&first.facts, "pull_requests", 42)["await_pr_observation"]["head"], "old-head");
+        github.route("/repos/acme/garden/pulls/42", json!({
+            "number": 42, "node_id": "PR_42", "state": "closed", "head": {"sha": "new-head"},
+            "merged": true, "merge_commit_sha": "new-merge"}));
+        input.cursor = first.cursor;
+        input.previous_facts = Some(first.facts);
+        let second = observe_at(input, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(item(&second.facts, "pull_requests", 42)["await_pr_observation"], json!({
+            "registrations": ["registration-42"], "head": "new-head",
+            "merged": true, "merge_commit_sha": "new-merge",
+        }), "no intermediate open-head observation or new registration is needed");
+    }
+
+    #[tokio::test]
+    async fn repository_lookup_404_has_a_typed_observer_condition() {
+        let (_github, base) = FakeGithub::start().await;
+        let error = observe_at(request(&[], None, None), &base, Some(&GithubAuth::test("test")))
+            .await.unwrap_err();
+        assert!(error.downcast_ref::<super::super::ProviderRepositoryNotFound>().is_some());
+        assert_eq!(super::super::ObserverCondition::of(&error, None).code(),
+            "github-repository-not-found");
     }
 
     fn items<'a>(facts: &'a Value, collection: &str) -> Vec<&'a Value> {
@@ -3140,6 +3423,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partial_not_found_stays_unwatched_until_authoritative_rediscovery() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let stale = json!([
+            issue(1, "2026-09-10T00:00:00Z", json!({"node_id": "I_gone"})),
+            issue(2, "2026-09-10T00:00:00Z", json!({"node_id": "I_live"})),
+            issue(3, "2026-09-10T00:00:00Z", json!({"node_id": "PR_gone",
+                "pull_request": {}, "html_url": "https://github.com/acme/garden/pull/3"})),
+        ]);
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", stale.clone());
+        *github.graphql_pulls.lock() = Some((vec![], 100));
+        let live = json!({"id": "I_live", "state": "OPEN", "number": 2,
+            "url": "https://github.com/acme/garden/issues/2"});
+        *github.graphql.lock() = json!({
+            "data": {"nodes": [null, live, null]},
+            "errors": [
+                {"type": "NOT_FOUND", "path": ["nodes", 0], "message": "Could not resolve node I_gone"},
+                {"type": "NOT_FOUND", "path": ["nodes", 2], "message": "Could not resolve node PR_gone"},
+            ],
+        }).to_string();
+        let first = observe_at(request(&["issues", "pull_requests"], None, None), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap();
+        for (collection, number) in [("issues", 1), ("pull_requests", 3)] {
+            let gone = item(&first.facts, collection, number);
+            assert_eq!(gone["state"], "closed");
+            assert_eq!(gone["state_reason"], "not_found");
+        }
+        assert_eq!(item(&first.facts, "issues", 2)["state"], "open");
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        assert_eq!(cursor.identities.keys().collect::<Vec<_>>(), vec!["I_live"]);
+        assert_eq!(cursor.tombstones.keys().collect::<Vec<_>>(), vec!["I_gone", "PR_gone"]);
+
+        // A takeover without rediscovery keeps unavailable IDs out of the next batch.
+        let live_listing = json!([issue(2, "2026-09-10T00:00:00Z", json!({"node_id": "I_live"}))]);
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", live_listing.clone());
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", live_listing.clone());
+        *github.graphql.lock() = json!({"data": {"nodes": [live]}}).to_string();
+        let position = replicated_cursor(first.cursor.as_deref().unwrap()).unwrap();
+        let next_request = request(&["issues", "pull_requests"], Some(&position), Some(first.facts));
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        let next = observe_at(next_request, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(RepositoryCursor::parse(next.cursor.as_deref()).identities.keys()
+            .collect::<Vec<_>>(), vec!["I_live"]);
+        assert_eq!(github.graphql_requests.lock().last().unwrap()["variables"]["ids"], json!(["I_live"]));
+        assert!(items(&next.facts, "issues").iter().all(|item| item["node_id"] != "I_gone"));
+        assert!(items(&next.facts, "pull_requests").is_empty());
+
+        // A transferred issue discovered in another repository is independent, even with the
+        // same node ID. The unavailable original subject is not given an invented transfer target.
+        github.route("/repos/acme/greenhouse", json!({"id": 8}));
+        github.route("/repos/acme/greenhouse/issues?state=open&per_page=100",
+            json!([issue(77, "2026-09-10T00:00:00Z", json!({"node_id": "I_gone",
+                "html_url": "https://github.com/acme/greenhouse/issues/77"}))]));
+        *github.graphql.lock() = json!({"data": {"nodes": [{"id": "I_gone",
+            "state": "OPEN", "number": 77, "url": "https://github.com/acme/greenhouse/issues/77"}]}}).to_string();
+        let mut destination_request = request(&["issues"], None, None);
+        destination_request.locator = "acme/greenhouse".into();
+        let destination = observe_at(destination_request, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+        assert_eq!(item(&destination.facts, "issues", 77)["state"], "open");
+        assert!(RepositoryCursor::parse(destination.cursor.as_deref()).identities.contains_key("I_gone"));
+        assert!(RepositoryCursor::parse(next.cursor.as_deref()).tombstones.contains_key("I_gone"));
+
+        // REST rediscovery and an explicit/webhook refresh both recover the original subjects.
+        // Refresh also works when neither unavailable identity appears in a discovery listing.
+        for refresh in [false, true] {
+            github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+                if refresh { live_listing.clone() } else { stale.clone() });
+            *github.graphql.lock() = json!({"data": {"nodes": [
+                {"id": "I_gone", "state": "OPEN", "number": 1, "url": "https://github.com/acme/garden/issues/1"},
+                live,
+                {"id": "PR_gone", "state": "OPEN", "number": 3, "url": "https://github.com/acme/garden/pull/3"},
+            ]}}).to_string();
+            let mut recovery_request = request(&["issues", "pull_requests"], next.cursor.as_deref(), Some(next.facts.clone()));
+            recovery_request.refresh = refresh;
+            let recovery = observe_at(recovery_request, &base, Some(&GithubAuth::test("test"))).await.unwrap();
+            let cursor = RepositoryCursor::parse(recovery.cursor.as_deref());
+            assert!(cursor.tombstones.is_empty());
+            assert_eq!(cursor.identities.len(), 3);
+            assert_eq!(item(&recovery.facts, "issues", 1)["state"], "open");
+            assert_eq!(item(&recovery.facts, "pull_requests", 3)["state"], "open");
+            let requests = github.graphql_requests.lock();
+            let ids = requests.last().unwrap()["variables"]["ids"].as_array().unwrap()
+                .iter().map(|id| id.as_str().unwrap()).collect::<BTreeSet<_>>();
+            assert_eq!(ids, BTreeSet::from(["I_gone", "I_live", "PR_gone"]));
+        }
+    }
+
+    #[tokio::test]
+    async fn only_fresh_pull_discovery_recovers_an_unavailable_identity() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
+        let mut pull = open_pull(3, "head", "SUCCESS");
+        pull["id"] = json!("PR_unavailable");
+        github.open_pull_requests(json!([pull]));
+        let first = observe_at(request(&["pull_requests"], None, None), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap();
+        let mut cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        let identity = cursor.identities.remove("PR_unavailable").unwrap();
+        cursor.tombstones.insert("PR_unavailable".into(), identity);
+        let cursor = serde_json::to_string(&cursor).unwrap();
+        let since = inclusive_since(RepositoryCursor::parse(Some(&cursor)).items_since.as_deref().unwrap());
+        github.route(&format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"), json!([]));
+        github.take_requests();
+        let cached = observe_at(request(&["pull_requests"], Some(&cursor), Some(first.facts)), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap();
+        let state = RepositoryCursor::parse(cached.cursor.as_deref());
+        assert!(state.identities.is_empty());
+        assert!(state.tombstones.contains_key("PR_unavailable"));
+        assert!(github.take_requests().iter().all(|request| !request.starts_with("POST")));
+
+        // An unchanged but freshly read GraphQL listing is authoritative rediscovery.
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        let fresh = observe_at(request(&["pull_requests"], cached.cursor.as_deref(), Some(cached.facts)), &base,
+            Some(&GithubAuth::test("test"))).await.unwrap();
+        let state = RepositoryCursor::parse(fresh.cursor.as_deref());
+        assert!(state.tombstones.is_empty());
+        assert!(state.identities.contains_key("PR_unavailable"));
+        assert_eq!(item(&fresh.facts, "pull_requests", 3)["state"], "open");
+    }
+
+    #[tokio::test]
     async fn a_transferred_identity_updates_its_original_number() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
@@ -3572,7 +3977,7 @@ mod tests {
             github.take_requests();
             let idle = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
                 .await.unwrap();
-            assert_eq!(idle.facts, json!({"repository_id": 7}));
+            assert_eq!(idle.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
             assert_eq!(idle.cursor, first.cursor);
             let requests = std::mem::take(&mut *github.requests.lock());
             assert_eq!(requests.len(), 3);
@@ -3602,7 +4007,7 @@ mod tests {
             assert_eq!(item(&edited.facts, "issues", 1)["title"], "edited within the same second");
             let quiet = observe_at(request(&["comments"], edited.cursor.as_deref(), None), &base, Some(&token))
                 .await.unwrap();
-            assert_eq!(quiet.facts, json!({"repository_id": 7}));
+            assert_eq!(quiet.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
         }).await;
     }
 
@@ -3720,7 +4125,7 @@ mod tests {
         assert_eq!(requests.iter().filter(|request| request.contains("&page=11 ")).count(), 2);
         let replay = observe_at(request(&["comments"], continued.cursor.as_deref(), None), &base, Some(&token))
             .await.unwrap();
-        assert_eq!(replay.facts, json!({"repository_id": 7}));
+        assert_eq!(replay.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
         let reconciled = observe_at(request(&["comments"], replay.cursor.as_deref(), None), &base, Some(&token))
             .await.unwrap();
         let cursor = RepositoryCursor::parse(reconciled.cursor.as_deref());
@@ -3991,7 +4396,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(third.facts, json!({"repository_id": 7}));
+        assert_eq!(third.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
         assert_eq!(third.cursor, second.cursor);
         let requests = github.take_requests();
         assert_eq!(
@@ -4029,7 +4434,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(quiet.facts, json!({"repository_id": 7}));
+        assert_eq!(quiet.facts, json!({"repository_id": 7, "await_prs_not_found": []}));
         let requests = github.take_requests();
         assert!(
             !requests
@@ -4397,6 +4802,115 @@ mod tests {
         assert_eq!(first["state"], "pass");
         assert_eq!(second["state"], "pass");
         assert_ne!(first["execution"], second["execution"]);
+    }
+
+    #[test]
+    fn null_workflow_run_database_id_produces_no_execution_and_uses_conclusion_identity() {
+        let rules = [RequiredCheck { context: "build".into(), app: Some(15368) }];
+        let produce = |suite_id: u64, conclusion: &str| {
+            let mut suite = workflow_suite(suite_id, "2026-10-13T09:01:00Z");
+            suite["workflowRun"]["databaseId"] = Value::Null;
+            assert!(WorkflowExecution::from_suite(&suite).is_none());
+            let mut pull = open_pull(12, &"a".repeat(40), "SUCCESS");
+            pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] = json!([suite]);
+            pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"] =
+                json!([workflow_check("build", Some(conclusion), &suite)]);
+            let mut facts = open_pull_request(&pull, Some(&rules));
+            // Item normalization uses head_sha; keep the producer's other fields unchanged.
+            facts.insert("head_sha".into(), facts["head"].clone());
+            let facts = Value::Object(facts);
+            assert!(facts["required_checks"].get("execution").is_none());
+            facts
+        };
+        let passed = produce(10, "SUCCESS");
+        let failed = produce(20, "FAILURE");
+        let recovery = produce(30, "SUCCESS");
+        assert_eq!(passed["required_checks"]["state"], "pass");
+        assert_eq!(failed["required_checks"]["state"], "fail");
+        let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+        let watch = crate::model::WatchSpec { item: 12, since_unix_ms: 0, until_unix_ms: None };
+        let subject = thread.watch("agent/example/planner");
+        let message = |facts: &Value, observation: &str| crate::github_watch::wake(
+            &subject, &watch, &thread, facts,
+            &crate::github_watch::WatchEvent::Checks(facts["required_checks"].clone()),
+            observation, None,
+        ).unwrap();
+        let first = message(&passed, "first");
+        assert_ne!(first.subject, message(&failed, "second").subject);
+        // Nullable numeric Actions IDs have the same known limitation as external checks:
+        // a different suite alone cannot distinguish an identical recurring conclusion.
+        assert_eq!(first.subject, message(&recovery, "third").subject);
+    }
+
+    #[test]
+    fn excluded_same_named_apps_and_superseded_suites_do_not_change_wake_identity() {
+        let rules = [RequiredCheck { context: "build".into(), app: Some(15368) }];
+        let current = workflow_suite(20, "2026-10-13T09:02:00Z");
+        let superseded = workflow_suite(10, "2026-10-13T09:01:00Z");
+        let produce = |foreign_conclusion: Option<&str>, old_conclusion: &str| {
+            let mut pull = open_pull(12, &"a".repeat(40), "SUCCESS");
+            pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] =
+                json!([superseded, current]);
+            let foreign = json!({"__typename":"CheckRun", "name":"build",
+                "status":if foreign_conclusion.is_some() { "COMPLETED" } else { "IN_PROGRESS" },
+                "conclusion":foreign_conclusion, "checkSuite":{"app":{"databaseId":999}}});
+            pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"] =
+                json!([workflow_check("build", Some("SUCCESS"), &current),
+                    workflow_check("build", Some(old_conclusion), &superseded), foreign]);
+            let mut facts = open_pull_request(&pull, Some(&rules));
+            facts.insert("head_sha".into(), facts["head"].clone());
+            Value::Object(facts)
+        };
+        let baseline = produce(None, "FAILURE");
+        let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+        let watch = crate::model::WatchSpec { item: 12, since_unix_ms: 0, until_unix_ms: None };
+        let subject = thread.watch("agent/example/planner");
+        let message = |facts: &Value, observation: &str| crate::github_watch::wake(
+            &subject, &watch, &thread, facts,
+            &crate::github_watch::WatchEvent::Checks(facts["required_checks"].clone()),
+            observation, None,
+        ).unwrap();
+        for changed in [produce(Some("SUCCESS"), "FAILURE"), produce(None, "SUCCESS")] {
+            assert_ne!(baseline["checks"], changed["checks"]);
+            assert_eq!(baseline["required_checks"], changed["required_checks"]);
+            assert_eq!(baseline["required_checks"]["state"], "pass");
+            assert!(crate::github_watch::watch_events(&watch, Some(&baseline), &json!({}), &changed).is_empty());
+            assert_eq!(message(&baseline, "first").subject, message(&changed, "second").subject);
+        }
+    }
+
+    #[test]
+    fn cancelled_checks_are_not_failures_and_optional_checks_do_not_count() {
+        let run = |name: &str, conclusion: &str| json!({
+            "__typename":"CheckRun", "name":name, "status":"COMPLETED",
+            "conclusion":conclusion, "checkSuite":{"app":{"databaseId":15368}}
+        });
+        let contexts = [run("build", "SUCCESS"), run("optional", "CANCELLED")];
+        let rules = [RequiredCheck { context: "build".into(), app: Some(15368) }];
+        let required = required_checks(&contexts, Some(&rules));
+        assert_eq!(required["state"], "pass");
+        assert_eq!(required["failed"], json!([]));
+        let all = required_checks(&contexts, None);
+        assert_eq!(all["state"], "cancelled");
+        assert_eq!(all["failed"], json!([]));
+        let cancelled = required_checks(&[run("build", "CANCELLED")], Some(&rules));
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["failed"], json!([]));
+        let failed = required_checks(&[run("build", "FAILURE"), run("optional", "CANCELLED")], None);
+        assert_eq!(failed["state"], "fail");
+        assert_eq!(failed["failed"], json!(["build"]));
+    }
+
+    #[test]
+    fn cancelled_required_checks_stay_on_the_active_refresh_cadence() {
+        for state in ["fail", "cancelled"] {
+            let facts = json!({"checks_state":"failure",
+                "required_checks":{"state":state}, "merge_queue":null});
+            assert!(settling(facts.as_object().unwrap()));
+        }
+        let passed = json!({"checks_state":"success",
+            "required_checks":{"state":"pass"}, "merge_queue":null});
+        assert!(!settling(passed.as_object().unwrap()));
     }
 
     #[tokio::test]

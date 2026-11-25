@@ -8,7 +8,7 @@ use super::text::{self, run};
 use super::theme;
 use super::view::*;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 
 /// What Home says when nothing needs the person; setup's first-run test waits for it.
 pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
@@ -579,13 +579,12 @@ pub fn link(doc: &mut Doc, prefix: &str, label: &str, subject: &str) {
         width: text::width(label) as u16,
         hit: Hit::Peek(subject.to_owned()),
     });
-    doc.line(Line::from(vec![
-        span(prefix.to_owned(), theme::dim()),
-        span(
-            label.to_owned(),
-            theme::fg(theme::BLUE).add_modifier(Modifier::UNDERLINED),
-        ),
-    ]));
+    let (first, _) = text::field_prefixes(prefix.trim_end(), text::width(prefix), theme::dim());
+    doc.lines(text::wrap(
+        &[text::run(label, theme::fg(theme::BLUE).add_modifier(Modifier::UNDERLINED))],
+        text::width(prefix) + text::width(label),
+        &first, &[], None,
+    ));
 }
 
 fn text_box(doc: &mut Doc, title: &str, drafts: &Drafts<'_>, placeholder: &str, width: usize) {
@@ -685,7 +684,7 @@ fn structured_request(
             ],
             inner,
             &[],
-            &[text::run("             ", theme::dim())],
+            &[text::decoration("             ", theme::dim())],
             None,
         ));
         card.blank();
@@ -710,7 +709,7 @@ fn structured_request(
                 &text::inline(reason, theme::text()),
                 inner,
                 &[text::run(" • ", theme::fg(theme::LAVENDER))],
-                &[text::run("   ", theme::dim())],
+                &[text::decoration("   ", theme::dim())],
                 None,
             ));
         }
@@ -729,8 +728,8 @@ fn structured_request(
                     text::run(format!("  {target}"), theme::dim()),
                 ],
                 inner,
-                &[text::run("   ", theme::dim())],
-                &[text::run("   ", theme::dim())],
+                &[text::decoration("   ", theme::dim())],
+                &[text::decoration("   ", theme::dim())],
                 None,
             ));
         }
@@ -837,7 +836,7 @@ fn structured_request(
             ],
             inner,
             &[],
-            &[text::run("            ", theme::dim())],
+            &[text::decoration("            ", theme::dim())],
             None,
         ));
         card.blank();
@@ -1075,7 +1074,7 @@ fn answer_row(
         }
     };
     let mut head = vec![
-        text::run(
+        text::decoration(
             if chosen { " ◉ " } else { " ○ " },
             fill(theme::strong(if chosen {
                 theme::ACCENT
@@ -1101,16 +1100,13 @@ fn answer_row(
         &head,
         inner,
         &[],
-        &[text::run("    ", fill(theme::dim()))],
+        &[text::decoration("    ", fill(theme::dim()))],
         None,
     );
     if chosen {
         for line in &mut wrapped {
             let used: usize = line.spans.iter().map(|span| span.width()).sum();
-            line.spans.push(Span::styled(
-                " ".repeat(inner.saturating_sub(used)),
-                Style::default().bg(theme::SURFACE0),
-            ));
+            line.spans.push(Span::decoration(" ".repeat(inner.saturating_sub(used)), Style::default().bg(theme::SURFACE0)));
         }
     }
     card.lines(wrapped);
@@ -1323,6 +1319,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     }
     // The step that waits on this ask, and what it is for: what answering lets go on.
     if let Some(blocked) = &item.blocked {
+        let (first, rest) = text::field_prefixes("waits", 9, theme::dim());
         card.lines(text::wrap(
             &[
                 text::run(subject_label(world, &blocked.step), theme::soft()),
@@ -1337,8 +1334,8 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 text::run(" — it continues once you answer", theme::dim()),
             ],
             inner,
-            &[text::run("waits    ", theme::dim())],
-            &[text::run("         ", theme::dim())],
+            &first,
+            &rest,
             None,
         ));
     }
@@ -1530,7 +1527,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                         &text::inline(goal, theme::text()),
                         inner,
                         &[run("◆ ", theme::fg(theme::LAVENDER))],
-                        &[run("  ", theme::dim())],
+                        &[text::decoration("  ", theme::dim())],
                         None,
                     ));
                 }
@@ -1637,7 +1634,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                     &[run(change.clone(), theme::fg(color))],
                     inner,
                     &[run(format!("{sign} "), theme::strong(color))],
-                    &[run("  ", theme::dim())],
+                    &[text::decoration("  ", theme::dim())],
                     None,
                 ));
             }
@@ -1831,8 +1828,8 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                         text::run(format!("  {target}"), theme::dim()),
                     ],
                     inner,
-                    &[text::run("   ", theme::dim())],
-                    &[text::run("   ", theme::dim())],
+                    &[text::decoration("   ", theme::dim())],
+                    &[text::decoration("   ", theme::dim())],
                     None,
                 ));
             }
@@ -2214,8 +2211,8 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
     let used = second.iter().map(Span::width).sum::<usize>();
     if used + text::width(actions) + 2 <= width {
         let column = width - text::width(actions);
-        second.push(span(" ".repeat(column - used), theme::dim()));
-        second.push(span(actions, theme::fg(theme::ACCENT)));
+        second.push(Span::decoration(" ".repeat(column - used), theme::dim()));
+        second.push(Span::decoration(actions, theme::fg(theme::ACCENT)));
         doc.targets.push(super::doc::Target {
             line: doc.lines.len(),
             column: column as u16,
@@ -2229,7 +2226,7 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
             &text::inline(&login_guidance(agent), theme::fg(theme::PERSON)),
             width,
             &[text::run("   ⚿ ", theme::fg(theme::PERSON))],
-            &[text::run("     ", theme::dim())],
+            &[text::decoration("     ", theme::dim())],
             None,
         ));
     }
@@ -2237,8 +2234,8 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
         doc.lines(text::wrap(
             &text::inline(progress, theme::text()),
             width,
-            &[text::run("   ", theme::dim())],
-            &[text::run("   ", theme::dim())],
+            &[text::decoration("   ", theme::dim())],
+            &[text::decoration("   ", theme::dim())],
             None,
         ));
     }
@@ -2490,7 +2487,7 @@ pub fn mission_detail(
             &text::inline(outcome, theme::text()),
             inner,
             &[run(" outcome ", theme::dim())],
-            &[run("         ", theme::dim())],
+            &[text::decoration("         ", theme::dim())],
             None,
         ));
     }
@@ -2501,7 +2498,7 @@ pub fn mission_detail(
             &text::inline(goal, theme::text()),
             inner,
             &[run("◆ ", theme::fg(theme::LAVENDER))],
-            &[run("  ", theme::dim())],
+            &[text::decoration("  ", theme::dim())],
             None,
         ));
     }
@@ -2538,6 +2535,7 @@ pub fn mission_detail(
             .collect(),
         messages: steps.messages,
         entries: steps.entries,
+        copy_blocks: steps.copy_blocks,
     };
     doc.card("steps", theme::OVERLAY1, false, steps, width);
     let mut agents = Doc::new();
@@ -2630,7 +2628,7 @@ pub fn mission_kdl(world: &World, id: Option<&str>, width: usize) -> Doc {
                 } else {
                     theme::fg(theme::SUBTEXT1)
                 };
-                doc.lines(text::wrap(&[run(line.to_owned(), style)], width, &[], &[run("    ", theme::dim())], None));
+                doc.lines(text::wrap(&[run(line.to_owned(), style)], width, &[], &[text::decoration("    ", theme::dim())], None));
             }
         }
         None => doc.wrap(
@@ -3142,7 +3140,7 @@ fn demo_banner(doc: &mut Doc, width: usize) {
             ),
             run(" ", theme::dim()),
         ],
-        &[run("            ", theme::dim())],
+        &[text::decoration("            ", theme::dim())],
         None,
     ));
     doc.blank();
@@ -3388,7 +3386,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
 // -------------------------------------------------------------- agent details
 
 /// The pane beside a conversation: what the agent holds, what is next, and how it runs.
-pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'static str) -> Doc {
+pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'static str, expanded: bool) -> Doc {
     let mut doc = Doc::new();
     let details = &agent.details;
     let unknown = || span("Fractal has not said", theme::dim());
@@ -3429,13 +3427,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     doc.section("now", None, width);
     // What its step last reported is the status; the step and its goal say where it comes from.
     if let Some(progress) = &details.progress {
-        doc.lines(text::wrap(
-            &text::inline(progress, theme::bold()),
-            width,
-            &[],
-            &[],
-            None,
-        ));
+        details_text(&mut doc, progress, theme::bold(), width, expanded, &agent.id);
     }
     match (&agent.mission, &agent.step) {
         (Some(mission), Some(step)) => {
@@ -3448,13 +3440,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 .unwrap_or_else(|| "a mission".into());
             link(&mut doc, "", &format!("{title} › {step}"), mission);
             if let Some(goal) = &details.goal {
-                doc.lines(text::wrap(
-                    &text::inline(goal, theme::soft()),
-                    width,
-                    &[],
-                    &[],
-                    None,
-                ));
+                details_text(&mut doc, goal, theme::soft(), width, expanded, &agent.id);
             }
             if let Some(claimed) = &details.claimed {
                 doc.line(Line::from(span(
@@ -3488,7 +3474,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 &[run(next.clone(), theme::text())],
                 width,
                 &[run("› ", theme::fg(theme::ACCENT))],
-                &[run("  ", theme::dim())],
+                &[text::decoration("  ", theme::dim())],
                 None,
             ),
             details.next_mission.as_ref(),
@@ -3505,7 +3491,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 &[run(item.clone(), theme::soft())],
                 width,
                 &[run("· ", theme::dim())],
-                &[run("  ", theme::dim())],
+                &[text::decoration("  ", theme::dim())],
                 None,
             ),
             details.queue_missions.get(index),
@@ -3523,7 +3509,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 &spans,
                 width,
                 &[run("· ", theme::dim())],
-                &[run("  ", theme::dim())],
+                &[text::decoration("  ", theme::dim())],
                 None,
             ));
         }
@@ -3560,6 +3546,28 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     doc
 }
 
+/// Keep prose from displacing the rest of the details; wrapping defines the preview budget.
+fn details_text(doc: &mut Doc, body: &str, style: Style, width: usize, expanded: bool, agent: &str) {
+    const PREVIEW_LINES: usize = 4;
+    let mut lines = text::wrap(&text::inline(body, style), width, &[], &[], None);
+    let long = lines.len() > PREVIEW_LINES;
+    if long && !expanded {
+        lines.truncate(PREVIEW_LINES);
+    }
+    doc.lines(lines);
+    if long {
+        let hint = if expanded { "less (Enter)" } else { "… more (Enter)" };
+        let line = doc.lines.len();
+        doc.wrap(&text::inline(hint, theme::dim()), width);
+        doc.targets.push(super::doc::Target {
+            line,
+            column: 0,
+            width: text::width(hint).min(width) as u16,
+            hit: Hit::DetailsPreview(agent.to_owned()),
+        });
+    }
+}
+
 // ---------------------------------------------------------------- tree views
 
 /// A listing laid out as the graph's path tree: folders from the id, one line per leaf.
@@ -3587,7 +3595,7 @@ fn tree_listing(
             ])));
             open.push(folder.clone());
         }
-        let mut row = vec![span("  ".repeat(folders.len()), theme::dim())];
+        let mut row = vec![Span::decoration("  ".repeat(folders.len()), theme::dim())];
         row.extend(first);
         items.push(Item::Row {
             index: ids.len(),
@@ -4381,6 +4389,8 @@ mod mission_golden {
                     let doc =
                         mission_detail(&world, Some(&mission.id), width, "⠋", None, &expanded);
                     // The digest also locks styles, exact span boundaries and click targets.
+                    // Semantic Line/Span Debug includes link metadata (even link: None), so
+                    // migrating from ratatui text changes digests without changing visible text.
                     let digest = Sha256::digest(format!("{doc:#?}").as_bytes());
                     actual.push_str(&format!(
                         "{} width={width} open={open} sha256={digest:x}\n",

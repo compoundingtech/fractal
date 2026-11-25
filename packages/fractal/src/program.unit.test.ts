@@ -3,12 +3,20 @@ import { Data, Effect, Schedule, Schema } from 'effect'
 
 import {
   AskCancelled,
+  AwaitPrFailed,
+  AwaitPrOutcome,
   ChildFailed,
   Fractal,
+  ResourceError,
   type ProgramExit,
   type ProgramServices,
 } from './effect.ts'
 import { fakeHost, journalOf, start } from './program-host.fixture.ts'
+import type { HostContextV1, ResourceRequest } from './program-engine.ts'
+import { programInputs } from './program.ts'
+import {
+  ReviewError, ReviewResult, reviewComment, reviewKey, type ReviewOptions,
+} from './review.ts'
 import type { AgentRef } from './subject-ref.ts'
 
 class StepFailed extends Data.TaggedError('StepFailed')<{
@@ -24,6 +32,166 @@ const reportTo: AgentRef = {
 }
 const meta = { url: 'file:///tree/factory/test/mission.ts' }
 const Change = Schema.Struct({ change: Schema.String })
+
+
+describe('program resource inputs', () => {
+  const Source = Fractal.resourceInput('vcs.pull-request')
+  const Input = Schema.Struct({ source: Source, head: Schema.String })
+
+  it('uses the native resource input declaration alongside ordinary text inputs', () => {
+    expect(programInputs(Input)).toEqual([
+      { name: 'source', kind: 'resource', resourceKind: 'vcs.pull-request' },
+      { name: 'head', kind: 'text' },
+    ])
+    expect(() => Fractal.resourceInput(' ')).toThrow('Resource input kind must be nonempty')
+    expect(() => programInputs(Schema.Struct({ source: Schema.optionalKey(Source) }))).toThrow(
+      'Program input source must be required and encode to a string',
+    )
+  })
+
+  it.effect('decodes the pinned observation without changing its immutable reference', () =>
+    Effect.gen(function* () {
+      const source = `resource/github/example/repo/pull-request/7@${'a'.repeat(64)}`
+      const program = Fractal.mission({
+        meta, id: 'factory/test', goal: 'Consume the subscribed resource.', reportTo,
+        input: Input, output: Schema.String,
+      }, (input) => Effect.succeed(input.source))
+      expect(yield* start(program, fakeHost({ payload: { source, head: 'h1' } }))).toEqual({
+        _tag: 'Success', value: source,
+      })
+      expect(Schema.is(Source)('resource/github/example/repo/pull-request/7')).toBe(false)
+    }),
+  )
+})
+describe('pull request waits', () => {
+  const request = { id: 'await-outcome', repo: 'owner/repo', pr: 42, head: 'head-sha' }
+  const waiting = Fractal.mission(
+    {
+      meta, id: 'factory/test', goal: 'Wait for merge.', reportTo, input: Change,
+      output: AwaitPrOutcome, error: AwaitPrFailed,
+    },
+    (): Effect.Effect<AwaitPrOutcome, AwaitPrFailed, ProgramServices> => Fractal.awaitPr(request),
+  )
+
+  for (const outcome of [
+    { outcome: 'merged', mergeCommit: 'merge-sha' },
+    { outcome: 'dequeued', reason: 'checks-failed' },
+    { outcome: 'dequeued', reason: 'head-changed' },
+  ] satisfies readonly AwaitPrOutcome[]) {
+    it.effect(`returns ${JSON.stringify(outcome)} live and bypasses the host on replay`, () =>
+      Effect.gen(function* () {
+        const requests: unknown[] = []
+        const exit: ProgramExit = { _tag: 'Success', value: outcome }
+        const host = fakeHost({
+          awaitPr: async (value) => {
+            requests.push(value)
+            return exit
+          },
+        })
+        expect(yield* start(waiting, host)).toEqual(exit)
+        expect(requests).toEqual([
+          { key: 'await-outcome', repo: 'owner/repo', pr: 42, head: 'head-sha' },
+        ])
+        // Deferred results are already journaled by the daemon, not recorded a second time.
+        expect(host.recorded).toEqual([])
+        expect(host.started).toEqual([])
+        const replay = fakeHost({ journal: [['await-outcome', exit]] })
+        expect(yield* start(waiting, replay)).toEqual(exit)
+        expect(replay.recorded).toEqual([])
+        expect(replay.started).toEqual([])
+      }),
+    )
+  }
+
+  for (const code of ['unknown-repo', 'unknown-pr'] as const) {
+    it.effect(`decodes ${code} as a typed error live and on replay`, () =>
+      Effect.gen(function* () {
+        const error = {
+          _tag: 'AwaitPrFailed', code, repo: request.repo, pr: request.pr, message: code,
+        } as const
+        const exit: ProgramExit = { _tag: 'Failure', error }
+        const caught = Fractal.mission(
+          {
+            meta, id: 'factory/test', goal: 'Handle missing PR.', reportTo,
+            input: Change, output: Schema.Union([AwaitPrOutcome, Schema.String]),
+          },
+          () => Fractal.awaitPr(request).pipe(
+            Effect.catchTag('AwaitPrFailed', (failure) => {
+              expect(failure).toBeInstanceOf(AwaitPrFailed)
+              expect(failure.code).toBe(code)
+              expect(failure.repo).toBe(request.repo)
+              expect(failure.pr).toBe(request.pr)
+              return Effect.succeed(failure.message)
+            }),
+          ),
+        )
+        expect(yield* start(waiting, fakeHost({ awaitPr: async () => exit }))).toEqual(exit)
+        expect(yield* start(caught, fakeHost({ awaitPr: async () => exit }))).toEqual({
+          _tag: 'Success', value: code,
+        })
+        expect(yield* start(caught, fakeHost({ journal: [['await-outcome', exit]] }))).toEqual({
+          _tag: 'Success', value: code,
+        })
+      }),
+    )
+  }
+
+  it.effect('uses successive keyed occurrences for repeated waits and replays each outcome', () =>
+    Effect.gen(function* () {
+      const outcomes: readonly AwaitPrOutcome[] = [
+        { outcome: 'dequeued', reason: 'head-changed' },
+        { outcome: 'merged', mergeCommit: 'merge-sha' },
+      ]
+      const repeated = Fractal.mission(
+        {
+          meta, id: 'factory/test', goal: 'Wait for both heads.', reportTo, input: Change,
+          output: Schema.Array(AwaitPrOutcome),
+        },
+        () => Effect.gen(function* () {
+          const first = yield* Fractal.awaitPr(request)
+          const second = yield* Fractal.awaitPr({ ...request, head: 'new-head' })
+          return [first, second]
+        }),
+      )
+      const requests: unknown[] = []
+      const resolutions: [string, ProgramExit][] = []
+      const host = fakeHost({
+        awaitPr: async (value) => {
+          const exit: ProgramExit = { _tag: 'Success', value: outcomes[requests.length]! }
+          requests.push(value)
+          resolutions.push([value.key, exit])
+          return exit
+        },
+      })
+      expect(yield* start(repeated, host)).toEqual({ _tag: 'Success', value: outcomes })
+      expect(requests).toEqual([
+        { key: 'await-outcome', repo: request.repo, pr: request.pr, head: request.head },
+        { key: 'await-outcome#2', repo: request.repo, pr: request.pr, head: 'new-head' },
+      ])
+      expect(yield* start(repeated, fakeHost({ journal: resolutions }))).toEqual({
+        _tag: 'Success', value: outcomes,
+      })
+    }),
+  )
+
+  it.effect('rejects malformed outcomes and unexpected error codes at the schema boundary', () =>
+    Effect.gen(function* () {
+      for (const value of [
+        { outcome: 'merged' },
+        { outcome: 'dequeued' },
+        { outcome: 'pending', reason: 'still-queued' },
+      ]) {
+        const decoded = yield* Effect.result(Schema.decodeUnknownEffect(AwaitPrOutcome)(value))
+        expect(decoded._tag).toBe('Failure')
+      }
+      const decoded = yield* Effect.result(Schema.decodeUnknownEffect(AwaitPrFailed)({
+        _tag: 'AwaitPrFailed', code: 'head-changed', repo: request.repo, pr: request.pr,
+        message: 'Head changes are successful dequeues, not errors.',
+      }))
+      expect(decoded._tag).toBe('Failure')
+    }),
+  )
+})
 
 describe('program replay', () => {
   const effects: string[] = []
@@ -611,6 +779,290 @@ describe('commands', () => {
           ),
       )
       expect(yield* start(echo, fakeHost())).toEqual({ _tag: 'Success', value: 'echo abc' })
+    }),
+  )
+})
+
+describe('native review lifecycle', () => {
+  const head = 'a'.repeat(40)
+  const moved = 'b'.repeat(40)
+  const subject = { kind: 'pullRequest', repo: 'owner/repo', number: 19, head, format: 'q19' } as const
+  const reviewer = 'agent/review-child/reviewer'
+  const options: ReviewOptions = {
+    id: 'admit', subject, rubric: { ref: 'rubric/security', digest: `sha256:${'c'.repeat(64)}` },
+    reviewer: { mission: 'factory/review', seat: 'reviewer', product: 'review/verdict',
+      freshContext: true, input: { policy: 'strict' } },
+  }
+  const verdict = { verdict: 'GO', findings: [], head, commentId: 71 } as const
+  const execution = {
+    id: 'claim/review', step_subject: 'step-run/review-generation/review', attempt: 1,
+    agent: reviewer, incarnation_id: 'runtime-review', declared_model: 'requested',
+    observed_models: ['actual'], fallback: null, started_at_unix_ms: 10,
+    ended_at_unix_ms: 30, duration_ms: 20, status: 'submitted',
+    trace_id: null, exit_evidence: null, usage: null,
+  }
+  const completed = (value: unknown = verdict, executions: unknown = [execution]): ProgramExit => ({
+    _tag: 'Success', value: { run: 'mission-run/review-child', status: 'completed', executions,
+      products: { 'resource/mission-run/review-child/review/verdict': value } },
+  })
+  const programFor = (request: ReviewOptions) => Fractal.mission(
+    { meta, id: 'factory/test', goal: 'Review exact material.', reportTo, input: Change,
+      output: ReviewResult, error: Schema.Union([ReviewError, ChildFailed, ResourceError]) },
+    () => Fractal.review(request),
+  )
+  const setup = (config: {
+    readonly options?: ReviewOptions
+    readonly childExit?: ProgramExit
+    readonly journal?: Iterable<readonly [string, ProgramExit]>
+    readonly heads?: readonly string[]
+    readonly author?: string
+    readonly caller?: string
+    readonly assignee?: string
+    readonly comment?: Readonly<Record<string, unknown>>
+    readonly missingComment?: boolean
+    readonly lane?: boolean
+    readonly cache?: Map<string, ProgramExit>
+  } = {}) => {
+    const request = config.options ?? options
+    const childExit = config.childExit ?? completed()
+    const children: Parameters<HostContextV1['child']>[0][] = []
+    const calls: string[][] = []
+    const resources: ResourceRequest[] = []
+    let observations = 0
+    const publication = reviewKey({ ...request, id: JSON.stringify([
+      'mission-run/run-1', 'step-run/gen-1/program', 1, request.id,
+    ]) })
+    const canonical = reviewComment({ subject, rubric: request.rubric, verdict,
+      reviewer, publication })
+    const read = (argv: readonly string[]) => {
+      calls.push([...argv])
+      expect(argv.slice(0, 2)).toEqual(['gh', 'api'])
+      expect(argv).toHaveLength(3)
+      if (argv[2] === 'repos/owner/repo/pulls/19') {
+        const sha = config.heads?.[observations] ?? head
+        observations++
+        return { code: 0, signal: null, stderr: '', stdout: JSON.stringify({
+          state: 'open', head: { sha }, body: config.author === undefined ? '' :
+            `<!-- agent-footer:begin v=3 -->\n| \`agent_identity\` | ${config.author} |\n<!-- agent-footer:end -->`,
+        }) }
+      }
+      expect(argv[2]).toBe('repos/owner/repo/issues/comments/71')
+      return config.missingComment
+        ? { code: 1, signal: null, stderr: 'Not Found', stdout: '' }
+        : { code: 0, signal: null, stderr: '', stdout: JSON.stringify({
+          id: 71, issue_url: 'https://api.github.com/repos/owner/repo/issues/19', body: canonical,
+          created_at: '2026-11-19T00:00:00Z', updated_at: '2026-11-19T00:00:00Z',
+          ...config.comment,
+        }) }
+    }
+    const host = fakeHost({
+      ...(config.journal === undefined ? {} : { journal: config.journal }),
+      ...(config.lane ? { resourceMembership: {
+        membershipId: 'membership/review', authorityEpoch: 'epoch/1',
+        generation: 'generation/1', coverage: 'logical' as const,
+      } } : {}),
+      child: async (child) => { children.push(child); return childExit },
+      spawn: async (argv) => {
+        expect(config.lane).not.toBe(true)
+        return read(argv)
+      },
+      resource: async (resource) => {
+        resources.push(resource)
+        expect(resource.operation).toBe('resource.lane.exec')
+        const cached = config.cache?.get(resource.key)
+        if (cached !== undefined) return cached
+        const exit: ProgramExit = { _tag: 'Success', value: read(
+          Schema.decodeUnknownSync(Schema.Struct({ argv: Schema.Array(Schema.String) }))(resource.payload).argv,
+        ) }
+        config.cache?.set(resource.key, exit)
+        return exit
+      },
+    })
+    return { ...host, context: { ...host.context,
+      env: { ...host.context.env, ST_REQUESTER: config.caller ?? 'agent/run-1/author',
+        ST_ASSIGNEE: config.assignee ?? '', ST_RUN_GENERATION: 'gen-1' } },
+      children, calls, resources, childExit, request,
+      program: programFor(request),
+    }
+  }
+
+  it.effect('accepts a reviewer-owned exact-head comment from one independent child and never posts', () =>
+    Effect.gen(function* () {
+      const host = setup()
+      expect(host.context.env).not.toHaveProperty('ST_AGENT')
+      expect(execution.step_subject).not.toContain('review-child')
+      expect(yield* start(host.program, host)).toEqual({ _tag: 'Success', value: verdict })
+      expect(host.children).toHaveLength(1)
+      expect(host.children[0]).toMatchObject({
+        key: `${reviewKey(options)}/worker`, mission: options.reviewer.mission,
+        input: { policy: 'strict' },
+      })
+      const request = JSON.parse(host.children[0]!.input.review_request!)
+      expect(request).toMatchObject({ subject, rubric: options.rubric,
+        publication: reviewKey({ ...options, id: JSON.stringify([
+          host.context.run, host.context.step, host.context.attempt, options.id,
+        ]) }) })
+      expect(host.calls.map((argv) => argv[2])).toEqual([
+        'repos/owner/repo/pulls/19', 'repos/owner/repo/pulls/19',
+        'repos/owner/repo/issues/comments/71', 'repos/owner/repo/pulls/19',
+      ])
+      expect(host.recorded).toEqual([])
+    }),
+  )
+
+  it.effect('also admits a natively completed invocation inside a completed child', () =>
+    Effect.gen(function* () {
+      const host = setup({ childExit: completed(verdict, [{ ...execution, status: 'completed' }]) })
+      expect(yield* start(host.program, host)).toEqual({ _tag: 'Success', value: verdict })
+    }),
+  )
+
+  it.effect('adopts the durable child result on replay but re-reads publication and head', () =>
+    Effect.gen(function* () {
+      const live = setup()
+      expect((yield* start(live.program, live))._tag).toBe('Success')
+      const replay = setup({ journal: [[`${reviewKey(options)}/worker`, live.childExit]] })
+      expect(yield* start(replay.program, replay)).toEqual({ _tag: 'Success', value: verdict })
+      expect(replay.children).toEqual([])
+      expect(replay.calls).toEqual(live.calls)
+      expect(replay.recorded).toEqual([])
+    }),
+  )
+
+  it.effect('invalidates an old verdict when the head moves during the child or after comment verification', () =>
+    Effect.gen(function* () {
+      for (const heads of [[head, moved], [head, head, moved]]) {
+        const host = setup({ heads })
+        expect(yield* start(host.program, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'stale-head' },
+        })
+        expect(host.children).toHaveLength(1)
+      }
+      const replay = setup({ heads: [moved],
+        journal: [[`${reviewKey(options)}/worker`, completed()]] })
+      expect(yield* start(replay.program, replay)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'stale-head' },
+      })
+      expect(replay.children).toEqual([])
+    }),
+  )
+
+  it.effect('uses fresh lane observation keys on replay instead of cached exact-head responses', () =>
+    Effect.gen(function* () {
+      const cache = new Map<string, ProgramExit>()
+      const live = setup({ lane: true, cache })
+      expect((yield* start(live.program, live))._tag).toBe('Success')
+      const replay = setup({ lane: true, cache, heads: [head, moved],
+        journal: [[`${reviewKey(options)}/worker`, live.childExit]] })
+      expect(yield* start(replay.program, replay)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'stale-head' },
+      })
+      expect(replay.children).toEqual([])
+      expect(replay.calls).toHaveLength(2)
+      const keys = [...live.resources, ...replay.resources].map((resource) => resource.key)
+      expect(new Set(keys).size).toBe(keys.length)
+      for (const key of keys)
+        expect(key).toMatch(new RegExp(`^resource\\.command/${reviewKey(options)}/observe/[0-9a-f-]{36}$`))
+    }),
+  )
+
+  it.effect('accepts managed metadata but rejects missing, edited, wrong-PR, actor and head receipts', () =>
+    Effect.gen(function* () {
+      const publication = reviewKey({ ...options, id: JSON.stringify([
+        'mission-run/run-1', 'step-run/gen-1/program', 1, options.id,
+      ]) })
+      const body = reviewComment({ subject, rubric: options.rubric, verdict, reviewer, publication })
+      const managed = body
+        .replace('<!-- agent-footer:begin v=3 -->', '<!-- agent-footer:begin v=3 -->\n<details>')
+        .replace('<!-- agent-footer:end -->', '| `session` | review-session |\n</details>\n<!-- agent-footer:end -->')
+      const accepted = setup({ comment: { body: managed } })
+      expect(yield* start(accepted.program, accepted)).toEqual({ _tag: 'Success', value: verdict })
+      for (const comment of [
+        { updated_at: '2026-11-19T00:00:01Z' },
+        { created_at: '', updated_at: '' },
+        { issue_url: 'https://api.github.com/repos/owner/repo/issues/20' },
+        { id: 72 }, { body: `${body}\nextra` },
+        { body: body.replace(reviewer, 'agent/standing/reviewer') },
+        { body: body.replaceAll(head, moved) },
+        { body: body.replace(publication, 'review-other') },
+      ]) {
+        const host = setup({ comment })
+        expect(yield* start(host.program, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'publication-conflict' },
+        })
+      }
+      const absent = setup({ missingComment: true })
+      expect(yield* start(absent.program, absent)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'github-unavailable' },
+      })
+      const missingId = setup({ childExit: completed({ verdict: 'GO', findings: [], head }) })
+      expect(yield* start(missingId.program, missingId)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'publication-conflict' },
+      })
+    }),
+  )
+
+  it.effect('requires actual independent run-owned incarnation-bound execution evidence', () =>
+    Effect.gen(function* () {
+      for (const executions of [
+        [], [{ ...execution, agent: 'agent/standing/reviewer' }],
+        [{ ...execution, incarnation_id: null }], [{ ...execution, incarnation_id: '' }],
+        ...['claimed', 'failed', 'released', 'replaced', 'cancelled'].map((status) => [{ ...execution, status }]),
+        [execution, { ...execution, incarnation_id: 'another-runtime' }],
+      ]) {
+        const host = setup({ childExit: completed(verdict, executions) })
+        expect(yield* start(host.program, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'not-independent' },
+        })
+      }
+      for (const config of [
+        { author: reviewer }, { caller: reviewer }, { assignee: reviewer },
+        { options: { ...options, authors: [reviewer] } },
+      ]) {
+        const host = setup(config)
+        expect(yield* start(host.program, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'not-independent' },
+        })
+      }
+    }),
+  )
+
+  it.effect('rejects mismatched product head, inconsistent verdicts and non-run-owned products', () =>
+    Effect.gen(function* () {
+      for (const childExit of [
+        completed({ ...verdict, head: moved }),
+        completed({ ...verdict, findings: [{ message: 'bug', blocking: true }] }),
+        { _tag: 'Success', value: { run: 'mission-run/review-child', status: 'completed',
+          executions: [execution], products: { 'review/verdict': verdict } } } as ProgramExit,
+      ]) {
+        const host = setup({ childExit })
+        expect(yield* start(host.program, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'ReviewError', reason: 'invalid-verdict' },
+        })
+      }
+    }),
+  )
+
+  it.effect('binds artifact results to the exact digest without any GitHub publication', () =>
+    Effect.gen(function* () {
+      const digest = `sha256:${'d'.repeat(64)}`
+      const artifact: ReviewOptions = { ...options,
+        subject: { kind: 'artifact', ref: 'resource/build', digest } }
+      const result = { verdict: 'GO', findings: [], head: digest }
+      const host = setup({ options: artifact, childExit: completed(result) })
+      expect(yield* start(host.program, host)).toEqual({ _tag: 'Success', value: result })
+      expect(host.children).toHaveLength(1)
+      expect(host.calls).toEqual([])
+      for (const [value, reason] of [
+        [{ ...result, head }, 'invalid-verdict'],
+        [{ ...result, commentId: 71 }, 'publication-conflict'],
+      ] as const) {
+        const invalid = setup({ options: artifact, childExit: completed(value) })
+        expect(yield* start(invalid.program, invalid)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'ReviewError', reason },
+        })
+        expect(invalid.calls).toEqual([])
+      }
     }),
   )
 })

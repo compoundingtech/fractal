@@ -14,7 +14,7 @@
 //! cargo nextest run -p fractal --test integration idle_budget:: --no-capture
 //! ```
 //!
-//! Inside an st seat, run it with `env -u ST_AGENT` under `systemd-run --user --pipe` or another
+//! Inside a Fractal seat, run it with `env -u ST_AGENT` under `systemd-run --user --pipe` or another
 //! parent outside the seat: the API binds callers to the agent in their process ancestry.
 
 use fractal_daemon::MissionsStore;
@@ -34,7 +34,7 @@ use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 const NODE: &str = "idle-node";
-/// Idle seats, each a real `st3 driver claude` around a provider that never starts a turn.
+/// Idle seats, each a real `fractal driver claude` around a provider that never starts a turn.
 const SEATS: usize = 6;
 /// Closed messages in each seat's mailbox.
 const HISTORY: usize = 60;

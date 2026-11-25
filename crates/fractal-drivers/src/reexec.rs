@@ -1,6 +1,6 @@
-//! Re-execute a long-lived seat process into a replaced st binary without ending its session.
+//! Re-execute a long-lived seat process into a replaced Fractal binary without ending its session.
 //!
-//! A deploy installs a new st binary at the same path and restarts the daemon. The processes that
+//! A deploy installs a new Fractal binary at the same path and restarts the daemon. The processes that
 //! carry a seat's messages (the native driver, the Claude channel, and the pi-family channel) run
 //! for the whole provider session, so without help they keep executing the deleted binary and talk
 //! to the new daemon with old code. Each of them watches the installed binary. Once a replacement
@@ -98,7 +98,7 @@ pub fn running_identity() -> Option<ImageIdentity> {
     *RUNNING.get_or_init(|| ImageIdentity::running().ok())
 }
 
-/// The installed st binary this process should follow: `ST3_BIN` when it names a file, otherwise
+/// The installed Fractal binary this process should follow: `ST3_BIN` when it names a file, otherwise
 /// the path this process was started from. Linux spells an unlinked image `PATH (deleted)`.
 pub fn installed_binary() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("ST3_BIN").filter(|value| !value.is_empty()) {

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""A stand-in `claude` that drives the real Claude contracts st3 relies on, without a model.
+"""A stand-in `claude` that drives the real Claude contracts Fractal relies on, without a model.
 
-It does what the interactive Claude TUI does at each boundary st3 observes:
-- runs every hook command from the `--settings` JSON st3 passes (through `bash -c`, with the
+It does what the interactive Claude TUI does at each boundary Fractal observes:
+- runs every hook command from the `--settings` JSON Fractal passes (through `bash -c`, with the
   hook payload on stdin) for SessionStart, UserPromptSubmit, Stop;
 - runs the `statusLine` command with a status-line payload, as Claude does every few seconds;
 - starts the `st3` MCP server named in `--mcp-config` and speaks MCP over stdio, turning each
@@ -11,7 +11,7 @@ It does what the interactive Claude TUI does at each boundary st3 observes:
   as a model following the ping would;
 - writes a Claude-format transcript at ~/.claude/projects/<cwd>/<session_id>.jsonl.
 
-It proves the wiring between st3 and Claude's hook, status-line, and channel contracts. It does
+It proves the wiring between Fractal and Claude's hook, status-line, and channel contracts. It does
 not prove anything about a real model or Claude's own TUI. Every step is appended to
 receipts.jsonl in the workspace.
 """

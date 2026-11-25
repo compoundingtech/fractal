@@ -59,7 +59,7 @@ pub enum Entity {
     Subscription,
     /// Normalized harness sessions that have a conversation timeline.
     Session,
-    /// Native harness sessions st does not manage yet; `importable_only` keeps ones `import run`
+    /// Native harness sessions fractal does not manage yet; `importable_only` keeps ones `import run`
     /// accepts.
     NativeSession { importable_only: bool },
     /// Persons: the configured person and the persons current attention items and devices name.
@@ -183,7 +183,7 @@ pub struct LocalTarget {
     pub discovery: Option<fractal_client::UnixSocketDiscovery>,
     /// `ST_AGENT` in a seat, otherwise the configured person.
     pub caller: Option<String>,
-    /// `person` in the st config.
+    /// `person` in the fractal config.
     pub person: Option<String>,
 }
 
@@ -1120,7 +1120,7 @@ mod tests {
             Some("/b.sock")
         );
         assert_eq!(
-            endpoint_word(&words("st terminals attach --endpoint")),
+            endpoint_word(&words("fractal terminals attach --endpoint")),
             None
         );
     }

@@ -30,6 +30,7 @@ model!(Agent {
     launch: Launch => "readonly launch: Launch",
     under: Option<Under> => "readonly under?: Under",
     principal: Option<String> => "readonly principal?: `person/${string}`",
+    idle_suspend: Option<IdleSuspend> => "readonly idleSuspend?: IdleSuspend",
 });
 model!(Under {
     agent: AgentReference => "readonly agent: AgentReference",
@@ -98,6 +99,7 @@ macro_rules! choices {
 choices!(MissionState { Draft => "draft", Ready => "ready", Retired => "retired" });
 choices!(Completion { AllStepsExhausted => "all-steps-exhausted" });
 choices!(CatchUp { All => "all", Latest => "latest", Skip => "skip" });
+choices!(IdleSuspend { Never => "never", Member => "member" });
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
@@ -138,6 +140,7 @@ pub fn typescript() -> String {
         MissionState::typescript(),
         Completion::typescript(),
         CatchUp::typescript(),
+        IdleSuspend::typescript(),
     ] {
         result.push_str(&model);
     }
@@ -197,6 +200,9 @@ mod tests {
             .unwrap();
             if let Some(principal) = &agent.principal {
                 writeln!(out, "  principal {}", quote(principal)).unwrap();
+            }
+            if let Some(policy) = agent.idle_suspend {
+                writeln!(out, "  idle-suspend {}", quote(policy.kdl())).unwrap();
             }
             if let Some(under) = &agent.under {
                 writeln!(
@@ -294,12 +300,14 @@ mod tests {
             launch: Launch::Command("true".into()),
             under: None,
             principal: None,
+            idle_suspend: None,
         };
         let writer = Agent {
             id: "docs/writer".into(),
             workspace: ".".into(),
             launch: Launch::Command("true".into()),
             principal: None,
+            idle_suspend: None,
             under: Some(Under {
                 agent: AgentReference::Declaration(Box::new(editor.clone())),
                 reason: "The editor reviews the writer's work.".into(),
@@ -433,6 +441,7 @@ mod tests {
                         },
                         under: None,
                         principal: None,
+                        idle_suspend: None,
                     }],
                     missions: vec![Mission {
                         id: "job".into(),
@@ -464,6 +473,30 @@ mod tests {
                 };
                 fractal_store::graph::parse_intent(&render(&document), "local").unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn idle_suspend_authoring_preserves_each_closed_variant() {
+        for policy in [IdleSuspend::Never, IdleSuspend::Member] {
+            let document = Declarations {
+                agents: vec![Agent {
+                    id: "example/worker".into(),
+                    workspace: ".".into(),
+                    launch: Launch::Command("true".into()),
+                    under: None,
+                    principal: None,
+                    idle_suspend: Some(policy),
+                }],
+                missions: Vec::new(),
+                schedules: Vec::new(),
+            };
+            let intent = fractal_store::graph::parse_intent(&render(&document), "node").unwrap();
+            let desired = &intent.subjects["agent/example/worker"].desired;
+            assert_eq!(
+                fractal_store::model::canonical_child_string(desired, "idle-suspend").as_deref(),
+                Some(policy.kdl()),
+            );
         }
     }
 }

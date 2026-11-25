@@ -22,6 +22,22 @@ DER = b'invented signing certificate'
 CERT = hashlib.sha1(DER).hexdigest().upper()
 
 
+class LaunchdDisabled(unittest.TestCase):
+    def test_boolean_and_named_formats(self):
+        for value, expected in [('true', True), ('disabled', True),
+                                ('false', False), ('enabled', False)]:
+            with self.subTest(value=value):
+                output = 'disabled services = {\n    "com.example.target" => ' + value + '\n}\n'
+                self.assertEqual(m.launchd_disabled(output), {'com.example.target': expected})
+
+    def test_absent_override(self):
+        self.assertIsNone(m.launchd_disabled('disabled services = {\n}\n').get('com.example.target'))
+
+    def test_unknown_value_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, 'unknown launchd disabled state'):
+            m.launchd_disabled('disabled services = {\n    "com.example.target" => unknown\n}\n')
+
+
 class Environment(unittest.TestCase):
     def load(self, environment):
         installer = importlib.util.module_from_spec(spec)
@@ -663,7 +679,7 @@ class Installer(unittest.TestCase):
                     if args[:2] == ['launchctl', 'print-disabled']:
                         self.calls.append(args)
                         return 'disabled services = {\n' + ''.join(
-                            '    "' + label + '" => ' + str(value).lower() + '\n'
+                            '    "' + label + '" => ' + ('disabled' if value else 'enabled') + '\n'
                             for label, value in overrides.items()) + '}\n'
                     if args[:2] in (['launchctl', 'disable'], ['launchctl', 'enable']):
                         self.calls.append(args)

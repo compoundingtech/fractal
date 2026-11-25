@@ -649,9 +649,25 @@ mission "garden/proposed" state="ready" revisions="human-only" revision-reviewer
 
 /// More missions, each with a run and its steps ready, than one snapshot refolds.
 fn burst(store: &Store, burst: usize) {
+    // A catch-up round observes the completed burst, not its individual publications. Publish
+    // its independent definitions together so setup does not repeat publication admission and
+    // commit work for every row. Keep every mission, run and ready step in the burst.
+    let definitions = (0..FOLD_CHUNK + 1)
+        .map(|number| {
+            format!(
+                r#"mission "garden/burst-{burst}-{number}" state="ready" {{
+  goal "Grow the garden."
+  concurrent-runs max=4
+  step "plant" {{ assigned-to "agent/garden/ash" }}
+  step "water" {{ assigned-to "agent/garden/birch" }}
+}}
+"#
+            )
+        })
+        .collect::<String>();
+    publish(store, &format!("version 2\n{definitions}"), &format!("publish-burst-{burst}"));
     for number in 0..FOLD_CHUNK + 1 {
         let name = format!("garden/burst-{burst}-{number}");
-        mission(store, &name);
         let run = start(store, &name, &format!("burst-{burst}-{number}"));
         for path in ["plant", "water"] {
             store.set_step_state(&step(&run, path).0, "ready", None).unwrap();
@@ -2125,6 +2141,63 @@ fn eta_shared_step_completion_republishes_other_missions_open_run() {
     assert_eq!(eta["remaining_high_ms"], 700);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_missions_refresh_eta_after_a_projection_only_commit_at_the_same_claim_index() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    publish(
+        store,
+        "version 2\nmission \"eta\" state=\"ready\" { goal \"Finish.\"; step \"work\" { agentless; } }",
+        "eta",
+    );
+    let waiting = start(store, "eta", "waiting");
+    let list = store.published_missions_list();
+    let mut publications = list.subscribe();
+    missions_refresher().start(store);
+    tokio::time::timeout(Duration::from_secs(5), publications.changed())
+        .await.expect("the initial mission publication").unwrap();
+    let before = list.newest().unwrap();
+    let index = store.index().unwrap();
+    assert_eq!(before.cut, index);
+    assert!(before.rows.cards["mission/eta"]["run_details"][0]["eta"].is_null());
+
+    // Install a repaired historical sample and its consumer invalidation atomically. Neither
+    // table appends claims, and only the mission-change table is a refresher dependency.
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h37d8605f8522 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_run_eta_samples
+             SELECT subject||'/sample',run_id||'/sample',definition_hash,step_path,1000,100
+             FROM step_runs WHERE subject=?1",
+            [&waiting.steps[0].subject],
+        ).unwrap(), 1);
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-ha9ebd81a804a owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_run_eta_mission_changes(mission_id,changed_index)
+             VALUES('eta',(SELECT COALESCE(MAX(changed_index),0)+1 FROM local_run_eta_mission_changes))
+             ON CONFLICT(mission_id) DO UPDATE SET changed_index=excluded.changed_index",
+            [],
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(store.index().unwrap(), index, "projection repair appends no claim");
+    tokio::time::timeout(Duration::from_secs(5), publications.changed())
+        .await.expect("the projection-only commit must wake the mission refresher").unwrap();
+    let after = list.newest().unwrap();
+    assert_eq!(after.cut, before.cut);
+    assert!(after.rows.eta_generation > before.rows.eta_generation);
+    let eta = &after.rows.cards["mission/eta"]["run_details"][0]["eta"];
+    assert_eq!(eta["basis"]["samples"], 1);
+    assert_eq!(eta["remaining_low_ms"], 100);
+    assert_eq!(eta["remaining_high_ms"], 100);
+    assert_eq!(
+        Some(eta.clone()),
+        store.mission_run_eta(&waiting.subject, eta["as_of"].as_u64().unwrap().into()).unwrap(),
+    );
+    assert!(before.rows.cards["mission/eta"]["run_details"][0]["eta"].is_null());
+}
+
 #[test]
 fn eta_v3_trigger_layout_preserves_samples_and_published_card_values() {
     let _clock = Clock::at(start_time());
@@ -2187,7 +2260,8 @@ struct Refresher<R: 'static> {
 
 impl<R: Send + Sync + 'static> Refresher<R> {
     fn start(&self, store: &Arc<Store>) {
-        spawn(Arc::clone(store), self.list, self.name, self.label, self.fold, true, Wakes { roster: false, local: self.local });
+        let tables = if self.name == "work" { WORK_TABLES } else { MISSION_TABLES };
+        spawn(Arc::clone(store), self.list, self.name, self.label, self.fold, true, Wakes { roster: false, local: self.local, tables });
     }
 
     fn folds(&self, store: &Store) -> usize {
@@ -2430,9 +2504,18 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
         claim.id
     }
     fn check(store: &Store, base: &mut Publication<RuntimeRows>) -> bool {
+        let list = store.published_runtime_list();
+        let affected = store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap();
+        let before = list.refolded();
         let (next, changed) = runtimes(store, Some(base)).unwrap().unwrap();
+        assert_eq!(list.refolded() - before, affected.len() as u64,
+            "incremental reductions visit only affected runtime owners");
         *store.fractal.subject_cache.lock().unwrap() = Default::default();
+        let before = list.refolded();
+        let initial_subjects = store.runtime_list_subjects(store.index().unwrap()).unwrap();
         let (oracle, _) = runtimes(store, None).unwrap().unwrap();
+        assert_eq!(list.refolded() - before, initial_subjects.len() as u64,
+            "full folds count every initial owner, not just visible rows");
         assert_eq!(next.cut, oracle.cut);
         assert_eq!(next.rows.items, oracle.rows.items);
         assert_eq!(next.rows.digest, oracle.rows.digest);
@@ -2542,4 +2625,90 @@ mission "garden/runtime" state="ready" {
     assert!(check(&store, &mut base));
     assert!(base.rows.items.is_empty(), "the implicit stop moves the runtime to history");
     assert_eq!(store.selected_desired_tokens(&["agent/garden/meadow"]).unwrap()["agent/garden/meadow"], receipt_claim);
+}
+
+#[test]
+fn runtime_publication_counts_only_changed_owners_including_history_transitions() {
+    use crate::api::client_v0::published_runtimes::fold as runtimes;
+    let store = Store::open_memory("cedar").unwrap();
+    let observe = |owner: &str, status: &str| {
+        store.append_claim(&crate::model::ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("runtime_id".into(), json!(owner)),
+                ("status".into(), json!(status)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    observe("agent/cedar.a", "running");
+    observe("agent/cedar.b", "running");
+    observe("agent/cedar.history", "stopped");
+    let list = store.published_runtime_list();
+    let (mut base, _) = runtimes(&store, None).unwrap().unwrap();
+    assert_eq!(list.refolded(), 3, "initial owners include hidden history");
+    assert_eq!(base.rows.items.len(), 2);
+
+    let original = Arc::clone(&base.rows.items);
+    crate::test_support::note_local_claim(&store, "message/unrelated-runtime-count");
+    let (next, changed) = runtimes(&store, Some(&base)).unwrap().unwrap();
+    assert!(!changed);
+    assert_eq!(list.refolded(), 3, "unrelated commits reduce no runtime owners");
+    assert!(Arc::ptr_eq(&original, &next.rows.items));
+    base = next;
+    assert!(runtimes(&store, Some(&base)).unwrap().is_none());
+    assert_eq!(list.refolded(), 3, "an unchanged cut reduces no owners");
+
+    observe("agent/cedar.a", "stopped");
+    let (next, changed) = runtimes(&store, Some(&base)).unwrap().unwrap();
+    assert!(changed);
+    assert_eq!(list.refolded(), 4, "only the changed owner is reduced");
+    assert_eq!(next.rows.items.len(), 1);
+    assert_eq!(next.rows.items[0]["owner_id"], "agent/cedar.b");
+    base = next;
+
+    observe("agent/cedar.history", "running");
+    let (next, changed) = runtimes(&store, Some(&base)).unwrap().unwrap();
+    assert!(changed);
+    assert_eq!(list.refolded(), 5, "a returning owner alone is reduced");
+    assert_eq!(next.rows.items.len(), 2);
+    assert!(next.rows.items.iter().any(|row| row["owner_id"] == "agent/cedar.history"));
+}
+
+#[test]
+fn collection_refolds_count_only_changed_keys() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    for name in ["garden/alpha", "garden/beta"] {
+        mission(&store, name);
+    }
+    let alpha = start(&store, "garden/alpha", "alpha-count");
+    let beta = start(&store, "garden/beta", "beta-count");
+    let (plant, actor) = step(&alpha, "plant");
+    store.set_step_state(&plant, "ready", None).unwrap();
+    store.set_step_state(&step(&beta, "plant").0, "ready", None).unwrap();
+    let (work, _) = folded_at_once(fold_work(&store, None, None));
+    let (missions, _) = folded_at_once(fold_missions(&store, None, None));
+    let counts = || (store.published_work_list().refolded(), store.published_missions_list().refolded());
+    let cold = counts();
+    assert!(cold.0 > 1 && cold.1 == 2);
+    assert!(matches!(fold_work(&store, Some(&work), None).unwrap(), Folded::Current));
+    assert!(matches!(fold_missions(&store, Some(&missions), None).unwrap(), Folded::Current));
+    assert_eq!(counts(), cold, "unchanged input reduces no keys");
+
+    crate::test_support::note_local_claim(&store, "message/unrelated-list-count");
+    let (work, _) = folded_at_once(fold_work(&store, Some(&work), None));
+    let (missions, _) = folded_at_once(fold_missions(&store, Some(&missions), None));
+    assert_eq!(counts(), cold, "unrelated commits reduce no keys");
+
+    act(&store, &plant, &actor, "claim", "claim-count");
+    let (work, _) = folded_at_once(fold_work(&store, Some(&work), None));
+    let (missions, _) = folded_at_once(fold_missions(&store, Some(&missions), None));
+    assert_eq!(counts(), (cold.0 + 1, cold.1 + 1), "one changed step reduces only its row and mission");
+    let mut work_sorted = work.rows.clone();
+    work_sorted.sort();
+    assert_eq!(work.rows.order, work_sorted.order);
+    let mut missions_sorted = missions.rows.clone();
+    missions_sorted.sort();
+    assert_eq!(missions.rows.order, missions_sorted.order);
 }

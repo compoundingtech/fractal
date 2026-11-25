@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document the light-node and home-node architecture, durable executor boundary and staged rollout",
+  "replay": {"status": "none", "detail": "Documentation only; no replay or claim behavior changes."},
+  "schema": {"status": "none", "detail": "The session protocol is a design sketch, not an implemented wire or storage format."},
+  "rules": {"status": "none", "detail": "Existing graph decisions and physical execution remain unchanged."},
+  "compatibility": {"status": "none", "detail": "No node roles, authority, keys or caller routes change in this documentation PR."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or cutover is performed."},
+  "manual": {"status": "none", "detail": "No configuration or operator action is required."},
+  "recovery": {"status": "none", "detail": "Existing recovery behavior is unchanged; the document describes future phase exit gates."}
+}

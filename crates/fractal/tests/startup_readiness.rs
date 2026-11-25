@@ -283,7 +283,7 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     assert_eq!(readiness.total, Some(0));
     let early_log = std::fs::read_to_string(&log_path).unwrap();
     assert!(early_log.contains("fractal: projection full replay phase=startup/project-replication-backlog reason=missing-health"), "fallback must be logged before the replay finishes: {early_log}");
-    assert!(!early_log.contains("st3: startup phases "), "{early_log}");
+    assert!(!early_log.contains("fractal: startup phases "), "{early_log}");
     // Both addresses exist early, but neither is listening or queueing a request
     // while projection is uncommitted. Keep the main refusal/phase contract.
     for path in [
@@ -404,7 +404,7 @@ esac
     let log = std::fs::read_to_string(&log_path).unwrap();
     let timing_lines = log
         .lines()
-        .filter_map(|line| line.strip_prefix("st3: startup phases "))
+        .filter_map(|line| line.strip_prefix("fractal: startup phases "))
         .collect::<Vec<_>>();
     assert_eq!(timing_lines.len(), 1, "{log}");
     let timings: Value = serde_json::from_str(timing_lines[0]).unwrap();
@@ -427,7 +427,7 @@ esac
         }
     }
     assert!((phase_sum_ms - total_ms).abs() < 0.001, "{timings}");
-    eprintln!("st3: startup phases {}", timing_lines[0]);
+    eprintln!("fractal: startup phases {}", timing_lines[0]);
     let fallbacks = log
         .lines()
         .filter(|line| line.starts_with("fractal: projection full replay"))
@@ -513,7 +513,11 @@ fn a_plain_client_finds_a_daemon_started_with_socket_elsewhere_past_a_dead_defau
     // published after that (#5004): this client reaches the daemon and reads that it is not ready.
     let plain = |args: &[&str]| command(root).env_remove("ST3_ENDPOINT").env("ST3_DAEMON_WAIT", "0").args(args).output().unwrap();
     let roster = plain(&["agents", "ls"]);
-    assert!(!roster.status.success());
+    assert!(
+        !roster.status.success(),
+        "a serving daemon with its first roster held must not answer an agents page; client: {roster:?}; daemon: {}",
+        std::fs::read_to_string(&log_path).unwrap()
+    );
     assert!(String::from_utf8_lossy(&roster.stderr).contains("agent-roster-not-ready"), "{roster:?}");
     let documents = plain(&["documents", "ls"]);
     assert!(

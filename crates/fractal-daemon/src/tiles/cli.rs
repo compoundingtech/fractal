@@ -1,4 +1,4 @@
-//! `st tiles`: run an agent's tools in its tile. Root runs these; a tile never does.
+//! `fractal tiles`: run an agent's tools in its tile. Root runs these; a tile never does.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -56,7 +56,7 @@ enum TilesCommand {
     },
 }
 
-/// Run `st tiles`, returning the exit status. Runs before any async runtime or thread starts:
+/// Run `fractal tiles`, returning the exit status. Runs before any async runtime or thread starts:
 /// `enter` must be single-threaded to make its namespaces.
 pub fn run(args: TilesArgs) -> Result<i32> {
     #[cfg(target_os = "linux")]

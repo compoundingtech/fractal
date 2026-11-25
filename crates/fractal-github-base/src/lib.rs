@@ -14,6 +14,7 @@ pub use fractal_secrets::*;
 
 pub mod environment;
 pub mod github_http;
+pub mod github_capture;
 pub mod resource;
 pub mod github_watch;
 pub mod checkout;

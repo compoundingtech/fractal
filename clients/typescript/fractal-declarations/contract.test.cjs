@@ -35,7 +35,7 @@ const schedule = {
     work: { mission, revision, workspace: '.' },
 };
 
-test('the st validate daily review uses object references and matches the canonical KDL fixture exactly', () => {
+test('the fractal validate daily review uses object references and matches the canonical KDL fixture exactly', () => {
     const expected = fs.readFileSync(path.join(__dirname, 'fixtures/daily-review.kdl'), 'utf8');
     assert.equal(encodeKdl({ agents: [editor, writer], missions: [mission], schedules: [schedule] }), expected);
 });
@@ -47,6 +47,16 @@ test('principal and lane capacities match the parser-backed golden', () => {
             steps: [{ ...mission.steps[0], capacity: { memory: '8G' } }] }],
     };
     assert.equal(encodeKdl(declarations), fs.readFileSync(path.join(__dirname, 'fixtures/capacity-principal.kdl'), 'utf8'));
+});
+
+test('idle-suspend encodes each explicit policy and preserves omission', () => {
+    assert.doesNotMatch(encodeKdl({ agents: [editor] }), /idle-suspend/);
+    for (const idleSuspend of ['never', 'member']) {
+        assert.equal(
+            encodeKdl({ agents: [{ ...editor, idleSuspend }] }),
+            `version 2\n\nagent "docs/editor" {\n  workspace "."\n  idle-suspend "${idleSuspend}"\n  command "true"\n}\n`,
+        );
+    }
 });
 
 test('the runnable TypeScript example matches the Rust-validated golden fixture', () => {

@@ -52,12 +52,12 @@ pub async fn check_projection_divergences(store: Arc<Store>, interval: Duration)
         let elapsed = started.elapsed();
         match result {
             Ok(Ok(check)) if check.opened + check.recovered > 0 => eprintln!(
-                "st3: projection divergence check in {elapsed:?}: {} divergent, {} opened, {} ended",
+                "fractal: projection divergence check in {elapsed:?}: {} divergent, {} opened, {} ended",
                 check.divergences, check.opened, check.recovered
             ),
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => eprintln!("st3: projection divergence check failed: {error}"),
-            Err(error) => eprintln!("st3: projection divergence check stopped: {error}"),
+            Ok(Err(error)) => eprintln!("fractal: projection divergence check failed: {error}"),
+            Err(error) => eprintln!("fractal: projection divergence check stopped: {error}"),
         }
     }
 }

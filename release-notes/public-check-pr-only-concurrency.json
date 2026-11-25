@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Public repository checks cancel obsolete runs only within the same pull request. Public history checks now replace older heads of that PR; main pushes and merge-group runs retain independent run groups. Required check names and scanner permissions are unchanged.",
+  "replay": { "status": "none", "detail": "No runtime replay or stored data changes." },
+  "schema": { "status": "none", "detail": "No database, wire or checkpoint schema changes." },
+  "rules": { "status": "none", "detail": "Required checks and repository protection are unchanged." },
+  "compatibility": { "status": "changed", "detail": "New public-check runs cancel in-progress work only for pull_request events. Each other event uses its own run identity, preserving pending and active main or merge-group proofs." },
+  "downtime": { "status": "none", "detail": "No service interruption or runtime deployment is required." },
+  "manual": { "status": "none", "detail": "No manual action is required; the concurrency policy applies to newly created workflow runs." },
+  "recovery": { "status": "none", "detail": "Existing run evidence is retained; no data recovery is required." }
+}

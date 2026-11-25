@@ -28,6 +28,11 @@ pub const VERSION_WITH_MARKS: u32 = 4;
 pub const VERSION_WITH_SHARDS: u32 = 5;
 /// Quarantine-bearing archives require readers that preserve permanent operation admission.
 pub const VERSION_WITH_QUARANTINE: u32 = 6;
+/// The version of an archive that also carries the claims of envelopes its source released
+/// (`smallclaims::store::envelope_release`), as signed envelopes. Without them a restore would
+/// miss those claims, so a build that predates them refuses it. An archive with none keeps an
+/// earlier version.
+pub const VERSION_WITH_SIGNED_CLAIMS: u32 = 7;
 pub const PAGE: usize = 512;
 // One envelope can contain document bytes; reject unbounded lines before allocating them.
 pub const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;
@@ -58,6 +63,14 @@ pub struct Header {
     /// the JSON, below [`VERSION_WITH_SHARDS`] and whenever no shard holds anything.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub shards: BTreeMap<String, ShardDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceIdentity>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SourceIdentity {
+    pub writer_id: String,
+    pub max_store_index: u64,
 }
 
 /// What an archive holds of one shard: the digest of its admitted envelope log, as the graph's
@@ -92,6 +105,8 @@ pub enum Record {
     ShardSignatures(ShardSignaturesRecord),
     /// One page of one of a shard's local tables, restored by union.
     ShardLocal(ShardLocalPage),
+    /// A page of the envelopes the source released, each with its claims signed by their writer.
+    SignedEnvelopes(Vec<smallclaims::replication::SignedEnvelope>),
     End { envelopes: u64, sha256: String },
 }
 

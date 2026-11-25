@@ -65,7 +65,7 @@ async fn recipient_revalidation_and_report_never_return_text() {
     let root = tempfile::tempdir().unwrap();
     let state = fixture(root.path());
     let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
-        mission: "example/budget".into(), revision: None, workspace: ".".into(),
+        mission: "example/budget".into(), revision: None, workspace: "/tmp".into(),
         requester: Some("person/example".into()), mode: Some("run".into()),
         inputs: BTreeMap::new(), idempotency_key: "budget-run".into(),
     }).unwrap();

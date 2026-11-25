@@ -314,12 +314,17 @@ version 2 protects message content but cannot enable current writes. The signed 
 marker remains `thread_reader_version: 2`: this rollout changes metadata semantics, not that format.
 A legacy member that receives a signed thread-bearing message retains the envelope in quarantine.
 After upgrade, normal startup retries admission and restores the original timeline entry once.
-This release advances published main's storage version 20 to 23. Private reader-pilot stores
-at versions 21 and 22 use the same normal upgrade path; no extra compatibility writer is added.
-Version 23 keeps older binaries, including timestamp-only version-22 readers, from reopening
-this upgraded store.
-The normal open path preserves stored claims, history, pairings, and operation receipts; it does
-not rewrite claim formats. Do not lower `user_version` to run an old binary against this state.
+Fractal application stores advance published main's default storage version 20 to the privacy
+floor 23. Main's versions 21 and 22 retain their signature-reference and dependency-reader
+meanings; the shared graph store still defaults to 20 when no privacy application is installed.
+Private reader-pilot stores at versions 21 and 22 use the same normal application upgrade path.
+Version 23 keeps all older max-22 binaries, including timestamp-only privacy pilots, from
+reopening this upgraded store.
+The privacy floor also activates main's existing compact-signature writer and migration:
+every reader allowed to open version 23 includes the version-21/22 format readers, and the
+downgrade fence excludes older readers. The normal open path preserves claim authority,
+history, pairings, and operation receipts while those supported physical representations
+migrate. Do not lower `user_version` to run an old binary against this state.
 
 That local floor does not protect a fresh old network member. Before activating writes, directly
 verify the current build and reader-readiness v3 on every serving/configured member; historical

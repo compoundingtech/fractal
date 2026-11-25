@@ -302,6 +302,15 @@ def point_direct_service_at_app(plist, executable):
     return True
 
 
+def launchd_disabled(output):
+    disabled = {}
+    for label, value in re.findall(r'^\s*"([^"]+)"\s*=>\s*(.*?)\s*$', output, re.M):
+        if value not in ('true', 'disabled', 'false', 'enabled'):
+            raise RuntimeError('unknown launchd disabled state for ' + label + ': ' + value)
+        disabled[label] = value in ('true', 'disabled')
+    return disabled
+
+
 
 def backup(home, job, stage_fractal=False):
     previous = Path(job) / 'previous-app'
@@ -315,8 +324,7 @@ def backup(home, job, stage_fractal=False):
     disabled = {}
     if stage_fractal:
         output = command(['launchctl', 'print-disabled', 'gui/' + str(os.getuid())])
-        disabled = {label: value == 'true' for label, value in
-                    re.findall(r'^\s*"([^"]+)"\s*=>\s*(true|false)\s*$', output, re.M)}
+        disabled = launchd_disabled(output)
     definitions = {}
     for service in service_labels(stage_fractal):
         path = Path(home) / 'Library/LaunchAgents' / (service + '.plist')

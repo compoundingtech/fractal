@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Native agent mailboxes merge graph and message-shard mail in canonical send order instead of placing every graph message before shard messages.",
+  "replay": { "status": "none", "detail": "No replay or backfill. Existing pending mail uses canonical send order on its next mailbox update." },
+  "schema": { "status": "none", "detail": "No published schema or contract digest change." },
+  "rules": { "status": "none", "detail": "No authority, retention or claim-admission change." },
+  "compatibility": { "status": "changed", "detail": "Full native mailbox snapshots and incremental updates use the same canonical send keys across both stores. Ordinary deltas retain the key cache in place and reposition only changed messages; only full snapshot reads require full sorting. Index namespaces remain pagination identities, not delivery priority." },
+  "downtime": { "status": "none", "detail": "Ordinary rolling deployment; no data conversion." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "Existing receipt and recovery admission policies are unchanged." }
+}

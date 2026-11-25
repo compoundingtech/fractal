@@ -46,15 +46,15 @@ fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
         .clone();
     let (sample, sampled) = std::sync::mpsc::channel();
     let (done, committed) = std::sync::mpsc::sync_channel(1);
-    // Queue a real write after SQLite bounds the first chunk, while that writer loan is
-    // still held. FIFO order makes the observation deterministic, without sleeping.
+    // Queue a real write after the first sealing chunk commits, while that writer loan is
+    // still held. The writer owns the native trace hook now and clears any raw profile
+    // registration when a loan installs it, so the store's committed-write observer — the
+    // subscription the writer itself publishes at each loan boundary — is the hook.
+    // FIFO order makes the observation deterministic, without sleeping.
     static QUEUED_WRITE: std::sync::Mutex<Option<(std::sync::mpsc::Sender<WriterJob>, WriterJob)>> =
         std::sync::Mutex::new(None);
-    fn after_chunk_bound(sql: &str, _: std::time::Duration) {
-        if (sql.contains("ORDER BY rowid LIMIT")
-            || sql.starts_with("SELECT id, origin, replica_sequence, previous_hash"))
-            && let Some((jobs, job)) = QUEUED_WRITE.lock().unwrap().take()
-        {
+    fn after_chunk_commit(_: &Connection) {
+        if let Some((jobs, job)) = QUEUED_WRITE.lock().unwrap().take() {
             jobs.send(job).unwrap();
         }
     }
@@ -82,15 +82,16 @@ fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
                 true
             }),
             profile: None,
+            charged: None,
             wait: None,
             holder: smallclaims::windows::holds::Holder::current(),
             enqueued: std::time::Instant::now(),
             done: done.clone(),
         },
     ));
-    store.connection.write().profile(Some(after_chunk_bound));
+    let _queued_write_observer = store.connection.observe_tables(&["replica_envelopes"], after_chunk_commit);
     store.seal_local_batches().unwrap();
-    store.connection.write().profile(None);
+    drop(_queued_write_observer);
     committed.recv().unwrap().unwrap();
     let count = sampled.recv().unwrap();
     assert!(

@@ -3,7 +3,7 @@
 //!
 //! The claude config is a JSON object at `$CLAUDE_CONFIG_DIR/.claude.json` (else `$HOME/.claude.json`)
 //! whose `projects` map is keyed by absolute workspace path. A workspace is trusted when its entry has
-//! `"hasTrustDialogAccepted": true`; st also sets `"hasCompletedProjectOnboarding": true` to skip
+//! `"hasTrustDialogAccepted": true`; Fractal also sets `"hasCompletedProjectOnboarding": true` to skip
 //! onboarding friction. We merge into any existing entry and never clobber the
 //! other per-project fields — and write ALL requested dirs in ONE atomic read-modify-write.
 //!
@@ -151,7 +151,7 @@ pub fn pretrust_at(config: &Path, dirs: &[PathBuf]) -> Result<usize> {
             // Claude approves by name, so a later edit to the command is not asked again; this line
             // is how a changed definition is noticed after the fact.
             eprintln!(
-                "st: approved project MCP server {name} in {} (definition sha256 {hash})",
+                "fractal: approved project MCP server {name} in {} (definition sha256 {hash})",
                 dir.display()
             );
         }
@@ -169,7 +169,7 @@ pub fn pretrust_at(config: &Path, dirs: &[PathBuf]) -> Result<usize> {
 ///
 /// Only an ABSENT `hasCompletedOnboarding` is completed. A key that is present, true or false, was
 /// written by Claude or by the person and is left alone, and so is every `theme` that is already
-/// set: st writes the default theme only together with the onboarding flag it adds. A login is never
+/// set: Fractal writes the default theme only together with the onboarding flag it adds. A login is never
 /// touched: `oauthAccount` and every other field are neither read nor written, so a signed-out
 /// config stays signed out and Claude still asks for the login.
 fn complete_first_launch(config: &mut serde_json::Map<String, Value>) {
@@ -325,7 +325,7 @@ fn canonical_key(dir: &Path) -> String {
 ///
 /// Claude asks once per project server ("New MCP server found in .mcp.json") unless it is in the
 /// project's `enabledMcpjsonServers`. The dialog stops startup before any MCP server connects, so
-/// the st channel never attaches and mail is held; `--dangerously-skip-permissions` skips it, and
+/// the Fractal channel never attaches and mail is held; `--dangerously-skip-permissions` skips it, and
 /// `--permission-mode auto` does not. A server the project lists in `disabledMcpjsonServers` stays
 /// disabled, and an unreadable `.mcp.json` approves nothing.
 ///
@@ -379,7 +379,7 @@ fn write_atomic(config: &Path, value: &Value) -> Result<()> {
 /// pretrusts do not collide.
 ///
 /// Deliberately NOT the shared `fsatomic` primitive, and the reason is the same one that keeps
-/// this module out of it: these are files st does not own — `~/.claude.json` and
+/// this module out of it: these are files Fractal does not own — `~/.claude.json` and
 /// `~/.codex/config.toml` — so the staged file must inherit the umask a harness's own config
 /// carries rather than the driver's `0600`, and the staging path must sit beside the config under a name
 /// its owner will recognize.
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn an_approved_name_stays_approved_when_its_command_changes_and_nothing_is_written() {
-        // Claude approves by name, so st pins this rather than leaving it implicit: approving again
+        // Claude approves by name, so Fractal pins this rather than leaving it implicit: approving again
         // after the definition changed reports nothing new and does not touch the config.
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("work");
@@ -555,13 +555,13 @@ mod tests {
                 Some(json!(true)),
                 Some(json!("light-ansi")),
             ),
-            // Finished with no theme recorded: st does not invent one.
+            // Finished with no theme recorded: Fractal does not invent one.
             (
                 json!({ "hasCompletedOnboarding": true }),
                 Some(json!(true)),
                 None,
             ),
-            // Present and false is Claude's or the person's state, not st's to flip.
+            // Present and false is Claude's or the person's state, not Fractal's to flip.
             (
                 json!({ "hasCompletedOnboarding": false, "theme": "light" }),
                 Some(json!(false)),

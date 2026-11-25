@@ -215,6 +215,28 @@ pub(super) async fn run_message(
                 receipt.idempotency_key,
                 plain_error(&error)));
             }
+            // Acceptance is durable even if the optional status read fails. Never turn a
+            // queued send into an error that invites a resend, or change its JSON receipt.
+            if !json_output
+                && let Ok(Ok(value)) = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    message_delivery(client, &receipt.message.subject),
+                ).await
+                && let (Some(phase), Some(reason)) = (
+                    value.pointer("/delivery/phase").and_then(Value::as_str),
+                    value.pointer("/delivery/reason").and_then(Value::as_str),
+                )
+            {
+                let state = match phase {
+                    "sent" | "staged" => "queued",
+                    _ => phase,
+                };
+                use std::io::Write as _;
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "delivery: {state}: {reason}");
+                let _ = stderr.flush();
+            }
+            // Keep the ID last even when callers merge stderr into stdout before tail -1.
             print_message_receipt(&receipt, json_output)
         }
         MessageCommand::Status(args) => {

@@ -1828,8 +1828,11 @@ Stale generation, subject revision, incarnation, preview or terminal screen fenc
 `stale-fence` without a partial mutation.
 Multi-subject actions commit atomically or have no effect.
 
-New completed local response receipts last at least **7 days**. Clients must never reuse a
-key for another request. After reclamation, a late retry cannot execute the original effect
+New completed local response receipts last at least **7 days**, except a lease renewal's,
+which lasts **1 hour** unless the member's `[trim] replay_safe_receipts` sets another window
+(`0` keeps it the full 7 days). A renewal is replay-safe: one retried after its receipt is gone
+renews the lease again, or is refused as any renewal is if the lease has since ended, never
+`idempotency-key-expired`. Clients must never reuse a key for another request. After reclamation, a late retry cannot execute the original effect
 twice: the daemon seeks its primary effect claim through the existing operation index,
 including existing checkpoint operation tombstones. Document writes recover the original
 binding response, even if a retry supplies different bytes and a current binding token. Other
@@ -1844,10 +1847,13 @@ storage does not turn the same approval key into a terminal expired-key refusal.
 Seven days covers the phone's retries with backoff and ordinary retries across a daemon
 restart. Exact saved-response replay lasts seven days; durable recognition of the original
 effect continues afterward. Response rows that predate the caller-key association sit below
-a stored legacy watermark and are never expired by this cleanup.
+a stored legacy watermark. They have no recorded completion time, so cleanup treats them as
+already due. Each goes once its effect is durably recognized, and a late retry then gets
+`idempotency-key-expired`. A legacy row whose effect has no durable identity is kept, as any
+such receipt is.
 
-Cleanup adds, drops and changes **no indexes**. It seeks the first rowid above a persisted legacy
-watermark and examines at most 64 response rows in completion order. It stops at the first young
+Cleanup adds, drops and changes **no indexes**. It starts at the lowest rowid, so legacy rows come first, and
+examines at most 64 response rows in completion order. It stops at the first young
 row; nonmonotonic completion deadlines can delay later expiry. Active-run receipts move to the
 tail with a renewed deadline using UPDATE, preserving their companion rows. A future writer
 that has neither a durable association nor an explicitly safe retry classification fails closed
@@ -2187,11 +2193,28 @@ client diagnostics writes, availability, presence and note writes for the paired
 reads and control, terminal reads, attention control,
 and launch control. The begin request may narrow that default with `scopes`, a non-empty
 subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
-`write.availability`, `write.presence`, `write.notes`, `read.glasses`, `control.glasses`, `terminal.read`,
-`control.attention`, `control.launches`); any other scope, or `scopes` combined with
-`full_control`, is rejected with a validation error. `fractal devices --as person/alex pair
---read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so
-the device can observe but every attention, launch, and other action returns `403`. For an
+`write.availability`, `write.presence`, `write.notes`, `read.glasses`, `read.arrangements`,
+`control.glasses`, `control.arrangements`, `terminal.read`, `control.attention`, `control.launches`); any other scope, or
+`scopes` combined with `full_control`, is rejected with a validation error.
+`fractal devices --as person/alex pair --read-only "Wall display"` requests `read.projections`,
+`read.glasses`, `read.arrangements`, and `terminal.read`, so the device can observe but every
+attention, launch, and other action returns `403`. To request an exact person-device grant
+without terminal access, repeat `--person-scope`:
+
+```sh
+fractal devices --as person/alex pair "Tag reader" \
+  --person-scope read.projections \
+  --person-scope read.glasses \
+  --person-scope read.arrangements
+```
+
+No scopes are added implicitly to an explicit list. The CLI rejects scopes outside the limited
+pairing ceiling; the daemon revalidates the list and its errors are surfaced unchanged.
+`--person-scope` conflicts with `--read-only`, `--full-control`, and `--assistant`.
+Assistant grants continue to use their separate typed `--scope` flag. Human pairing-begin
+output labels the list as **requested**, because the challenge response does not return granted
+scopes. Completion reports the daemon's exact **granted** scopes in both human and `--json` output.
+For an
 intentionally trusted device that needs Chat sends, mission/work actions, runtime control, and
 terminal input, the initiating person
 must use `fractal devices --as person/alex pair --full-control "Alex iPhone"` on the trusted local

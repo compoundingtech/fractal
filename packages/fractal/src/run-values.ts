@@ -30,11 +30,16 @@ const Name = Schema.String.pipe(
 )
 const Scalar = Schema.Union([Schema.String, Schema.Boolean, Schema.Finite])
 
-/** st's mission input grammar carries text/resource kind, not a resource schema. */
+/** A native text input or a pinned resource observation, optionally constrained by kind. */
 export const MissionInputSchema = Schema.Struct({
   name: Name,
   kind: Schema.Literals(['text', 'resource']),
-})
+  resourceKind: Schema.optionalKey(Schema.String.pipe(
+    Schema.refine((value): value is string => value.trim().length > 0),
+  )),
+}).pipe(Schema.refine(
+  (value): value is typeof value => value.resourceKind === undefined || value.kind === 'resource',
+))
 /** A product is a required graph subject plus scalar field constraints. */
 export const ProductSchema = Schema.Struct({
   subject: Schema.String.pipe(
@@ -63,7 +68,7 @@ export interface ResourceInput<TName extends string = string, TKind extends stri
   readonly [inputBrand]: true
   readonly name: TName
   readonly kind: 'resource'
-  /** Static authoring metadata; st pins the supplied resource observation at start. */
+  /** Static authoring metadata; Fractal pins the supplied resource observation at start. */
   readonly resourceKind: TKind
 }
 /** A mission's typed text or resource input declaration. */
@@ -81,7 +86,7 @@ export type Products = Readonly<Record<string, ProductHandle>>
 /** A typed reference interpolated into native gate data. */
 export type RunReference = InputHandle | ProductHandle
 
-/** A native run-context value, interpolated by st rather than by the authoring process. */
+/** A native run-context value, interpolated by Fractal rather than by the authoring process. */
 export interface ContextReference {
   readonly kind: 'context'
   readonly name: 'ST_MISSION_RUN'

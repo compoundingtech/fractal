@@ -105,16 +105,31 @@ collection, but `FractalClient` has no typed attention or availability stream.
   first, then stale, then met; unmeasured objectives collapse; budgets follow.
   They stay in the panel: the status item shows asks only (one template glyph
   and the count; offline swaps in the sync-problem glyph, keeping the count).
-- **Signals** are a fixed glance board over the same Fractal SLO rows: PR throughput,
-  merge latency p95, CI critical path p95, flakes, main green, fleet, Fractal,
-  agents, spend and disk. The worst measured member determines the tone and
-  subtitle; multi-member signals show missed/measured counts, and spend shows the
-  worst budget's used percentage. An explicit `fractal` objective supersedes the
-  daemon-health rollup. Missing objectives show “— / no objective”; objectives
-  without measurements show “— / no data”. Each tile opens its member objectives
-  with the existing 24-hour histories; the Objectives tile still opens all rows.
-  These histories are budget remaining, not PR throughput: a per-day throughput
-  histogram remains a Fractal data-side gap.
+- **Signals** are a fixed glance board over the same Fractal SLO rows. One table in
+  `SignalBoard.swift` maps served IDs to the ten tiles; each row joins only the first
+  tile that names it:
+  - PR throughput: `factory/merged-prs`.
+  - Merge latency: every `…/merge-latency/…/p50` and `…/p95` row, for example
+    `fractal/merge-latency/p95` and `landing/merge-latency/example/p50`.
+  - CI critical path: `…/ci-critical-path/p95` and `build/admission/HOST/CLASS`.
+  - Flakes: `flakes` and `…/flakes`. Main green: any `main-green` segment.
+  - Fleet: `fleet/…`, including `fleet/roll-completion`. Agents: `agents/…`,
+    including `agents/mail-delivery/HOST`. Disk: `disk/…`.
+  - Fractal: the daemon's native rows (`person-read*`, `projection-*`, `write-ack`,
+    `terminal-attach`, `sql-statement`, `transaction/…`, `writer-hold`, `cpu`,
+    `cpu/idle`, `database`, `database-archive`), `ios-*` phone rows and
+    `fractal-api-readiness[-early]/MEMBER`. An explicit `fractal` objective joins
+    these rows as one more member; it never hides them or masks a worse child.
+  - Spend: every budget row plus the `CAM-R01/…` and `CAM-R02/…` credit objectives.
+
+  The worst served tone determines the tile's tone and subtitle; labelled parts
+  (`…/p95{member=x}`) stay out so they are not counted twice. Multi-member signals
+  show missed/measured counts; Spend shows the worst budget's used percentage, or
+  counts when a credit objective is worst. Missing objectives show “— / no objective”;
+  objectives without measurements show “— / no data”. Each tile opens its member
+  objectives with the existing 24-hour histories; the Objectives tile still opens all
+  rows, including any a tile does not name. These histories are budget remaining, not
+  PR throughput: a per-day throughput histogram remains a Fractal data-side gap.
 - **Objective history** (`GET v1/client/slo/history`): for every listed row,
   what was left over the last 24 hours in 24 hourly steps (Fractal's default
   period; a row's `window` is display text and is not parsed). Each step holds

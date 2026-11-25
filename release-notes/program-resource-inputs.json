@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Program mission schemas can declare kind-checked native resource inputs and receive subscription deliveries directly.",
+  "replay": {"status": "none", "detail": "Resource observations remain pinned by the existing native subject and claim identity. No historical run or journal conversion."},
+  "schema": {"status": "changed", "detail": "MissionInputSpec adds optional resource_kind; KDL input declarations add optional resource-kind on kind=resource. Omitted constraints deserialize as absent and serialize without the field, preserving existing revision bytes."},
+  "rules": {"status": "changed", "detail": "Fractal.resourceInput(kind) schema fields lower to the existing native resource input convention. Shared run admission validates the resolved observation kind, including compact vcs.item.state item_kind, and refuses mismatches with resource-input-kind-mismatch before creating a run."},
+  "compatibility": {"status": "changed", "detail": "Existing unconstrained inputs retain their behavior. Older daemons cannot author the new KDL property and do not enforce the optional constraint in replicated structured revisions. Upgrade all possible run-admitting members before publishing constrained missions."},
+  "downtime": {"status": "none", "detail": "No database migration or outage; sequence binary rollout before declaration publication."},
+  "manual": {"status": "changed", "detail": "Replace native dispatch bridges by resourceInput schema fields and repoint subscriptions to the program revision after upgrading admitting daemons. Keep existing subscription deduplication and immutable observation pins."},
+  "recovery": {"status": "changed", "detail": "Before downgrading admitting daemons, remove constrained declarations and drain their pending subscription requests; a downgrade otherwise loses kind enforcement."}
+}

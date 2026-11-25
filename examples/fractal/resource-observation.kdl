@@ -4,8 +4,8 @@ version 2
 // are `status` (`ready`, `missing`, or `unreadable`), `path`, `content_hash`, `size`, and `mode`,
 // never the content.
 //
-//   st apply examples/fractal/resource-observation.kdl --as person/operator
-//   st missions start example/config-check --id example/config-check/1 \
+//   fractal apply examples/fractal/resource-observation.kdl --as person/operator
+//   fractal missions start example/config-check --id example/config-check/1 \
 //     --workspace /srv/example/app --as person/operator
 
 resource "example/config" { kind "filesystem.file" }

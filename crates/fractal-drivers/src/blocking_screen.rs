@@ -201,7 +201,7 @@ pub fn codex_update_skip_key(driver: &str, screen: &str) -> Option<&'static str>
 }
 
 /// A prompt a harness shows only on its screen, with no hook or protocol event: what it asks,
-/// its options in screen order, and which one is selected. st raises it for the seat's person and
+/// its options in screen order, and which one is selected. Fractal raises it for the seat's person and
 /// answers it by moving the dialog's own selection and pressing Return.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenPrompt {
@@ -240,7 +240,7 @@ pub fn screen_prompt_choices(driver: &str, kind: &str) -> &'static [(&'static st
     }
 }
 
-/// The screen-only prompt `screen` shows, when it is one st knows in full. Every option and the
+/// The screen-only prompt `screen` shows, when it is one Fractal knows in full. Every option and the
 /// dialog's own footer must be present, so a transcript quoting a line of it is never mistaken
 /// for the dialog, and a changed dialog is never answered with keys meant for another.
 pub fn screen_prompt(driver: &str, screen: &str) -> Option<ScreenPrompt> {

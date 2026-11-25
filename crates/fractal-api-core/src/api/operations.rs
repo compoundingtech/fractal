@@ -2,7 +2,6 @@ use crate::MailboxWakesStore;
 use crate::CoordinationStore;
 use crate::LimitsStore;
 use crate::SeatsStore;
-use crate::SeatsStoreCore;
 use crate::RuntimeStartsStore;
 use super::*;
 
@@ -27,6 +26,7 @@ pub async fn doctor(
     web: Option<Extension<LocalWebStatus>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
+    let slo_state_dir = state.state_dir.clone();
     let environment = match tokio::time::timeout(
         DOCTOR_STEP,
         crate::api::read_deadline::spawn_blocking(crate::environment::snapshot),
@@ -114,22 +114,9 @@ pub async fn doctor(
             ),
         });
     }
-    for (name, status, message) in crate::slo::doctor_lines(&request_latency_windows()) {
-        report.checks.push(DoctorCheck {
-            name,
-            status: status.into(),
-            message,
-        });
-    }
-    // Only a daemon that runs the divergence check knows the count; the rest show no line.
-    if let Some(open) = reader_store.open_divergences_at_last_check() {
-        let (name, status, message) = crate::slo::divergence_line(open);
-        report.checks.push(DoctorCheck {
-            name,
-            status: status.into(),
-            message,
-        });
-    }
+    let slo_store = reader_store.clone();
+    let rows = blocking_store(move || current_slo_rows(&slo_store, &slo_state_dir)).await?;
+    report.checks.extend(native_slo_checks(&rows));
     report.checks.extend(github_usage_checks(
         &crate::resource::github_usage_report(),
         client_now_ms(),
@@ -147,6 +134,75 @@ pub async fn doctor(
     ));
     report.status = doctor_status(&report.checks).into();
     Ok(Json(report))
+}
+
+/// Doctor presents the same native evaluations as the SLO list, including declared objectives.
+/// Tone is already evaluated by the daemon; this adapter renders it informationally only.
+fn native_slo_checks(rows: &[Value]) -> impl Iterator<Item = DoctorCheck> + '_ {
+    rows.iter().map(|row| DoctorCheck {
+        name: format!("slo/{}", row["id"].as_str().unwrap_or_default()),
+        // An SLO verdict describes; it never gates `fractal doctor --strict`. Every row is
+        // informational: pass is reserved for checks, so unknown stays distinct from success.
+        status: "info".into(),
+        message: format!(
+            "{} ({}); {}; target {}; {}",
+            row["status"].as_str().unwrap_or("no-data"),
+            row["tone"].as_str().unwrap_or("unknown tone"),
+            row["current"].as_str().unwrap_or_default(),
+            row["target"].as_str().unwrap_or_default(),
+            row["window"].as_str().unwrap_or_default(),
+        ),
+    })
+}
+
+#[cfg(test)]
+mod native_slo_doctor_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_preserves_every_native_row_and_its_evaluation_without_gating() {
+        let rows = [
+            ("agents/mail-delivery", "missed", "red", "objective"),
+            ("build/admission", "met", "green", "objective"),
+            ("cpu/idle", "no-data", "quiet", "objective"),
+            ("example/merge-latency/p50", "at-risk", "yellow", "objective"),
+            ("ios-live-share", "missed", "red", "objective"),
+            ("database-archive", "not-eligible", "quiet", "objective"),
+            ("fleet/roll-completion", "no-data", "quiet", "objective"),
+            // A budget met on status can still be red by tone: most of its allowance is spent.
+            ("CAM-R01/anthropic", "met", "red", "budget"),
+        ];
+        let native = rows.iter().map(|(id, status, tone, kind)| json!({
+            "id": id, "kind": kind, "status": status, "tone": tone,
+            // Deliberately do not imply the verdict from these display strings.
+            "current": "native reading", "target": "native target", "window": "30d"
+        })).collect::<Vec<_>>();
+        let checks = native_slo_checks(&native).collect::<Vec<_>>();
+        assert_eq!(checks.len(), rows.len());
+        for (check, (id, verdict, tone, _)) in checks.iter().zip(rows) {
+            assert_eq!(check.name, format!("slo/{id}"));
+            // SLO verdicts describe; a red or quiet objective never fails `--strict`.
+            assert_eq!(check.status, "info", "{id} ({tone}) must not gate strict diagnostics");
+            assert_ne!(check.status, "pass", "{id}: an SLO row is never a successful check");
+            // The served tone stays visible even when it disagrees with the status word.
+            assert_eq!(check.message, format!("{verdict} ({tone}); native reading; target native target; 30d"));
+        }
+        assert!(!checks.iter().any(|check| check.status == "fail" || check.status == "warn"));
+    }
+
+    #[test]
+    fn doctor_native_inventory_matches_the_slo_endpoint_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let rows = current_slo_rows(&state.store, &state.state_dir).unwrap();
+        assert!(!rows.is_empty());
+        let checks = native_slo_checks(&rows).collect::<Vec<_>>();
+        assert_eq!(checks.len(), rows.len());
+        for (row, check) in rows.iter().zip(checks) {
+            assert_eq!(check.name, format!("slo/{}", row["id"].as_str().unwrap()));
+            assert!(check.message.starts_with(row["status"].as_str().unwrap()));
+        }
+    }
 }
 
 fn descriptor_check() -> DoctorCheck {
@@ -393,14 +449,34 @@ fn legacy_start_repair_evidence(
 
 mod backup_export;
 
+#[derive(Default, Deserialize)]
+pub struct BackupExportQuery {
+    #[serde(default)]
+    stream: bool,
+    max_wal_growth: Option<u64>,
+}
+
 /// Return export headers before preparing the archive; its stream owns the work.
-pub async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
+pub async fn backup_export(
+    State(state): State<AppState>,
+    Query(query): Query<BackupExportQuery>,
+) -> Result<Response, ApiError> {
     let permit = backup_export::reserve()?;
     let store = state.store.clone();
     // A bounded metadata check keeps ordinary precondition failures as HTTP errors.
     // The producer checks again in the snapshot that actually backs up the data.
     blocking_store(move || store.check_backup_projection()).await?;
     let bodies = message_body::bodies(&state.state_dir);
+    if query.stream {
+        return Ok(backup_export::direct_response(
+            permit,
+            query.max_wal_growth.unwrap_or(4 * 1024 * 1024 * 1024),
+            move |mut output, pinned| {
+                state.store.write_backup_with_snapshot(&mut output, Some(&bodies), pinned)?;
+                Ok(())
+            },
+        ));
+    }
     Ok(backup_export::response(permit, move || {
         let mut file = tempfile::tempfile()?;
         state.store.write_backup_with_bodies(&mut file, Some(&bodies))?;
@@ -520,9 +596,41 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     Ok(Json(body))
 }
 
+/// Append immutable roll evidence and wake the same projections as other native writes.
+pub async fn ingest_roll(
+    State(state): State<AppState>,
+    Json(receipt): Json<crate::roll_completion::SignedReceipt>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let result = blocking_store(move || crate::roll_completion::ingest(&store, receipt, client_now_ms() as u64)).await?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
+pub async fn observe_roll(
+    State(state): State<AppState>,
+    Json(receipt): Json<crate::roll_completion::SignedReceipt>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let result = blocking_store(move || crate::roll_observer::observe(&store, &receipt.claim_id)).await?;
+    signal_changed(&state);
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct RollIntentQuery { pub run: String }
+
+pub async fn roll_intent(
+    State(state): State<AppState>, Query(query): Query<RollIntentQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    Ok(Json(blocking_store(move || crate::roll_source::intent_context(&store, &query.run)).await?))
+}
+
 /// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.
 pub fn current_slo_rows(store: &crate::store::Store, state_dir: &std::path::Path) -> anyhow::Result<Vec<Value>> {
-    let mut rows = slo_rows(store)?;
+    let domain = crate::declared_objectives::github_rows(store, state_dir, client_now_ms() as u64)?;
+    let mut rows = slo_rows(store, domain)?;
     rows.extend(crate::readiness_slo::current(store));
     add_budget_forecasts(&mut rows, &crate::slo_history::dir(state_dir), client_now_ms() as u64);
     add_tones(&mut rows);
@@ -703,6 +811,9 @@ pub struct StatusQuery {
     /// the full reduction.
     #[serde(default)]
     summary: bool,
+    /// Runtime ownership evidence only; leaves full status and client-v0 unchanged.
+    #[serde(default)]
+    activity_summary: bool,
 }
 
 pub async fn resource_referrers(
@@ -752,12 +863,59 @@ pub async fn desired_batch(
     blocking_store(move || store.desired_batch(&request)).await.map(Json)
 }
 
+/// Only write-time materializations and filesystem metadata of registered open connections.
+pub async fn storage_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    blocking_store(move || storage_status_snapshot(&state)).await.map(Json)
+}
+
+pub(super) fn storage_status_snapshot(state: &AppState) -> anyhow::Result<Value> {
+    let store = &state.store;
+    let observation_trim = store.storage_census.snapshot();
+    let messages = crate::store::messages_shard::shard(store).map(|shard| {
+        Ok::<_, anyhow::Error>(json!({
+            "since_unix_ms": shard.append_census_since()?,
+            "per_kind": shard.append_census()?,
+        }))
+    }).transpose()?;
+    Ok(json!({
+        "node": state.node,
+        "sampled_at_unix_ms": client_now_ms(),
+        "byte_unit": "UTF-8 claim body bytes; excludes envelopes, indexes and SQLite amplification",
+        "checkpoint_enabled": store.storage_census.checkpoint_enabled(),
+        "local_trim_enabled": store.trims_locally(),
+        "graph": {
+            "since_unix_ms": store.append_census_since()?,
+            "per_kind": store.append_census()?,
+        },
+        "messages": messages,
+        "local_observations": crate::store::storage_census::append_counters(store)?,
+        "pin_sample_state": if observation_trim.pin_sample.is_some() { "sampled" } else { "unavailable" },
+        "observation_trim": observation_trim,
+        "pin_scope": "observations older than the last successful trim's retention cutoff",
+        "files_scope": "currently open Fractal-owned SQLite connections and their WAL/SHM sidecars; logical file lengths",
+        "not_covered": ["driver-owned harness spools"],
+        "files": smallclaims::sqlite::census_files::snapshot()?,
+    }))
+}
+
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
-) -> Result<Json<StatusResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let store = state.store.clone();
     let admission = state.seat_admission.clone();
+    if query.activity_summary {
+        let subject = query.subject.ok_or_else(|| ApiError::bad(FractalError::new(
+            "activity-summary-subject-required", "activity_summary requires one agent subject",
+        )))?;
+        if query.history || query.owner_run.is_some() || query.harness_only || query.summary {
+            return Err(ApiError::bad(FractalError::new(
+                "activity-summary-query", "activity_summary cannot be combined with other reductions",
+            )));
+        }
+        return blocking_store(move || store.status_activity_summary_at(&subject, query.at_index))
+            .await.map(|value| Json(value).into_response());
+    }
     blocking_store(move || {
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
@@ -810,7 +968,7 @@ pub async fn status(
         Ok(response)
     })
     .await
-    .map(Json)
+    .map(|response| Json(response).into_response())
 }
 
 pub async fn events(
@@ -994,7 +1152,9 @@ mod seat_admission_tests {
         assert!(!state.seat_admission.admit("agent/example/queued", None, None, false, admission_now()));
         for (query, live) in [(json!({}), true), (json!({"history":true}), false),
             (json!({"at_index":0}), false)] {
-            let Json(response) = status(State(state.clone()), Query(serde_json::from_value(query).unwrap())).await.unwrap();
+            let response = status(State(state.clone()), Query(serde_json::from_value(query).unwrap())).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response: StatusResponse = serde_json::from_slice(&body).unwrap();
             assert_eq!(response.seat_admission.is_some(), live);
             if let Some(admission) = response.seat_admission {
                 assert_eq!(admission["pendingCount"], 1);

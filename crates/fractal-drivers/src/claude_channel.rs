@@ -159,7 +159,7 @@ pub fn verify_fractal_installed() -> Result<()> {
     verify_fractal_plugin()?;
     anyhow::ensure!(
         fractal_policy_available(),
-        "the st Claude channel policy is not installed"
+        "the Fractal Claude channel policy is not installed"
     );
     Ok(())
 }
@@ -169,10 +169,10 @@ pub fn verify_fractal_plugin() -> Result<()> {
     let marketplace = fractal_marketplace_root()?;
     verify_fractal_marketplace_at(&marketplace)?;
     if !fractal_marketplace_is_registered_at(&marketplace)? {
-        bail!("the st Claude marketplace is not registered; run `fractal claude-channel install`");
+        bail!("the Fractal Claude marketplace is not registered; run `fractal claude-channel install`");
     }
     if !fractal_plugin_is_installed()? {
-        bail!("the st Claude channel plugin is not installed; run `fractal claude-channel install`");
+        bail!("the Fractal Claude channel plugin is not installed; run `fractal claude-channel install`");
     }
     Ok(())
 }
@@ -233,7 +233,7 @@ pub fn status_fractal() -> Result<()> {
     if assets && marketplace_ready && plugin_ready {
         Ok(())
     } else {
-        bail!("the st Claude channel installation is incomplete")
+        bail!("the Fractal Claude channel installation is incomplete")
     }
 }
 
@@ -243,11 +243,11 @@ pub fn uninstall_fractal(keep_policy: bool) -> Result<()> {
     Ok(())
 }
 
-/// Unregister st's Claude plugin and marketplace and delete the marketplace files, saying nothing.
+/// Unregister Fractal's Claude plugin and marketplace and delete the marketplace files, saying nothing.
 pub fn remove_fractal_channel(keep_policy: bool) -> Result<()> {
     let marketplace = fractal_marketplace_root()?;
     // Asking Claude about its plugins creates its own state files, so a machine that has never
-    // registered st's channel (no marketplace files and no Claude user config) is not asked.
+    // registered Fractal's channel (no marketplace files and no Claude user config) is not asked.
     if !marketplace.exists() && !claude_user_config_exists() {
         let policy = fractal_policy_path()?;
         if !keep_policy && policy.exists() {
@@ -453,7 +453,7 @@ fn fractal_policy_value() -> Value {
 
 fn fractal_policy_bytes() -> Vec<u8> {
     let mut bytes = serde_json::to_vec_pretty(&fractal_policy_value())
-        .expect("the built-in st channel policy is serializable");
+        .expect("the built-in Fractal channel policy is serializable");
     bytes.push(b'\n');
     bytes
 }
@@ -535,14 +535,14 @@ fn remove_fractal_policy_with_elevation(path: &Path) -> Result<()> {
 }
 
 fn run_fractal_elevated(action: &str) -> Result<()> {
-    let exe = env::current_exe().context("resolving the current st executable")?;
+    let exe = env::current_exe().context("resolving the current Fractal executable")?;
     let status = Command::new("sudo")
         .arg(exe)
         .args(["claude-channel", action])
         .status()
-        .with_context(|| format!("running the elevated st Claude channel {action}"))?;
+        .with_context(|| format!("running the elevated Fractal Claude channel {action}"))?;
     if !status.success() {
-        bail!("the elevated st Claude channel {action} failed with status {status}");
+        bail!("the elevated Fractal Claude channel {action} failed with status {status}");
     }
     Ok(())
 }
@@ -821,19 +821,19 @@ mod tests {
         assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
 
         install_fractal_marketplace_at(temp.path()).unwrap();
-        let st3_mcp: Value =
+        let fractal_mcp: Value =
             serde_json::from_slice(&fs::read(temp.path().join("st-channel/.mcp.json")).unwrap())
                 .unwrap();
-        assert_eq!(st3_mcp["mcpServers"]["st"]["command"], "st");
+        assert_eq!(fractal_mcp["mcpServers"]["st"]["command"], "st");
         assert_eq!(
-            st3_mcp["mcpServers"]["st"]["args"],
+            fractal_mcp["mcpServers"]["st"]["args"],
             json!(["driver", "claude-mcp"])
         );
-        let st3_plugin: Value = serde_json::from_slice(
+        let fractal_plugin: Value = serde_json::from_slice(
             &fs::read(temp.path().join("st-channel/.claude-plugin/plugin.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(st3_plugin["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(fractal_plugin["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

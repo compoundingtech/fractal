@@ -60,22 +60,28 @@ impl WritePrincipal {
 
     fn bind(&self, store: &Store, path: &str, value: &mut Value) -> Result<bool, ApiError> {
         let mut changed = false;
+        let message_write = messages::is_message_path(path)
+            || path == "/v1/claims" && value.get("kind").and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("message."));
+        let check = |actor: &Value| self.check(store, actor).map_err(|error| {
+            if message_write { messages::attribution_error() } else { error }
+        });
         for key in ["actor", "requester"] {
-            if let Some(actor) = value.get(key) { self.check(store, actor)?; }
+            if let Some(actor) = value.get(key) { check(actor)?; }
             if value.get(key).is_some_and(Value::is_null) {
                 value[key] = Value::String(self.actor.clone());
                 changed = true;
             }
         }
-        if path == "/v1/messages"
+        if matches!(path, "/v1/messages" | "/v1/messages/")
             && let Some(from) = value.get("from")
         {
-            self.check(store, from)?;
+            check(from)?;
         }
         if path == "/v1/claims"
             && value.get("kind").and_then(Value::as_str) == Some("message.sent")
         {
-            if let Some(from) = value.pointer("/fields/from") { self.check(store, from)?; }
+            if let Some(from) = value.pointer("/fields/from") { check(from)?; }
             if let Some(fields) = value.get_mut("fields").and_then(Value::as_object_mut)
                 && fields.get("from").is_none_or(Value::is_null)
             {
@@ -161,7 +167,9 @@ pub(super) async fn bind_request(
         request.extensions().get::<BoundAgent>().is_some()
             || request.extensions().get::<BoundRun>().is_some()
     ) && resources::allows_bound_request(request.method(), request.uri().path());
-    if (request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) && !native_resource_request)
+    let native_run_request = request.extensions().get::<BoundRun>().is_some()
+        && super::run_requests::allows_bound_request(request.method(), request.uri().path());
+    if (request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) && !native_resource_request && !native_run_request)
         || request.uri().path() == "/v1/repair/apply"
         || request.uri().path() == "/v1/replication/replay"
     {

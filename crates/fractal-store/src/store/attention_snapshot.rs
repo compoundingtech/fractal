@@ -2,6 +2,10 @@
 use super::*;
 use crate::model::LoopSpec;
 
+#[path = "attention_sources.rs"]
+mod sources;
+pub use sources::AttentionSourceSnapshot;
+
 /// The operational failure episodes as last folded, under the newest index and the count of
 /// their claims.
 #[derive(Default)]
@@ -232,12 +236,9 @@ impl Store {
     /// The person-attention collection at `now`, with the first instant after `now` at which
     /// the unchanged collection changes.
     ///
-    /// The collection only admits items as their waiting time arrives; it has no clock-driven
-    /// removals, so one read of its eventual projection serves both: the rows already waiting,
-    /// in the eventual order, and the earliest admission still ahead. This reuses the same
-    /// recipient, generation, run, declaration and resolution filters, including registered
-    /// custom attention. An ask's waiting time can predate its asking claim (for migrated
-    /// asks), so both gates must open before its row is visible.
+    /// Retain future admissions, but evaluate prompt answerability at `now`: the native
+    /// answer window can close without another claim. An ask's waiting time can predate its
+    /// asking claim (for migrated asks), so both gates must open before its row is visible.
     ///
     /// Observer/reconcile grace, final-step fault aging, checkpoint waits and runtime faults
     /// belong to `fault_snapshot`, not this collection. Person attention reads stored step
@@ -260,7 +261,8 @@ impl Store {
     ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         // Ask resolution eligibility uses SQLite's signed millisecond clock. Do not wrap its
         // upper bound to -1 by passing u128::MAX through that reducer.
-        let eventual = self.attention_snapshot_with_context(person, i64::MAX as u128, context)?;
+        let (eventual, mut valid_until) =
+            self.attention_snapshot_with_prompt_clock(person, i64::MAX as u128, now, context)?;
         let connection = self.readers.get();
         let subjects: BTreeSet<_> = eventual.iter()
             .filter(|item| item.kind == "person-step")
@@ -283,7 +285,6 @@ impl Store {
                 Ok((subject, at.parse()?))
             }).collect::<Result<_>>()?
         };
-        let mut valid_until = None;
         let rows = eventual
             .into_iter()
             .map(|item| {
@@ -318,12 +319,37 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        self.harness_prompt_attention_items_for_subjects(person, as_of, None)
+    }
+
+    pub(super) fn harness_prompt_attention_items_for_subjects(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        subjects: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<AttentionItemView>> {
+        Ok(self.harness_prompt_attention_items_with_deadline(person, as_of, subjects)?.0)
+    }
+
+    pub(super) fn harness_prompt_attention_items_with_deadline(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        subjects: Option<&BTreeSet<String>>,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         let connection = self.readers.get();
-        let seats = connection
-            .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        self.harness_prompt_items_for_seats_at(&connection, seats, person, as_of)
+        let seats = match subjects {
+            Some(subjects) => connection.prepare_cached(
+                "SELECT subject FROM desired WHERE kind='agent'
+                 AND subject IN (SELECT value FROM json_each(?1)) ORDER BY subject",
+            )?.query_map([serde_json::to_string(subjects)?], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            None => connection
+                .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
+        self.harness_prompt_items_for_seats_with_deadline(&connection, seats, person, as_of)
     }
 
     pub(super) fn harness_prompt_items_for_seats_at(
@@ -333,6 +359,16 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        Ok(self.harness_prompt_items_for_seats_with_deadline(connection, seats, person, as_of)?.0)
+    }
+
+    fn harness_prompt_items_for_seats_with_deadline(
+        &self,
+        connection: &Connection,
+        seats: Vec<String>,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         let newest = |subject: &str, kind: &str| -> Result<Option<(String, u128, Value)>> {
             let row = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4c401b40b08 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
@@ -358,6 +394,7 @@ impl Store {
             .transpose()
         };
         let mut items = Vec::new();
+        let mut valid_until: Option<u128> = None;
         for seat in seats {
             if let Some(item) = self.screen_prompt_item(connection, &seat, person)? {
                 items.push(item);
@@ -417,6 +454,12 @@ impl Store {
                 .filter(|reason| !reason.is_empty())
                 .unwrap_or("its terminal shows a prompt");
             let answerable = !missing_principal && answerable(&harness, as_of);
+            if answerable && harness["driver"] == "claude"
+                && let Some(since) = harness["observed_since_ms"].as_u64()
+            {
+                let due = u128::from(since) + CLAUDE_PROMPT_ANSWER_WAIT_MS;
+                valid_until = Some(valid_until.map_or(due, |previous| previous.min(due)));
+            }
             // The exact call it asks about, as its hook or driver named it for this observation.
             let call = prompt_call(connection, &seat, &harness)?;
             items.push(AttentionItemView {
@@ -492,7 +535,7 @@ impl Store {
                 )],
             });
         }
-        Ok(items)
+        Ok((items, valid_until))
     }
 
     pub fn person_attention_items(
@@ -720,15 +763,17 @@ impl Store {
         &self,
         person: Option<&str>,
         as_of: u128,
+        subject: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
         if person.is_some_and(|person| person != "person/operator") {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
-        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-heb7d874a3f9e owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
-            FROM claims WHERE kind='reconcile.fault' ORDER BY CANONICAL_ASC(claims)"))?;
+        let source_filter = if subject.is_some() { "subject=?1" } else { "?1 IS NULL" };
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc01ae9454288 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(&format!("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+            FROM claims WHERE kind='reconcile.fault' AND {source_filter} ORDER BY CANONICAL_ASC(claims)")))?;
         let mut latest = BTreeMap::new();
-        for claim in query.query_map([], claim_from_row)? {
+        for claim in query.query_map([subject], claim_from_row)? {
             let claim = claim?;
             let scope = claim.body["fields"]["scope"]
                 .as_str()
@@ -738,6 +783,10 @@ impl Store {
         }
         let mut items = Vec::new();
         for ((source, scope, _origin), claim) in latest {
+            let due = claim.accepted_at_unix_ms.saturating_add(120_000);
+            if due > as_of && claim.body["fields"]["status"] == "faulted" {
+                smallclaims::touched::note_due(due);
+            }
             // A restart can diagnose many late admissions in one pass. Keep these visible in
             // mission views and doctor without creating an operator item for each run.
             if scope == crate::model::FIRST_READINESS_FAULT_SCOPE
@@ -925,6 +974,19 @@ impl Store {
         }))
     }
 
+    /// Plain declarations for one fault family: no summaries or unrelated inventory.
+    fn attention_desired_kind(&self, kind: &str, subject: Option<&str>) -> Result<Vec<DesiredSubject>> {
+        smallclaims::touched::note_read(|| subject.map(str::to_owned).unwrap_or_else(|| "kind:intent.desired".into()));
+        let connection = self.readers.get();
+        let source_filter = if subject.is_some() { "subject=?2" } else { "?2 IS NULL" };
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h5210e0457dfb owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+             FROM desired WHERE kind=?1 AND {source_filter} ORDER BY subject",
+        ))?;
+        let rows = statement.query_map(params![kind, subject], desired_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
     /// A fault for each seat st parked after it failed to start, or after a failed explicit
     /// restart, that has not run since: one per park episode. Its owner is the agent that
     /// declared the seat when no mission run owns it, else the run's requester, else the
@@ -933,20 +995,23 @@ impl Store {
         &self,
         person: Option<&str>,
         as_of: u128,
+        subject: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
         if person.is_some() {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
         let seats = self
-            .desired_subjects()?
+            .attention_desired_kind("agent", subject)?
             .into_iter()
-            .filter(|desired| desired.kind == "agent")
             .map(|desired| (desired.subject.clone(), desired))
             .collect::<BTreeMap<_, _>>();
         let subjects = seats.keys().cloned().collect::<Vec<_>>();
         let mut items = Vec::new();
         for (source, parked) in self.parked_seats_for(&subjects, current_index(&connection)?)? {
+            if parked.parked_at_unix_ms > as_of {
+                smallclaims::touched::note_due(parked.parked_at_unix_ms);
+            }
             if parked.parked_at_unix_ms > as_of
                 || !person_work::declaration_live(&connection, &source)?
             {
@@ -1006,6 +1071,7 @@ impl Store {
         &self,
         person: Option<&str>,
         as_of: u128,
+        subject: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
         const REVIEWER: &str = "person/operator";
         if person.is_some_and(|person| person != REVIEWER) {
@@ -1013,22 +1079,25 @@ impl Store {
         }
         let connection = self.readers.get();
         let mut items = Vec::new();
-        smallclaims::touched::note_read(|| "kind:intent.desired".into());
-        smallclaims::touched::note_read(|| "kind:runtime.observed".into());
-        smallclaims::touched::note_read(|| "kind:record.repaired".into());
+        smallclaims::touched::note_read(|| subject.map(str::to_owned).unwrap_or_else(|| "kind:intent.desired".into()));
+        if subject.is_none() {
+            smallclaims::touched::note_read(|| "kind:runtime.observed".into());
+            smallclaims::touched::note_read(|| "kind:record.repaired".into());
+        }
         // Only the absence matters: batch indexed probes instead of hydrating/sorting
         // the latest observation and resolving identities for every running member.
-        let mut candidates = connection.prepare_cached(
+        let source_filter = if subject.is_some() { "subject=?1" } else { "?1 IS NULL" };
+        let mut candidates = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8f9121f82761 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
-             FROM desired WHERE kind='agent' AND member IS NOT NULL
+             FROM desired WHERE kind='agent' AND member IS NOT NULL AND {source_filter}
                AND NOT EXISTS(SELECT 1 FROM local_observations
                    WHERE subject=desired.subject AND kind='runtime.observed')
                AND NOT EXISTS(SELECT 1 FROM claims
                    WHERE subject=desired.subject AND kind='runtime.observed'
                      AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))
              ORDER BY subject",
-        )?;
-        for desired in candidates.query_map([], desired_from_row)? {
+        ))?;
+        for desired in candidates.query_map([subject], desired_from_row)? {
             let desired = desired?;
             if !person_work::declaration_live(&connection, &desired.subject)? {
                 continue;
@@ -1042,6 +1111,9 @@ impl Store {
             let due = declared
                 .accepted_at_unix_ms
                 .saturating_add(SEAT_NOT_STARTED_MS);
+            if due > as_of {
+                smallclaims::touched::note_due(due);
+            }
             if due > as_of
                 || crate::suspension::current(self, &desired.subject)?.is_some()
             {
@@ -1077,19 +1149,35 @@ impl Store {
     fn missing_admission_clock_faults(
         &self,
         person: Option<&str>,
+        subject: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
+        if subject.is_some_and(|subject| !subject.starts_with("mission-run/")) {
+            return Ok(Vec::new());
+        }
         let connection = self.readers.get();
         // Begin with the small open-run index, then point-read each deadline and its
         // after-steps. Finished history is never scanned for this fault.
-        let runs = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb0803b017360 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT mission_runs.id FROM mission_runs INDEXED BY mission_runs_open_index
+        let source_filter = if subject.is_some() { "mission_runs.id=?2" } else { "?2 IS NULL" };
+        let source_id = subject.map(|subject| subject.trim_start_matches("mission-run/"));
+        if let Some(source) = subject {
+            if let Some(run) = mission_run_header_tx(&connection, source.trim_start_matches("mission-run/")).optional()? {
+                smallclaims::touched::note_read(|| format!(
+                    "step-run/{}/{}",
+                    run.generation.trim_start_matches("run-generation/"),
+                    crate::mission::AFTER_RUN_STEP,
+                ));
+            }
+        }
+        let runs = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h17ae5bb9d200 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT mission_runs.id FROM mission_runs
              CROSS JOIN mission_run_deadlines AS deadlines
              WHERE {OPEN_MISSION_RUN} AND deadlines.run_id=mission_runs.id
+               AND {source_filter}
                AND deadlines.deadline_at_unix_ms IS NULL
                AND EXISTS(SELECT 1 FROM step_runs INDEXED BY step_runs_run_index
                  WHERE step_runs.run_id=mission_runs.id AND step_runs.step_path=?1
                    AND step_runs.status='completed')"
-        ))?.query_map([crate::mission::AFTER_RUN_STEP], |row| row.get::<_, String>(0))?
+        ))?.query_map(params![crate::mission::AFTER_RUN_STEP, source_id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut items = Vec::new();
         for id in runs {
@@ -1123,6 +1211,7 @@ impl Store {
         &self,
         person: Option<&str>,
         as_of: u128,
+        subject: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
         fn loops<'a>(mission: &'a MissionSpec, kept: &mut Vec<&'a LoopSpec>) {
             for step in mission.steps.values() {
@@ -1136,7 +1225,13 @@ impl Store {
         }
         let connection = self.readers.get();
         let mut items = Vec::new();
-        for run in self.mission_run_headers()? {
+        let runs = match subject {
+            Some(subject) if subject.starts_with("mission-run/") =>
+                mission_run_header_tx(&connection, subject.trim_start_matches("mission-run/")).optional()?.into_iter().collect(),
+            Some(_) => Vec::new(),
+            None => self.mission_run_headers()?,
+        };
+        for run in runs {
             if !person_work::run_live(&connection, &run.subject, Some(&run.generation), true)? {
                 continue;
             }
@@ -1161,11 +1256,15 @@ impl Store {
                 if !matches!(view.status.as_str(), "failed" | "cancelled") {
                     continue;
                 }
-                if let Some(item) = self.stopped_loop_item(&run, &view, spec)?
-                    && item.requested_at_unix_ms <= as_of
-                    && person.is_none_or(|person| person == item.person)
-                {
-                    items.push(item);
+                if let Some(item) = self.stopped_loop_item(&run, &view, spec)? {
+                    if item.requested_at_unix_ms > as_of {
+                        smallclaims::touched::note_due(item.requested_at_unix_ms);
+                    }
+                    if item.requested_at_unix_ms <= as_of
+                        && person.is_none_or(|person| person == item.person)
+                    {
+                        items.push(item);
+                    }
                 }
             }
         }
@@ -1176,15 +1275,12 @@ impl Store {
         &self,
         person: Option<&str>,
         as_of: u128,
+        subject: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
         use crate::resource::ObserverCondition;
         let connection = self.readers.get();
         let mut items = Vec::new();
-        for desired in self
-            .desired_subjects()?
-            .into_iter()
-            .filter(|desired| desired.kind == "observer")
-        {
+        for desired in self.attention_desired_kind("observer", subject)? {
             if !person_work::declaration_live(&connection, &desired.subject)? {
                 continue;
             }
@@ -1209,6 +1305,7 @@ impl Store {
             } else {
                 match code {
                     "access-denied" => ObserverCondition::Access(reason),
+                    "github-repository-not-found" => ObserverCondition::RepositoryNotFound(reason),
                     "rate-limited" => ObserverCondition::RateLimited {
                         reason,
                         outlasted: fields["next_check_unix_ms"]
@@ -1232,6 +1329,19 @@ impl Store {
                 })
                 .last()
                 .unwrap_or(latest);
+            if first.accepted_at_unix_ms > as_of {
+                smallclaims::touched::note_due(first.accepted_at_unix_ms);
+            }
+            let due = if code == "rate-limited" {
+                fields["next_check_unix_ms"].as_str()
+                    .and_then(|value| value.parse::<u128>().ok())
+                    .map(|reset| reset.saturating_add(60_000))
+            } else {
+                condition.attention_delay_ms().map(|delay| first.accepted_at_unix_ms.saturating_add(delay))
+            };
+            if let Some(due) = due.filter(|due| *due > as_of) {
+                smallclaims::touched::note_due(due);
+            }
             if first.accepted_at_unix_ms > as_of
                 || !condition.needs_person(as_of.saturating_sub(first.accepted_at_unix_ms))
             {
@@ -1454,12 +1564,22 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
-        let mut items = self.reconcile_fault_attention(person, as_of)?;
-        items.extend(self.observer_attention_items(person, as_of)?);
-        items.extend(self.loop_attention_items(person, as_of)?);
-        items.extend(self.missing_admission_clock_faults(person)?);
-        items.extend(self.parked_runtime_attention_items(person, as_of)?);
-        items.extend(self.unstarted_seat_attention_items(person, as_of)?);
+        self.operational_fault_families_for(person, as_of, None)
+    }
+
+    /// The same authoritative families, restricted at their indexed source reads.
+    pub(super) fn operational_fault_families_for(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        subject: Option<&str>,
+    ) -> Result<Vec<AttentionItemView>> {
+        let mut items = self.reconcile_fault_attention(person, as_of, subject)?;
+        items.extend(self.observer_attention_items(person, as_of, subject)?);
+        items.extend(self.loop_attention_items(person, as_of, subject)?);
+        items.extend(self.missing_admission_clock_faults(person, subject)?);
+        items.extend(self.parked_runtime_attention_items(person, as_of, subject)?);
+        items.extend(self.unstarted_seat_attention_items(person, as_of, subject)?);
         Ok(items)
     }
 
@@ -2532,7 +2652,7 @@ impl Store {
         };
         let message_key = format!("st3-denial-answer:{episode}");
         let message_id = &hex::encode(sha2::Sha256::digest(message_key.as_bytes()))[..16];
-        self.append_claim(&ClaimInput {
+        super::message_routing::send(self, &ClaimInput {
             subject: format!("message/{message_id}"),
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),
@@ -3419,6 +3539,262 @@ mod person_steps_plan_tests {
             !plan.iter().any(|line| line.starts_with("SCAN step_runs")),
             "the person-step read must not scan step_runs: {plan:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod desired_kind_scan_tests {
+    use super::*;
+    use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
+
+    // Independent pre-change algorithms: deliberately retain the full inventory read/filter,
+    // and do not call either changed caller or the new kind reader.
+    fn old_parked(store: &Store, person: Option<&str>, as_of: u128) -> Result<Vec<AttentionItemView>> {
+        if person.is_some() { return Ok(Vec::new()); }
+        let connection = store.readers.get();
+        let seats = store.desired_subjects()?.into_iter()
+            .filter(|desired| desired.kind == "agent")
+            .map(|desired| (desired.subject.clone(), desired)).collect::<BTreeMap<_, _>>();
+        let subjects = seats.keys().cloned().collect::<Vec<_>>();
+        let mut items = Vec::new();
+        for (source, parked) in store.parked_seats_for(&subjects, current_index(&connection)?)? {
+            if parked.parked_at_unix_ms > as_of || !person_work::declaration_live(&connection, &source)? {
+                continue;
+            }
+            let Some(desired) = seats.get(&source) else { continue };
+            let owner = match &desired.owner_run {
+                Some(_) => String::new(),
+                None => store.desired_subject_with_writer(&source)?.and_then(|(_, writer)| writer)
+                    .filter(|writer| writer.starts_with("agent/")).unwrap_or_default(),
+            };
+            let codex = desired.member.as_ref().and_then(|member| member.driver.as_deref()) == Some("codex");
+            let diagnostic = store.last_driver_diagnostic(&source)?;
+            items.push(AttentionItemView {
+                deadline_unix_ms: None, default_answer: None,
+                episode: parked.episode.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
+                subject: source.clone(), person: owner, requester_id: None, launch_id: None, variant_id: None,
+                message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
+                title: if codex { "A Codex agent stopped after repeated failures" } else {
+                    "An agent stopped after repeated runtime failures"
+                }.into(),
+                detail: format!(
+                    "{source}: {}.{} Fix what keeps it from starting, then `st agents restart {source}`; this fault clears when it runs again.",
+                    parked.reason.trim_end_matches('.'),
+                    diagnostic.map(|value| format!(" The driver's last diagnostic: {value}.")).unwrap_or_default(),
+                ),
+                mission: None, mission_run: desired.owner_run.clone(), step: None, targets: vec![source.clone()],
+                requested_at_unix_ms: parked.parked_at_unix_ms,
+                actions: vec![attention_action("inspect source", &["st", "agents", "show", &source])], request: None,
+            });
+        }
+        Ok(items)
+    }
+
+    fn old_observer(store: &Store, person: Option<&str>, as_of: u128) -> Result<Vec<AttentionItemView>> {
+        use crate::resource::ObserverCondition;
+        let connection = store.readers.get();
+        let mut items = Vec::new();
+        for desired in store.desired_subjects()?.into_iter().filter(|desired| desired.kind == "observer") {
+            if !person_work::declaration_live(&connection, &desired.subject)? { continue; }
+            let revision = store.selected_desired_revision(&desired.subject)?;
+            let states = store.claims_for(&desired.subject, Some("observer.state"))?;
+            let Some(latest) = states.last() else { continue };
+            let fields = &latest.body["fields"];
+            if fields["state"] == "healthy" || fields["revision"].as_str() != revision.as_deref() { continue; }
+            let reason = fields["reason"].as_str().unwrap_or("the observer cannot observe").to_owned();
+            let code = fields["error_code"].as_str().unwrap_or("unreachable");
+            let condition = if code == "local-observer-budget" {
+                ObserverCondition::LocalBudget(reason)
+            } else if fields["state"] == "degraded" {
+                ObserverCondition::Rejected(reason)
+            } else {
+                match code {
+                    "access-denied" => ObserverCondition::Access(reason),
+                    "rate-limited" => ObserverCondition::RateLimited {
+                        reason,
+                        outlasted: fields["next_check_unix_ms"].as_str()
+                            .and_then(|value| value.parse::<u128>().ok())
+                            .is_some_and(|reset| as_of >= reset.saturating_add(60_000)),
+                    },
+                    _ => ObserverCondition::Unreachable(reason),
+                }
+            };
+            let first = states.iter().rev().take_while(|state| {
+                state.body["fields"]["state"] == fields["state"]
+                    && state.body["fields"]["error_code"].as_str().unwrap_or("unreachable")
+                        == fields["error_code"].as_str().unwrap_or("unreachable")
+                    && state.body["fields"]["revision"] == fields["revision"]
+            }).last().unwrap_or(latest);
+            if first.accepted_at_unix_ms > as_of
+                || !condition.needs_person(as_of.saturating_sub(first.accepted_at_unix_ms)) { continue; }
+            let reviewer = desired.owner_run.as_ref().map(|run| store.mission_run(run))
+                .transpose()?.flatten().map(|run| run.requester)
+                .filter(|recipient| recipient.starts_with("person/"))
+                .unwrap_or_else(|| "person/operator".into());
+            if person.is_some_and(|person| person != reviewer) { continue; }
+            let source = desired.subject;
+            items.push(AttentionItemView {
+                deadline_unix_ms: None, default_answer: None, episode: first.id.clone(),
+                priority: "high".into(), kind: "fault".into(), review_mode: None,
+                subject: source.clone(), person: reviewer, requester_id: None, launch_id: None,
+                variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
+                title: condition.title().into(), detail: condition.reason(&source, &latest.origin),
+                mission: None, mission_run: desired.owner_run, step: None, targets: vec![source.clone()],
+                requested_at_unix_ms: first.accepted_at_unix_ms,
+                actions: vec![attention_action("inspect source", &["st", "subject", &source])], request: None,
+            });
+        }
+        Ok(items)
+    }
+
+    fn append(tx: &Transaction<'_>, subject: &str, kind: &str, fields: Value) -> ClaimRecord {
+        append_claim_tx(tx, "fixture", subject, kind, Some("agent/declarer"),
+            &json!({"fields":fields}), &[], None).unwrap()
+    }
+
+    fn fixture() -> Store {
+        let store = Store::open_memory("fixture").unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        // Reverse insertion order pins subject ordering; unsupported members must still
+        // decode to None rather than making the entire kind unreadable.
+        for (subject, kind, member) in [
+            ("agent/z", "agent", r#"{"future_member":true}"#),
+            ("agent/a", "agent", "null"),
+            ("observer/z", "observer", r#"{"future_member":true}"#),
+            ("observer/a", "observer", "null"),
+            ("observer/healthy", "observer", "null"),
+            ("observer/stale", "observer", "null"),
+            ("agent/quiet", "agent", "null"),
+            // Keep the observer range's upper bound nonempty at both inventory sizes:
+            // ending at the next kind takes one more opcode than ending at index EOF.
+            ("resource/baseline", "resource", "null"),
+        ] {
+            let claim = append(&tx, subject, "intent.desired", json!({}));
+            tx.execute(
+                "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+                 VALUES(?1,?2,'revision',?3,'{}',?4)",
+                params![subject, kind, claim.id, member],
+            ).unwrap();
+            if kind == "agent" && subject != "agent/quiet" {
+                append(&tx, subject, "runtime.reconcile-decision", json!({
+                    "decision":"raise", "key":format!("runtime-crash-loop:{}", claim.id),
+                    "reason":"Repeated start failures."
+                }));
+                append(&tx, subject, "harness.diagnostic", json!({"code":"start", "reason":"Cannot start"}));
+            } else if kind == "observer" {
+                append(&tx, subject, "observer.state", json!({
+                    "state":if subject == "observer/healthy" { "healthy" } else { "degraded" },
+                    "revision":if subject == "observer/stale" { "old" } else { "revision" },
+                    "error_code":"access-denied", "reason":"Observation rejected"
+                }));
+            }
+        }
+        tx.commit().unwrap();
+        drop(connection);
+        store
+    }
+
+    type Reader = fn(&Store, Option<&str>, u128) -> Result<Vec<AttentionItemView>>;
+
+    fn measured(store: &Store, reader: Reader) -> (Value, SqliteWork) {
+        let scope = SqliteWorkScope::start();
+        let items = reader(store, None, u128::MAX).unwrap();
+        let work = scope.finish();
+        assert!(work.statements > 0 && work.vm_steps > 0, "{work:?}");
+        (serde_json::to_value(items).unwrap(), work)
+    }
+
+    fn assert_bounded(old: Reader, new: Reader, family: &str) {
+        let store = fixture();
+        // Both paths are warmed independently before each measured inventory size.
+        let sample = || {
+            old(&store, None, u128::MAX).unwrap();
+            new(&store, None, u128::MAX).unwrap();
+            let (expected, old_work) = measured(&store, old);
+            let (actual, new_work) = measured(&store, new);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.as_array().unwrap().len(), 2, "{family}: {actual}");
+            for kind in ["agent", "observer"] {
+                let previous = store.desired_subjects().unwrap().into_iter()
+                    .filter(|desired| desired.kind == kind).collect::<Vec<_>>();
+                let selected = store.attention_desired_kind(kind, None).unwrap();
+                assert_eq!(selected, previous, "{kind}: all seven desired fields and order");
+                assert!(selected.iter().find(|desired| desired.subject == format!("{kind}/z"))
+                    .unwrap().member.is_none(), "{kind}: unsupported member remains readable");
+            }
+            for person in [None, Some("person/operator"), Some("person/other")] {
+                for as_of in [0, u128::MAX] {
+                    assert_eq!(
+                        serde_json::to_value(new(&store, person, as_of).unwrap()).unwrap(),
+                        serde_json::to_value(old(&store, person, as_of).unwrap()).unwrap(),
+                        "{family}: person={person:?}, as_of={as_of}",
+                    );
+                }
+            }
+            (old_work, new_work)
+        };
+        let small = sample();
+        // Only unrelated desired inventory grows; relevant declarations and fault history
+        // stay fixed. Copy the FK source rather than manufacturing nonexistent claim IDs.
+        store.connection.write().execute_batch(
+            "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<4096)
+             INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+             SELECT 'resource/unrelated-'||i,'resource',revision,claim_id,'{}',NULL
+             FROM n CROSS JOIN desired source WHERE source.subject='agent/a'",
+        ).unwrap();
+        let large = sample();
+        eprintln!("{family} warmed desired scan: small old={:?} new={:?}; large old={:?} new={:?}",
+            small.0, small.1, large.0, large.1);
+        assert_eq!(small.1.statements, large.1.statements, "{family}: {small:?} -> {large:?}");
+        assert_eq!(small.1.vm_steps, large.1.vm_steps, "{family}: {small:?} -> {large:?}");
+        assert!(large.0.vm_steps > small.0.vm_steps + 4096, "{family}: {small:?} -> {large:?}");
+        assert!(large.1.vm_steps < large.0.vm_steps, "{family}: {large:?}");
+    }
+
+    #[test]
+    fn parked_runtime_attention_kind_scan_is_bounded_with_faults() {
+        assert_bounded(old_parked, |store, person, at| store.parked_runtime_attention_items(person, at, None), "parked");
+    }
+
+    #[test]
+    fn observer_attention_kind_scan_is_bounded_with_faults() {
+        assert_bounded(old_observer, |store, person, at| store.observer_attention_items(person, at, None), "observer");
+    }
+
+    #[test]
+    fn operational_family_cache_keeps_parked_and_observer_authority_by_subject() {
+        let store = fixture();
+        let at = u128::MAX - 1;
+        let normalize = |mut items: Vec<AttentionItemView>| {
+            items.sort_by(|a, b| (&a.subject, &a.episode).cmp(&(&b.subject, &b.episode)));
+            serde_json::to_value(items).unwrap()
+        };
+        let read = || {
+            let generation = store.desired_changes_since(None).0;
+            store.read_snapshot_unindexed(|| person_work::with_cut_memo(|| {
+                let expected = store.operational_fault_families(None, at)?;
+                let actual = store.cached_operational_fault_families(at, generation)?;
+                assert_eq!(normalize(actual), normalize(expected));
+                Ok::<_, anyhow::Error>(())
+            })).unwrap();
+        };
+        read();
+        let before = store.fault_family_work();
+        read();
+        assert_eq!(store.fault_family_work(), before);
+        {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            append(&tx, "observer/a", "observer.state", json!({
+                "state": "healthy", "revision": "revision",
+            }));
+            tx.commit().unwrap();
+        }
+        read();
+        assert_eq!(store.fault_family_work()["subjects_recomputed"].as_u64().unwrap(),
+            before["subjects_recomputed"].as_u64().unwrap() + 1);
+        assert_eq!(store.fault_family_work()["bootstraps"], before["bootstraps"]);
     }
 }
 

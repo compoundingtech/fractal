@@ -3,40 +3,148 @@ use notify::{
     EventKind,
     RecursiveMode::{NonRecursive, Recursive},
     Watcher as _,
-    event::{ModifyKind, RemoveKind},
+    event::ModifyKind,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, PoisonError},
 };
-type Callback = Arc<dyn Fn(notify::Event) + Send + Sync>;
+pub(super) struct Notification<'a> {
+    pub event: &'a notify::Event,
+    pub coverage_changed: bool,
+}
+type Callback = Arc<dyn Fn(Notification<'_>) + Send + Sync>;
 type Paths = Vec<(PathBuf, bool)>;
-type Users = Arc<Mutex<BTreeMap<u64, (Paths, Callback)>>>;
+type Predicate = Arc<dyn Fn(&notify::Event) -> bool + Send + Sync>;
+type Users = Arc<Mutex<Subscribers>>;
+#[derive(Default)]
+struct Subscribers {
+    leases: BTreeMap<u64, (Paths, Callback)>,
+    // Physical watch roots select candidates; input predicates retain declared-path
+    // identity even when many missing inputs share one existing ancestor.
+    // Predicates filter ordinary events, not replacement of shared watch coverage.
+    roots: BTreeMap<PathBuf, BTreeSet<u64>>,
+    inputs: BTreeMap<u64, Predicate>,
+}
+impl Subscribers {
+    fn insert(&mut self, id: u64, entry: (Paths, Callback)) {
+        for (path, _) in &entry.0 {
+            self.roots.entry(path.clone()).or_default().insert(id);
+        }
+        self.leases.insert(id, entry);
+    }
+    fn remove(&mut self, id: &u64) -> Option<(Paths, Callback)> {
+        let entry = self.leases.remove(id)?;
+        self.inputs.remove(id);
+        for (path, _) in &entry.0 {
+            if let Some(ids) = self.roots.get_mut(path) {
+                ids.remove(id);
+                if ids.is_empty() { self.roots.remove(path); }
+            }
+        }
+        Some(entry)
+    }
+    #[cfg(test)]
+    fn len(&self) -> usize { self.leases.len() }
+    #[cfg(test)]
+    fn is_empty(&self) -> bool { self.leases.is_empty() }
+
+    fn callbacks(&self, event: &notify::Event, coverage: bool) -> Vec<Callback> {
+        let mut ids = BTreeSet::new();
+        if event.need_rescan() && !coverage || event.paths.is_empty() {
+            ids.extend(self.leases.keys().copied());
+        } else {
+            for path in &event.paths {
+                for ancestor in path.ancestors() {
+                    if let Some(users) = self.roots.get(ancestor) {
+                        ids.extend(users);
+                    }
+                }
+                if coverage || matches!(event.kind, EventKind::Remove(_)
+                    | EventKind::Modify(ModifyKind::Name(_))) {
+                    for root in subtree(&self.roots, path) {
+                        ids.extend(&self.roots[root]);
+                    }
+                }
+            }
+        }
+        ids.into_iter().filter_map(|id| {
+            let (paths, callback) = &self.leases[&id];
+            let relevant = if coverage {
+                paths.iter().any(|(root, _)| event.paths.iter().any(|path|
+                    root.starts_with(path) || path.starts_with(root)))
+            } else if let Some(predicate) = self.inputs.get(&id) {
+                predicate(event)
+            } else {
+                event.need_rescan() || event.paths.is_empty() || paths.iter().any(|(root, recursive)|
+                    event.paths.iter().any(|path| path == root
+                        || (*recursive && path.starts_with(root))
+                        || path.parent() == Some(root.as_path())
+                        || (root.starts_with(path) && matches!(event.kind, EventKind::Remove(_)
+                            | EventKind::Modify(ModifyKind::Name(_))))))
+            };
+            relevant.then(|| callback.clone())
+        }).collect()
+    }
+}
 type Stamp = (u64, u64);
 type Probe = fn(&Path) -> std::io::Result<Stamp>;
 pub(super) struct Pool(Mutex<State>);
 struct State {
     watcher: notify::RecommendedWatcher,
     users: Users,
-    generation: Arc<AtomicU64>,
+    generation: Arc<Mutex<BTreeMap<PathBuf, (bool, u64)>>>,
     requested: BTreeMap<PathBuf, [isize; 2]>,
     physical: BTreeMap<PathBuf, (bool, Stamp, u64)>,
     next: u64,
+    reported: [usize; 3],
 }
 pub(super) struct Lease {
     pool: Arc<Pool>,
     id: u64,
 }
+impl Drop for State {
+    fn drop(&mut self) {
+        crate::incremental::file_watch_work::coverage(self.reported, [0; 3]);
+    }
+}
+// Compile the vendored production cursor's deterministic tests on every CI platform.
+#[cfg(test)]
+#[path = "../../../vendor/notify/src/fsevent_cursor.rs"]
+mod fsevent_cursor;
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
-fn callbacks(users: &Users) -> Vec<Callback> {
-    lock(users).values().map(|(_, cb)| cb.clone()).collect()
+
+pub(super) fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(not(target_os = "macos"))]
+    { path.canonicalize() }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::{fd::AsRawFd as _, unix::{ffi::OsStrExt as _, fs::OpenOptionsExt as _}};
+        // realpath preserves the caller's letter case on case-insensitive APFS.
+        // F_GETPATH returns the vnode's spelling, matching FSEvents' namespace.
+        let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_EVTONLY).open(path)?;
+        let mut bytes = [0_u8; libc::PATH_MAX as usize];
+        // SAFETY: the descriptor stays live; F_GETPATH writes at most PATH_MAX
+        // bytes into this writable buffer and terminates the successful result.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, bytes.as_mut_ptr()) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let length = bytes.iter().position(|byte| *byte == 0)
+            .ok_or_else(|| std::io::Error::other("F_GETPATH returned an unterminated path"))?;
+        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..length])))
+    }
+}
+fn dispatch(users: &Users, event: &notify::Event, coverage: bool) -> usize {
+    let callbacks = lock(users).callbacks(event, coverage);
+    for callback in &callbacks {
+        crate::incremental::file_watch_work::delivery(coverage);
+        callback(Notification { event, coverage_changed: coverage });
+    }
+    callbacks.len()
 }
 #[cfg(test)]
 thread_local! { static STATS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
@@ -53,25 +161,45 @@ fn subtree<'a, T>(
         .take_while(move |(p, _)| p.starts_with(root))
         .map(|(p, _)| p)
 }
+fn invalidate_coverage(generations: &Mutex<BTreeMap<PathBuf, (bool, u64)>>, event: &notify::Event) {
+    if !event.need_rescan() && !matches!(event.kind, EventKind::Remove(_)
+        | EventKind::Modify(ModifyKind::Name(_))) {
+        return;
+    }
+    let mut generations = lock(generations);
+    if event.need_rescan() || event.paths.is_empty() {
+        for (_, generation) in generations.values_mut() { *generation += 1; }
+    } else {
+        let mut roots = BTreeSet::new();
+        for path in &event.paths {
+            // A sibling file replacement cannot detach a nonrecursive parent watch.
+            // Recursive roots may lose descendant coverage; descendants of a renamed
+            // or removed ancestor always need reinstallation.
+            if !matches!(event.kind, EventKind::Remove(notify::event::RemoveKind::File)) {
+                roots.extend(path.ancestors().filter(|root|
+                    generations.get(*root).is_some_and(|(recursive, _)| *recursive)).map(Path::to_owned));
+            }
+            roots.extend(subtree(&generations, path).cloned());
+        }
+        for root in roots { generations.get_mut(&root).expect("indexed root").1 += 1; }
+    }
+}
 impl Pool {
     pub(super) fn new() -> Result<Arc<Self>> {
         let users = Users::default();
-        let dispatch = users.clone();
-        let generation = Arc::new(AtomicU64::new(0));
+        let subscribers = users.clone();
+        let generation = Arc::new(Mutex::new(BTreeMap::new()));
         let lost = generation.clone();
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let event = event.unwrap_or_else(|_| {
                 notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan)
             });
-            if event.need_rescan() || matches!(event.kind, EventKind::Remove(RemoveKind::Folder)) {
-                lost.fetch_add(1, Ordering::AcqRel);
-            }
+            invalidate_coverage(&lost, &event);
             if !event.need_rescan() && matches!(event.kind, EventKind::Access(_)) {
                 return;
             }
-            for callback in callbacks(&dispatch) {
-                callback(event.clone());
-            }
+            crate::incremental::file_watch_work::event();
+            dispatch(&subscribers, &event, false);
         })?;
         Ok(Arc::new(Self(Mutex::new(State {
             watcher,
@@ -80,17 +208,31 @@ impl Pool {
             requested: BTreeMap::new(),
             physical: BTreeMap::new(),
             next: 0,
+            reported: [0; 3],
         }))))
     }
-    pub(super) fn subscribe(self: &Arc<Self>, paths: Paths, callback: Callback) -> Result<Lease> {
+    pub(super) fn subscribe_input(
+        self: &Arc<Self>, paths: Paths, predicate: Predicate, callback: Callback,
+    ) -> Result<Lease> {
+        self.acquire(paths, Some(predicate), callback)
+    }
+    #[cfg(test)]
+    fn subscribe(self: &Arc<Self>, paths: Paths, callback: Callback) -> Result<Lease> {
+        self.acquire(paths, None, callback)
+    }
+    fn acquire(self: &Arc<Self>, paths: Paths, predicate: Option<Predicate>, callback: Callback) -> Result<Lease> {
         let paths = paths
             .into_iter()
-            .map(|(path, recursive)| Ok((path.canonicalize()?, recursive)))
+            .map(|(path, recursive)| Ok((canonicalize(&path)?, recursive)))
             .collect::<Result<Paths>>()?;
         let mut state = lock(&self.0);
         let id = state.next;
         state.next += 1;
-        lock(&state.users).insert(id, (paths.clone(), callback));
+        {
+            let mut users = lock(&state.users);
+            users.insert(id, (paths.clone(), callback));
+            if let Some(predicate) = predicate { users.inputs.insert(id, predicate); }
+        }
         if let Err(error) = state.update(&paths, true, stamp) {
             state.remove(id);
             return Err(error);
@@ -114,12 +256,27 @@ impl State {
         }
     }
     fn install(&mut self, path: &Path, recursive: bool, post: Probe) -> Result<()> {
-        let identity = stamp(path)?;
-        let generation = self.generation.load(Ordering::Acquire);
+        let identity = match stamp(path) {
+            Ok(identity) => identity,
+            Err(error) => {
+                lock(&self.generation).remove(path);
+                return Err(error.into());
+            }
+        };
+        let generation = {
+            let mut generations = lock(&self.generation);
+            let entry = generations.entry(path.to_owned()).or_default();
+            entry.0 = recursive;
+            entry.1
+        };
         let mode = if recursive { Recursive } else { NonRecursive };
-        self.watcher.watch(path, mode)?;
+        if let Err(error) = self.watcher.watch(path, mode) {
+            lock(&self.generation).remove(path);
+            return Err(error.into());
+        }
         if post(path).ok() != Some(identity) {
             let _ = self.watcher.unwatch(path);
+            lock(&self.generation).remove(path);
             anyhow::bail!("directory replaced while subscribing");
         }
         self.physical
@@ -127,6 +284,14 @@ impl State {
         Ok(())
     }
     fn update(&mut self, paths: &Paths, add: bool, post: Probe) -> Result<()> {
+        let result = self.update_inner(paths, add, post);
+        let current = [self.physical.len(), lock(&self.generation).len(),
+            lock(&self.users).leases.len()];
+        crate::incremental::file_watch_work::coverage(self.reported, current);
+        self.reported = current;
+        result
+    }
+    fn update_inner(&mut self, paths: &Paths, add: bool, post: Probe) -> Result<()> {
         for (path, recursive) in paths {
             let counts = self.requested.entry(path.clone()).or_default();
             counts[usize::from(*recursive)] += if add { 1 } else { -1 };
@@ -145,7 +310,6 @@ impl State {
             })
             .collect();
         for root in roots {
-            let generation = self.generation.load(Ordering::Acquire);
             let expand = !self.physical.contains_key(&root)
                 || self.physical.get(&root).is_some_and(|p| p.0)
                     != self.requested.get(&root).is_some_and(|c| c[1] > 0);
@@ -159,6 +323,7 @@ impl State {
             };
             let mut pending = Vec::new();
             for path in candidates {
+                let generation = lock(&self.generation).get(&path).map_or(0, |entry| entry.1);
                 let desired = self.requested.get(&path).map(|c| c[1] > 0).filter(|_| {
                     !path
                         .ancestors()
@@ -178,9 +343,12 @@ impl State {
                 }
                 if self.physical.remove(&path).is_some() {
                     let _ = self.watcher.unwatch(&path);
-                    for cb in callbacks(&self.users) {
-                        cb(notify::Event::new(EventKind::Modify(ModifyKind::Any)));
-                    }
+                    if desired.is_none() { lock(&self.generation).remove(&path); }
+                    // Watch replacement can lose events only in the replaced coverage.
+                    // A scoped rescan asks those leases to reread, not every input.
+                    let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                        .add_path(path.clone()).set_flag(notify::event::Flag::Rescan);
+                    dispatch(&self.users, &event, true);
                 }
                 if let Some(mode) = desired {
                     pending.push((path, mode));
@@ -224,6 +392,214 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+    #[test]
+    fn root_index_matches_components_not_character_prefixes() {
+        let users = Users::default();
+        for (id, path) in [(0, "/a/b"), (1, "/a/bc")] {
+            lock(&users).insert(id, (vec![(PathBuf::from(path), true)], Arc::new(|_| {})));
+        }
+        for kind in [EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(notify::event::RemoveKind::Folder),
+            EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::From))] {
+            let event = notify::Event::new(kind).add_path(PathBuf::from("/a/b"));
+            assert_eq!(dispatch(&users, &event, false), 1);
+            assert_eq!(dispatch(&users, &event, true), 1);
+        }
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from("/a/bc/input"));
+        assert_eq!(dispatch(&users, &event, false), 1);
+    }
+
+    #[test]
+    fn shared_ancestor_routes_each_event_to_only_intersecting_declared_inputs() {
+        use std::sync::atomic::AtomicUsize;
+        const LEASES: usize = 430;
+        let directory = PathBuf::from("/workspace");
+        let users = Users::default();
+        let counts: Vec<_> = (0..LEASES).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        for (id, count) in counts.iter().enumerate() {
+            let target = directory.join(format!(".local/bin/input-{id}"));
+            let parent = directory.clone();
+            let count = count.clone();
+            let mut subscribers = lock(&users);
+            subscribers.insert(id as u64, (vec![(directory.clone(), false)], Arc::new(move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            })));
+            subscribers.inputs.insert(id as u64, Arc::new(move |event|
+                super::super::FileWatch::relevant(event, &target, &parent, None)));
+        }
+        let target = directory.join(".local/bin/input-7");
+        let sibling = directory.join(".local/bin/input-7-backup");
+        for path in [directory.join(".local/state/daemon/state"), sibling.clone()] {
+            let event = notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path);
+            assert_eq!(dispatch(&users, &event, false), 0);
+        }
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(target.clone());
+        assert_eq!(dispatch(&users, &event, false), 1);
+        let renamed = notify::Event::new(EventKind::Modify(ModifyKind::Name(
+            notify::event::RenameMode::Both,
+        ))).add_path(sibling).add_path(target.clone()).add_path(target);
+        assert_eq!(dispatch(&users, &renamed, false), 1, "multi-path events deliver each lease once");
+        for (id, count) in counts.iter().enumerate() {
+            assert_eq!(count.load(Ordering::Relaxed), usize::from(id == 7) * 2);
+        }
+        let ancestor = notify::Event::new(EventKind::Create(notify::event::CreateKind::Folder))
+            .add_path(directory.join(".local/bin"));
+        assert_eq!(dispatch(&users, &ancestor, false), LEASES,
+            "creating a missing shared ancestor must discover all declared inputs");
+        let overflow = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert_eq!(dispatch(&users, &overflow, false), LEASES, "genuine lost events require rereads");
+        for (id, count) in counts.iter().enumerate() {
+            assert_eq!(count.load(Ordering::Relaxed), 2 + usize::from(id == 7) * 2);
+        }
+    }
+
+    #[test]
+    fn missing_nested_input_ignores_own_writes_but_observes_ancestor_changes() {
+        use notify::event::{CreateKind, RemoveKind, RenameMode};
+        let directory = PathBuf::from("/workspace");
+        let target = directory.join(".local/bin/declared-tool");
+        let users = Users::default();
+        lock(&users).insert(0, (vec![(directory.clone(), false)], Arc::new(|_| {})));
+        let parent = directory.clone();
+        let declared = target.clone();
+        lock(&users).inputs.insert(0, Arc::new(move |event|
+            super::super::FileWatch::relevant(event, &declared, &parent, None)));
+
+        // These mutations share the nearest existing ancestor with a missing input.
+        // They model state/log output and unrelated source writes without exclusions.
+        for path in [
+            ".local/state/fractal/daemon/events.jsonl",
+            ".local/state/fractal/daemon/database",
+            ".local/bin/another-tool",
+            ".local/bin/declared-tool.tmp",
+            ".fractal/launch/output.log",
+            "src/unrelated.rs",
+        ] {
+            for kind in [
+                EventKind::Create(CreateKind::File),
+                EventKind::Modify(ModifyKind::Any),
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                EventKind::Remove(RemoveKind::File),
+            ] {
+                let event = notify::Event::new(kind).add_path(directory.join(path));
+                assert_eq!(dispatch(&users, &event, false), 0, "unrelated mutation: {event:?}");
+            }
+        }
+        for path in [&target, &directory.join(".local"), &directory.join(".local/bin")] {
+            for kind in [
+                EventKind::Create(CreateKind::Folder),
+                EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                EventKind::Remove(RemoveKind::Folder),
+            ] {
+                let event = notify::Event::new(kind).add_path(path.clone());
+                assert_eq!(dispatch(&users, &event, false), 1, "declared-path intersection: {event:?}");
+            }
+        }
+        let replacement = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(directory.join(".local/bin/declared-tool.tmp")).add_path(target);
+        assert_eq!(dispatch(&users, &replacement, false), 1, "atomic input replacement is relevant");
+    }
+
+    #[test]
+    fn coverage_replacement_bypasses_input_predicate_only_for_intersecting_roots() {
+        use std::sync::atomic::AtomicUsize;
+        let users = Users::default();
+        let counts: Vec<_> = (0..3).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        for (id, (path, count)) in ["/workspace/a", "/workspace/a/nested", "/workspace/ab"]
+            .into_iter().zip(&counts).enumerate() {
+            let count = count.clone();
+            let mut subscribers = lock(&users);
+            subscribers.insert(id as u64, (vec![(PathBuf::from(path), true)], Arc::new(move |notification| {
+                assert!(notification.coverage_changed);
+                count.fetch_add(1, Ordering::Relaxed);
+            })));
+            subscribers.inputs.insert(id as u64, Arc::new(|_| false));
+        }
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from("/workspace/a")).set_flag(notify::event::Flag::Rescan);
+        assert_eq!(dispatch(&users, &event, true), 2,
+            "a scoped synthetic rescan must not become a global overflow");
+        assert_eq!(counts[0].load(Ordering::Relaxed), 1);
+        assert_eq!(counts[1].load(Ordering::Relaxed), 1);
+        assert_eq!(counts[2].load(Ordering::Relaxed), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn case_insensitive_volume_aliases_share_canonical_watch_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("MixedCaseDirectory");
+        let alias = root.path().join("mixedcasedirectory");
+        std::fs::create_dir(&directory).unwrap();
+        if !alias.is_dir() {
+            eprintln!("case-sensitive test volume: case-insensitive alias case is not applicable");
+            return;
+        }
+        let pool = Pool::new().unwrap();
+        let canonical = canonicalize(&directory).unwrap();
+        let first = pool.subscribe(vec![(directory, false)], Arc::new(|_| {})).unwrap();
+        let second = pool.subscribe(vec![(alias, false)], Arc::new(|_| {})).unwrap();
+        assert_eq!(lock(&pool.0).physical.len(), 1, "case aliases must not add a stream root");
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(canonical.join("input"));
+        assert_eq!(dispatch(&lock(&pool.0).users, &event, false), 2);
+        drop((first, second));
+        assert!(lock(&lock(&pool.0).generation).is_empty());
+    }
+    #[test]
+    fn sixty_four_roots_dispatch_and_upgrade_only_intersecting_leases() {
+        use std::sync::atomic::AtomicUsize;
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().canonicalize().unwrap();
+        let paths: Vec<_> = (0..64).map(|index| parent.join(index.to_string())).collect();
+        for path in &paths { std::fs::create_dir(path).unwrap(); }
+        let pool = Pool::new().unwrap();
+        let counts: Vec<_> = paths.iter().map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let mut leases = Vec::new();
+        let predicate = |directory: &Path| -> Predicate {
+            let directory = directory.to_owned();
+            let target = directory.join("input");
+            Arc::new(move |event| super::super::FileWatch::relevant(event, &target, &directory, None))
+        };
+        for (path, count) in paths.iter().zip(&counts) {
+            let count = count.clone();
+            leases.push(pool.subscribe_input(vec![(path.clone(), false)], predicate(path), Arc::new(move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            })).unwrap());
+        }
+        let upgraded = pool.subscribe_input(vec![(paths[0].clone(), true)], predicate(&paths[0]), Arc::new(|_| {})).unwrap();
+        assert_eq!(counts[0].load(Ordering::Relaxed), 1, "one replaced root");
+        assert!(counts[1..].iter().all(|count| count.load(Ordering::Relaxed) == 0));
+        let users = lock(&pool.0).users.clone();
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(parent.join("unrelated")).add_path(paths[0].join("unrelated"));
+        assert_eq!(dispatch(&users, &event, false), 0, "no callbacks for unrelated paths");
+        let event = event.add_path(paths[0].join("input"));
+        assert_eq!(dispatch(&users, &event, false), 2, "any matching path, each lease once");
+        assert_eq!(counts[0].load(Ordering::Relaxed), 2);
+        assert!(counts[1..].iter().all(|count| count.load(Ordering::Relaxed) == 0));
+
+        let generations = lock(&pool.0).generation.clone();
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::From)))
+            .add_path(paths[0].clone());
+        invalidate_coverage(&generations, &event);
+        assert_eq!(lock(&generations)[&paths[0]].1, 1);
+        assert!(paths[1..].iter().all(|path| lock(&generations)[path].1 == 0));
+        let sibling = notify::Event::new(EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Both)))
+            .add_path(paths[1].join("unrelated"));
+        invalidate_coverage(&generations, &sibling);
+        assert_eq!(lock(&generations)[&paths[1]].1, 0, "sibling rename keeps parent coverage");
+        assert_eq!(dispatch(&users, &event, false), 2);
+        let event = notify::Event::new(EventKind::Remove(notify::event::RemoveKind::Folder))
+            .add_path(parent.clone());
+        assert_eq!(dispatch(&users, &event, false), 65, "removed ancestor reaches descendants");
+        let event = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert_eq!(dispatch(&users, &event, false), 65, "lost paths retain all-root fallback");
+        drop((upgraded, leases));
+    }
     #[test]
     fn subscriptions_share_parents_and_collapse_deep_recursive_trees() {
         let root = tempfile::tempdir().unwrap();
@@ -288,7 +664,7 @@ mod tests {
             drop(duplicate);
             assert_eq!(STATS.get(), 1);
         }
-        lock(&pool.0).generation.fetch_add(1, Ordering::AcqRel);
+        for (_, generation) in lock(&lock(&pool.0).generation).values_mut() { *generation += 1; }
         STATS.set(0);
         let renewal = pool
             .subscribe(vec![(root.path().join("0"), false)], Arc::new(|_| {}))
@@ -344,8 +720,10 @@ mod tests {
             assert!(wakeups.load(Ordering::Relaxed) > 0);
             assert!(!lock(&pool.0).physical.contains_key(&missing));
             assert_eq!(lock(&pool.0).physical.len(), 2);
+            assert_eq!(lock(&lock(&pool.0).generation).len(), 2, "missing reinstall has no generation");
             drop(stale);
             assert_eq!(lock(&pool.0).physical.len(), 2);
+            assert_eq!(lock(&lock(&pool.0).generation).len(), 2, "stale release cannot retain dead roots");
             assert!(pool
                 .subscribe(vec![(missing.clone(), recursive)], Arc::new(|_| {}))
                 .is_err());
@@ -357,6 +735,7 @@ mod tests {
             assert_eq!(lock(&pool.0).physical[&missing].1, stamp(&missing).unwrap());
             drop((recreated, replacement, independent));
             assert!(lock(&pool.0).physical.is_empty());
+            assert!(lock(&lock(&pool.0).generation).is_empty());
             assert!(lock(&lock(&pool.0).users).is_empty());
         }
     }
@@ -476,7 +855,7 @@ mod tests {
         let pool = Pool::new().unwrap();
         let (send, receive) = std::sync::mpsc::channel();
         let retained = pool.subscribe(vec![(existing.clone(), false)], Arc::new(move |event| {
-            let _ = send.send(event);
+            let _ = send.send(event.event.clone());
         })).unwrap();
         let mut state = lock(&pool.0);
         let paths = vec![(added.clone(), false), (existing.clone(), true), (failed.clone(), false)];
@@ -486,7 +865,7 @@ mod tests {
         }).is_err());
         assert!(state.physical.contains_key(&added));
         assert!(state.physical[&existing].0);
-        assert!(receive.try_iter().any(|event| event.paths.is_empty()));
+        assert!(receive.try_iter().any(|event| event.need_rescan() && event.paths == [existing.clone()]));
         state.remove(u64::MAX);
         assert_eq!(state.physical.len(), 1);
         assert!(!state.physical[&existing].0);

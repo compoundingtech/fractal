@@ -16,10 +16,10 @@ fn core_schema_uses_one_commit_and_reopens_without_losing_data() {
         .unwrap();
     let commits = Arc::new(AtomicUsize::new(0));
     let observed = commits.clone();
-    connection.commit_hook(Some(move || {
+    crate::sqlite::observe_transaction_resolution(&connection, move || {
         observed.fetch_add(1, Ordering::Relaxed);
         false
-    }));
+    }, || {}).unwrap();
 
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbadf3021d128 owner=smallclaims::store::schema_install_tests TODO=trace-statement-and-value-representation */ FRESH_SCHEMA).unwrap();
     assert_eq!(commits.load(Ordering::Relaxed), 1);
@@ -280,10 +280,10 @@ fn fresh_auxiliary_schema_families_share_durable_commits() {
         .unwrap();
     let commits = Arc::new(AtomicUsize::new(0));
     let observed = commits.clone();
-    connection.commit_hook(Some(move || {
+    crate::sqlite::observe_transaction_resolution(&connection, move || {
         observed.fetch_add(1, Ordering::Relaxed);
         false
-    }));
+    }, || {}).unwrap();
     let installations = Arc::new(Mutex::new(Vec::new()));
     let recorded = installations.clone();
     let committed = commits.clone();
@@ -403,7 +403,7 @@ fn cut_and_reopen(directory: &std::path::Path, defer: bool, kept: usize) -> Resu
     let seen = Arc::new(AtomicUsize::new(0));
     // Every commit after the first `kept` rolls back, as if the process stopped there.
     let opened = Store::open_for_initialization_test(&path, "node", Arc::new(Plain), defer, move |connection| {
-        connection.commit_hook(Some(move || seen.fetch_add(1, Ordering::Relaxed) >= kept));
+        crate::sqlite::observe_transaction_resolution(connection, move || seen.fetch_add(1, Ordering::Relaxed) >= kept, || {}).unwrap();
     });
     assert!(opened.is_err(), "the open cut after {kept} commits still succeeded");
     drop(opened);
@@ -418,10 +418,10 @@ fn fresh_commits(path: &std::path::Path, defer: bool) -> usize {
     let counted = commits.clone();
     drop(
         Store::open_for_initialization_test(path, "node", Arc::new(Plain), defer, move |connection| {
-            connection.commit_hook(Some(move || {
+            crate::sqlite::observe_transaction_resolution(connection, move || {
                 counted.fetch_add(1, Ordering::Relaxed);
                 false
-            }));
+            }, || {}).unwrap();
         })
         .unwrap(),
     );

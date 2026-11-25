@@ -1,10 +1,10 @@
 # Proves the sekrets gateway with real Unix users in a VM: the gateway runs as the `sekrets` user
 # with its store closed to everyone else; ada calls it from an ssh login session as herself and
-# from a seat-like process in her service manager that her st daemon vouches for; robin, another
+# from a seat-like process in her service manager that her Fractal daemon vouches for; robin, another
 # person, gets nothing of ada's unless she grants it. The isolation-vm CI job builds this test's
-# driver and runs it outside the Nix sandbox with a prebuilt st binary:
+# driver and runs it outside the Nix sandbox with a prebuilt Fractal binary:
 #
-#   ST_SEKRETS_BINARY   the st binary, built in the flake's dev shell
+#   FRACTAL_SEKRETS_BINARY   the Fractal binary, built in the flake's dev shell
 #
 # The VM compiles nothing. KVM is required; there is no emulation fallback.
 { pkgs, pty }:
@@ -130,7 +130,7 @@ pkgs.testers.runNixOSTest {
     import os
     import shlex
 
-    st = "/usr/local/bin/st"
+    fractal = "/usr/local/bin/st"
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("sshd.service")
     machine.wait_for_unit("default.target", "ada")
@@ -140,7 +140,7 @@ pkgs.testers.runNixOSTest {
         "chown root:root /usr/local/libexec/st-sekrets && chmod 0755 /usr/local/libexec/st-sekrets"
         " && mkdir -p /usr/local/bin && ln -sf /usr/local/libexec/st-sekrets /usr/local/bin/st"
     )
-    # As `st sekrets setup` does: the gateway may pass through each home, never read it.
+    # As `fractal sekrets setup` does: the gateway may pass through each home, never read it.
     machine.succeed("setfacl -m u:sekrets:x /srv/people/ada /srv/people/robin")
     machine.succeed("systemctl start st-sekrets.service")
     machine.wait_for_file("/run/st-sekrets/gateway.sock")
@@ -173,23 +173,23 @@ pkgs.testers.runNixOSTest {
         return machine.succeed(run) if succeed else machine.fail(run)
 
     # The kernel tells a login session from the service manager.
-    assert "person/ada, from a login session" in login("ada", f"{st} sekrets whoami")
-    assert "unidentified process of person/ada" in manager(f"{st} sekrets whoami")
+    assert "person/ada, from a login session" in login("ada", f"{fractal} sekrets whoami")
+    assert "unidentified process of person/ada" in manager(f"{fractal} sekrets whoami")
     machine.fail("su nobody -s /bin/sh -c '/usr/local/bin/st sekrets whoami'")
 
     # Ada's profiles: her own, and one for her agents with a token she puts in.
-    login("ada", f"{st} sekrets profile create ada/gh --preset everything --preset no-credential-printing --default")
-    login("ada", f"{st} sekrets profile create ada/agent-gh --preset gh-pr --preset git-push --allow 'git status'")
-    login("ada", f"printf example-token | {st} sekrets put GH_TOKEN --profile ada/agent-gh")
+    login("ada", f"{fractal} sekrets profile create ada/gh --preset everything --preset no-credential-printing --default")
+    login("ada", f"{fractal} sekrets profile create ada/agent-gh --preset gh-pr --preset git-push --allow 'git status'")
+    login("ada", f"printf example-token | {fractal} sekrets put GH_TOKEN --profile ada/agent-gh")
     assert "gh pr list token= home=/var/lib/st-sekrets/profiles/ada/gh/home" in login(
-        "ada", f"{st} sekrets -- gh pr list"
+        "ada", f"{fractal} sekrets -- gh pr list"
     )
-    assert "token=set" in login("ada", f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
+    assert "token=set" in login("ada", f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1")
 
-    # A dedicated system UID + exact root-created unit, BEFORE any st daemon exists.
+    # A dedicated system UID + exact root-created unit, BEFORE any Fractal daemon exists.
     # It receives a command grant, never Ada's person authority or profile management.
     machine.succeed("install -d -m 0755 /var/cache/evidence /w && install -d -o evidence-caller -m 0700 /var/cache/evidence/work && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/fractal && printf private-runner-checkout > /var/cache/evidence/work/fractal/checkout-marker && setfacl -m u:sekrets:x /var/cache/evidence/work")
-    login("ada", f"{st} sekrets grant ada/agent-gh --to program/ci1/evidence --allow 'gh pr view'")
+    login("ada", f"{fractal} sekrets grant ada/agent-gh --to program/ci1/evidence --allow 'gh pr view'")
     def program(command, unit="ci-evidence-caller.service", user="evidence-caller", succeed=True,
                 cwd="/w/fractal", backing="/var/cache/evidence/work"):
         call = (f"systemd-run --quiet --wait --pipe --collect --unit {unit} "
@@ -203,10 +203,10 @@ pkgs.testers.runNixOSTest {
         assert status not in (124, 137), f"program call timed out: {output}"
         assert (status == 0) if succeed else (status != 0), output
         return output
-    assert "run-only system service" in program(f"{st} sekrets whoami")
+    assert "run-only system service" in program(f"{fractal} sekrets whoami")
     with subtest("Program first command binds its authorized private checkout"):
-        assert "token=set" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
-    output = program(f"printf 'structured-stdin-only' | {st} sekrets --profile ada/agent-gh -- gh pr view 1")
+        assert "token=set" in program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1")
+    output = program(f"printf 'structured-stdin-only' | {fractal} sekrets --profile ada/agent-gh -- gh pr view 1")
     assert "checkout=/w/fractal:private-runner-checkout" in output
     assert "checkout-readonly" in output and "structured-stdin-only" in output
     assert "checkout-mount-ro-nosuid-nodev" in output
@@ -215,7 +215,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("Program bind retains the verified inode across caller path replacement"):
         machine.succeed("install -d -o sekrets -m 0700 /run/st-sekrets/bind-control && mkfifo /run/st-sekrets/bind-control/resume && chown sekrets /run/st-sekrets/bind-control/resume && touch /run/st-sekrets/bind-control/pause && install -o evidence-caller -m 0600 /dev/null /var/cache/evidence/swap-output")
-        swap_command = (f"{st} sekrets --profile ada/agent-gh -- gh pr view 1 </dev/null > /var/cache/evidence/swap-output 2>&1; "
+        swap_command = (f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1 </dev/null > /var/cache/evidence/swap-output 2>&1; "
                         "result=$?; printf '\\nexit=%s\\n' \"$result\" >> /var/cache/evidence/swap-output; exit \"$result\"")
         machine.succeed("systemd-run --quiet --no-block --unit ci-evidence-caller.service "
                         "--property=Type=oneshot --property=RemainAfterExit=yes "
@@ -233,58 +233,58 @@ pkgs.testers.runNixOSTest {
         assert "checkout-mount-ro-nosuid-nodev" in swapped
         assert "swapped-directory" not in swapped
         machine.succeed("systemctl stop ci-evidence-caller.service && rm -rf /run/st-sekrets/bind-control /var/cache/evidence/work/fractal && mv /var/cache/evidence/work/verified-original /var/cache/evidence/work/fractal")
-    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/tmp", succeed=False)
-    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/missing", succeed=False)
+    program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/tmp", succeed=False)
+    program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/missing", succeed=False)
     machine.succeed("install -d -m 0755 /var/cache/evidence/other/fractal && ln -s /var/cache/evidence/other /var/cache/evidence/work/escape")
-    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/escape/fractal", succeed=False)
+    program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/escape/fractal", succeed=False)
     with subtest("Program refuses a private checkout with the wrong inode before bwrap"):
         machine.succeed("install -d -o sekrets -m 0700 /run/st-sekrets/bind-control && touch /run/st-sekrets/bind-control/watch")
         assert "passed checkout does not match the configured runner backing directory" in program(
-            f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", backing="/var/cache/evidence/other", succeed=False)
+            f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1", backing="/var/cache/evidence/other", succeed=False)
         machine.fail("test -e /run/st-sekrets/bind-control/invoked")
         machine.succeed("rm -rf /run/st-sekrets/bind-control")
     # Reachable private mount but wrong physical-root owner: refusal comes from the gateway,
     # rather than a client that cannot enter its cwd.
     machine.succeed("chown robin /var/cache/evidence/work && chmod 0755 /var/cache/evidence/work")
-    assert "runner checkout root has the wrong owner" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", succeed=False)
+    assert "runner checkout root has the wrong owner" in program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1", succeed=False)
     machine.succeed("chown evidence-caller /var/cache/evidence/work && chmod 0700 /var/cache/evidence/work && setfacl -m u:sekrets:x /var/cache/evidence/work")
     # A Program with no private-mount mapping must refuse an out-of-roots cwd too;
     # the ordinary person's profile-HOME fallback must not apply.
-    login("ada", f"{st} sekrets grant ada/agent-gh --to program/ci1/host-evidence --allow 'gh pr view'")
-    assert "not under a checkout root" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", unit="ci-host-evidence.service", user="host-evidence-caller", cwd="/tmp", succeed=False)
-    assert "program/ci1/evidence" in login("ada", f"{st} sekrets log --limit 200")
-    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 2", succeed=False)
-    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", unit="other-evidence.service", succeed=False)
-    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", user="robin", succeed=False)
-    program(f"{st} sekrets profile policy ada/agent-gh --preset everything", succeed=False)
-    program(f"{st} sekrets grant ada/agent-gh --to person/robin --preset everything", succeed=False)
-    program(f"printf refused | {st} sekrets put KEY --profile ada/agent-gh", succeed=False)
-    program(f"{st} sekrets log", succeed=False)
+    login("ada", f"{fractal} sekrets grant ada/agent-gh --to program/ci1/host-evidence --allow 'gh pr view'")
+    assert "not under a checkout root" in program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1", unit="ci-host-evidence.service", user="host-evidence-caller", cwd="/tmp", succeed=False)
+    assert "program/ci1/evidence" in login("ada", f"{fractal} sekrets log --limit 200")
+    program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 2", succeed=False)
+    program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1", unit="other-evidence.service", succeed=False)
+    program(f"{fractal} sekrets --profile ada/agent-gh -- gh pr view 1", user="robin", succeed=False)
+    program(f"{fractal} sekrets profile policy ada/agent-gh --preset everything", succeed=False)
+    program(f"{fractal} sekrets grant ada/agent-gh --to person/robin --preset everything", succeed=False)
+    program(f"printf refused | {fractal} sekrets put KEY --profile ada/agent-gh", succeed=False)
+    program(f"{fractal} sekrets log", succeed=False)
     program("cat /var/lib/st-sekrets/sekrets.db", succeed=False)
     program("ls /var/lib/st-sekrets/profiles/ada/agent-gh/home", succeed=False)
     signing_home = "/var/lib/st-sekrets/profiles/ada/agent-gh/home"
     signing_key = f"{signing_home}/signing-key"
     machine.succeed(f"printf throwaway > {signing_key} && chown sekrets:sekrets {signing_key} && chmod 0600 {signing_key}")
     program(f"cat {signing_key}", succeed=False)
-    assert "denied by rule `gh auth token`" in login("ada", f"{st} sekrets -- gh auth token", succeed=False)
+    assert "denied by rule `gh auth token`" in login("ada", f"{fractal} sekrets -- gh auth token", succeed=False)
 
     # No one but the sekrets user reads the store; the token appears in no output or log.
     for user in ["ada", "robin"]:
         login(user, "ls /var/lib/st-sekrets", succeed=False)
         login(user, "cat /var/lib/st-sekrets/sekrets.db", succeed=False)
-    assert "example-token" not in login("ada", f"{st} sekrets log --limit 200")
+    assert "example-token" not in login("ada", f"{fractal} sekrets log --limit 200")
 
     # Robin has nothing of Ada's until she grants it, and then only what the grant allows.
-    assert "owns no profile and has been granted none" in login("robin", f"{st} sekrets -- gh pr list", succeed=False)
-    login("ada", f"{st} sekrets grant ada/agent-gh --to person/robin --preset gh-read")
-    assert "token=set" in login("robin", f"{st} sekrets -- gh pr view 1")
-    assert "no allow rule matches" in login("robin", f"{st} sekrets -- gh pr create --draft", succeed=False)
-    login("robin", f"{st} sekrets grant ada/agent-gh --to person/robin --preset gh-pr", succeed=False)
+    assert "owns no profile and has been granted none" in login("robin", f"{fractal} sekrets -- gh pr list", succeed=False)
+    login("ada", f"{fractal} sekrets grant ada/agent-gh --to person/robin --preset gh-read")
+    assert "token=set" in login("robin", f"{fractal} sekrets -- gh pr view 1")
+    assert "no allow rule matches" in login("robin", f"{fractal} sekrets -- gh pr create --draft", succeed=False)
+    login("robin", f"{fractal} sekrets grant ada/agent-gh --to person/robin --preset gh-pr", succeed=False)
 
     # A process in the service manager without its daemon's word is refused.
-    assert "not identified" in manager(f"{st} sekrets -- gh pr list", succeed=False)
+    assert "not identified" in manager(f"{fractal} sekrets -- gh pr list", succeed=False)
 
-    # Ada's st daemon vouches for her seats once she registers its key from a login session.
+    # Ada's Fractal daemon vouches for her seats once she registers its key from a login session.
     machine.succeed(
         "install -d -o ada -m 0700 /srv/people/ada/.config /srv/people/ada/.config/st3"
         " && echo 'person = \"person/ada\"' > /srv/people/ada/.config/st3/config.toml"
@@ -294,7 +294,7 @@ pkgs.testers.runNixOSTest {
         "su ada -s /bin/sh -c "
         + shlex.quote(
             "XDG_RUNTIME_DIR=/run/user/1000 systemd-run --user --unit st3-daemon --quiet "
-            f"--setenv=PATH=/run/current-system/sw/bin -- {st} up"
+            f"--setenv=PATH=/run/current-system/sw/bin -- {fractal} up"
         )
     )
     socket_present = "test -S /run/user/1000/fractal.sock"
@@ -303,20 +303,20 @@ pkgs.testers.runNixOSTest {
     # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
     machine.wait_until_succeeds(socket_present)
     # The socket file appears while the daemon is still starting ("the API is not ready"), so the
-    # file is not readiness. Ready means a daemon API read answers: `st clients` is read-only and
+    # file is not readiness. Ready means a daemon API read answers: `fractal clients` is read-only and
     # fails until then.
     machine.wait_until_succeeds(
         "ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i /root/.ssh/id_ed25519 "
-        f"ada@localhost {shlex.quote(f'{st} clients')} >/dev/null 2>&1",
+        f"ada@localhost {shlex.quote(f'{fractal} clients')} >/dev/null 2>&1",
         timeout=120,
     )
-    assert "can now use the profiles granted to them" in login("ada", f"{st} sekrets enable")
+    assert "can now use the profiles granted to them" in login("ada", f"{fractal} sekrets enable")
     login(
         "ada",
-        f"{st} sekrets grant ada/agent-gh --to 'agent/fleet/fixture-example/**' --preset gh-pr --preset git-push --allow 'git status'",
+        f"{fractal} sekrets grant ada/agent-gh --to 'agent/fleet/fixture-example/**' --preset gh-pr --preset git-push --allow 'git status'",
     )
 
-    # A seat: a terminal in its own scope, tagged as st tags a seat's terminal, in a checkout
+    # A seat: a terminal in its own scope, tagged as Fractal tags a seat's terminal, in a checkout
     # whose git configuration would run a program for anyone who trusted it.
     machine.succeed(
         "su ada -s /bin/sh -c "
@@ -329,11 +329,11 @@ pkgs.testers.runNixOSTest {
         )
     )
     seat = (
-        f"{st} sekrets whoami; "
-        f"{st} sekrets -- gh pr create --draft --title Example; echo exit=$?; "
-        f"{st} sekrets -- gh auth status; echo exit=$?; "
-        f"{st} sekrets --profile ada/gh -- gh pr list; echo exit=$?; "
-        f"{st} sekrets -- git status --porcelain; echo exit=$?"
+        f"{fractal} sekrets whoami; "
+        f"{fractal} sekrets -- gh pr create --draft --title Example; echo exit=$?; "
+        f"{fractal} sekrets -- gh auth status; echo exit=$?; "
+        f"{fractal} sekrets --profile ada/gh -- gh pr list; echo exit=$?; "
+        f"{fractal} sekrets -- git status --porcelain; echo exit=$?"
     )
     machine.succeed(
         "su ada -s /bin/sh -c "
@@ -364,7 +364,7 @@ pkgs.testers.runNixOSTest {
     # Every call, refusal and change is a claim on the profile, recorded by ada's daemon.
     # Every call, its exit and every refusal is in the gateway's log, which ada reads; ada's
     # daemon records them as local observations that age out and go to OpenTelemetry.
-    log = login("ada", f"{st} sekrets log --limit 200")
+    log = login("ada", f"{fractal} sekrets log --limit 200")
     print(log)
     assert "call" in log and "agent/fleet/fixture-example/web" in log, log
     assert "refused" in log and "no allow rule matches" in log, log
