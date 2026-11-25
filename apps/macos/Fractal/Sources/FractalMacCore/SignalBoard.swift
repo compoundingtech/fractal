@@ -153,14 +153,15 @@ public struct SignalBoard: Sendable, Equatable {
 
   /// A goal is in its bound's unit, milliseconds for a duration bound, so it reads in the unit
   /// of the target's last duration (`p95 ≤ 5 min` with 240000 reads `4 min`, `≤ 48h` with
-  /// 86400000 reads `24h`). A target without a duration keeps the plain number.
+  /// 86400000 reads `24h`). Sub-unit goals use smaller units so a positive duration never
+  /// rounds to zero. A target without a duration keeps the plain number.
   private static func goalText(_ goal: Double, target: String) -> String {
     func number(_ value: Double) -> String {
       value.formatted(.number.precision(.fractionLength(0...2)).grouping(.never))
     }
     guard let duration = target.matches(of: /\d(\s?)(ms|min|[smhd])\b/).last else { return number(goal) }
-    let unit = duration.output.2
-    let milliseconds: Double =
+    var unit = duration.output.2
+    var milliseconds: Double =
       switch unit {
       case "ms": 1
       case "s": 1_000
@@ -168,6 +169,18 @@ public struct SignalBoard: Sendable, Equatable {
       case "h": 3_600_000
       default: 86_400_000
       }
-    return "\(number(goal / milliseconds))\(duration.output.1)\(unit)"
+    while goal != 0 && abs(goal / milliseconds) < 1 && milliseconds > 1 {
+      switch unit {
+      case "d": unit = "h"; milliseconds = 3_600_000
+      case "h": unit = duration.output.1.isEmpty ? "m" : "min"; milliseconds = 60_000
+      case "m", "min": unit = "s"; milliseconds = 1_000
+      default: unit = "ms"; milliseconds = 1
+      }
+    }
+    let value = goal / milliseconds
+    let formatted = value != 0 && abs(value) < 1
+      ? value.formatted(.number.precision(.significantDigits(1...3)).grouping(.never))
+      : number(value)
+    return "\(formatted)\(duration.output.1)\(unit)"
   }
 }

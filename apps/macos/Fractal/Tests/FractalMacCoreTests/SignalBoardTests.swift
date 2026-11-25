@@ -295,6 +295,27 @@ final class SignalBoardTests: XCTestCase {
     XCTAssertNil(signal("flakes", in: SignalBoard(rows: [row("fractal/flakes", target: "≤ 48h")])).goalDetail)
   }
 
+  func testPositiveDurationGoalsNeverRoundToZeroInALargerTargetUnit() {
+    let decimal = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0...2)).grouping(.never)
+    for (goal, expected) in [
+      (1.0, "1ms"),
+      (59_000.0, "59s"),
+      (90 * 60_000.0, "\(1.5.formatted(decimal))h"),
+      (47.5 * 3_600_000.0, "\(47.5.formatted(decimal))h"),
+    ] {
+      let tile = signal("flakes", in: SignalBoard(rows: [
+        row("fractal/flakes", target: "≤ 48h", goal: goal),
+      ]))
+      XCTAssertEqual(tile.goalDetail, "target ≤ 48h · goal \(expected)")
+    }
+    let tiny = signal("flakes", in: SignalBoard(rows: [
+      row("fractal/flakes", target: "≤ 20m", goal: 0.001),
+    ]))
+    let fractionalMillisecond = 0.001.formatted(.number.precision(.significantDigits(1...3)).grouping(.never))
+    XCTAssertEqual(tiny.goalDetail, "target ≤ 20m · goal \(fractionalMillisecond)ms")
+    XCTAssertNotEqual(fractionalMillisecond, "0")
+  }
+
   private func signal(_ id: String, in board: SignalBoard) -> Signal {
     board.signals.first { $0.id == id }!
   }

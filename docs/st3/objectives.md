@@ -49,6 +49,8 @@ objective "ops/change-rollout" {
   declares one. Count label breakdowns have no target of their own and do not inherit it.
   The Mac Signals tile adds compact target and goal details only when a goal is present;
   millisecond duration goals are displayed in the target's duration unit, such as `15m` or `48h`.
+  Sub-unit goals fall back to smaller units, preserving fractional milliseconds when needed,
+  so a positive duration never rounds to a displayed zero.
   Shipped native goals are supported for targets with independently addressable rows.
   The database's combined size/growth row and SQL statement's unrepresented `max`
   diagnostic cannot carry an unambiguous goal, so authoring a goal there is rejected.
