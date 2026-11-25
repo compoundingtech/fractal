@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Restore local-trim backups on the designated floor-28 rollback target (#6609).",
+  "summary": "Restore local-trim backups on the intended floor-28 rollback target (#6609).",
   "commits": [
     "01a23492dd3f2e4118b8f56c045a206f8054681c",
     "0973088f44d7ec79f30ab475ee43a2f6b3c8512e",
@@ -12,5 +12,5 @@
   "compatibility": {"status": "changed", "detail": "backup restore accepts an archive whose checkpoint has no matching certificate, including a local-trim cut. It checks the manifest shape and records the tombstones as the member's own. A certificate matching both cut and drop digest keeps the verified path unchanged. No wire change."},
   "downtime": {"status": "none", "detail": "No new interruption for running members; the change is in offline backup restore."},
   "manual": {"status": "none", "detail": "No manual step for running members."},
-  "recovery": {"status": "changed", "detail": "Designated rollback target for members with [trim] local = true across floor 28 (#6609). Local regression tests cover restore without a certificate and with a same-cut certificate for a different drop, preserving inventory and tombstones."}
+  "recovery": {"status": "changed", "detail": "Intended rollback target for members with [trim] local = true across floor 28 (#6609); Fractal Product Lead designates it once its compatibility archive exists and the end-to-end rollback test passes. Local regression tests cover restore without a certificate and with a same-cut certificate for a different drop, preserving inventory and tombstones."}
 }
