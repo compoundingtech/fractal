@@ -7,7 +7,7 @@ use ring::aead;
 use std::io::Read as _;
 use std::sync::LazyLock;
 pub use fractal_api_core::api::client_v0::conversation_blocks::*;
-pub use fractal_api_core::api::client_v0::conversation_blocks::{PreparedSlice, assistant_text, availability, basis, bound_open_value, legacy, prepare, prepare_one, read, read_slice, source};
+pub use fractal_api_core::api::client_v0::conversation_blocks::{PreparedSlice, assistant_text, availability, basis, bound_open_value, ensure_unmanaged_source, legacy, prepare, prepare_one, read, read_slice, source};
 #[cfg(test)]
 mod conformance_tests;
 
@@ -94,7 +94,9 @@ pub async fn chunk_local(
         crate::api::read_deadline::spawn_blocking(move || -> Result<_, ApiError> {
             let native = request_session.starts_with("session/external-");
             let source = if native {
-                locator.source.session(&request_session)
+                let source = locator.source.session(&request_session);
+                ensure_unmanaged_source(&request_state, &source)?;
+                source
             } else {
                 source(&request_state, &request_session, super::super::managed_session_owner_at(&request_state.store, request_state.store.index().map_err(ApiError::internal)?, &request_session).map_err(ApiError::internal)?.as_ref())?
             };
@@ -111,6 +113,7 @@ pub async fn chunk_local(
             // pixels to that snapshot. Recheck source identity/binding, without decoding
             // the same record twice. An edit after capture is observed by the next fetch.
             let rebound = if native {
+                ensure_unmanaged_source(&request_state, &source)?;
                 source
             } else {
                 self::source(&request_state, &request_session, super::super::managed_session_owner_at(&request_state.store, request_state.store.index().map_err(ApiError::internal)?, &request_session).map_err(ApiError::internal)?.as_ref())?
@@ -828,8 +831,11 @@ mod tests {
         state: &AppState, native: &ExternalSession, session: &ClientSession,
         snapshot: &ClientSnapshot, limit: usize,
     ) -> (Value, Vec<Value>) {
+        let messages = super::super::native_session_messages(
+            state, snapshot, session, &native.id, None,
+        ).unwrap();
         let (slice, _) = super::super::canonical_native_slice(
-            state, snapshot, native, session, &native.id, &[],
+            state, snapshot, native, session, &native.id, &messages,
             crate::external_sessions::TimelineOrder::TimestampSequence, None,
             (limit + 1).max(CLIENT_MAX_PAGE_ITEMS), None, true,
             &mut NativeReadAdmission::default(),

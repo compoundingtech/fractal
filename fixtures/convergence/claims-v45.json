@@ -6417,6 +6417,51 @@
         "immutable": false,
         "reference": false
       },
+      "thread_id": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "thread"
+        ]
+      },
+      "thread_origin_ask": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "step-run"
+        ]
+      },
+      "thread_origin_episode": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "thread_origin_source": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      },
+      "thread_quote_id": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "message"
+        ]
+      },
+      "thread_reader_version": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "title": {
         "value_type": "string",
         "required": false,
@@ -12622,6 +12667,268 @@
     "cardinality": "append",
     "projection": null,
     "wakes_reconciler": false
+  },
+  "thread.ask-linked": {
+    "kind": "thread.ask-linked",
+    "subjects": [
+      "thread"
+    ],
+    "fields": {
+      "ask": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "step-run"
+        ]
+      },
+      "ask_episode": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "decision_predecessor": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "step-run"
+        ]
+      },
+      "decision_predecessor_episode": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "decision_reason": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "thread_id": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "thread"
+        ]
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": true
+  },
+  "thread.created": {
+    "kind": "thread.created",
+    "subjects": [
+      "thread"
+    ],
+    "fields": {
+      "agent": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent"
+        ]
+      },
+      "first_message": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "message"
+        ]
+      },
+      "mission": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "mission"
+        ]
+      },
+      "origin_ask": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "step-run"
+        ]
+      },
+      "origin_ask_episode": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "origin_episode": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "origin_source": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      },
+      "person": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "person"
+        ]
+      },
+      "title": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": true,
+    "source_kdl": [
+      "thread"
+    ]
+  },
+  "thread.state-set": {
+    "kind": "thread.state-set",
+    "subjects": [
+      "thread"
+    ],
+    "fields": {
+      "state": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "open",
+          "closed"
+        ],
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": true
+  },
+  "thread.title-set": {
+    "kind": "thread.title-set",
+    "subjects": [
+      "thread"
+    ],
+    "fields": {
+      "previous_title": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "title": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "title_revision": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": true
+  },
+  "thread.unread-cleared": {
+    "kind": "thread.unread-cleared",
+    "subjects": [
+      "thread"
+    ],
+    "fields": {
+      "observed_marks": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "person": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "person"
+        ]
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": true
+  },
+  "thread.unread-marked": {
+    "kind": "thread.unread-marked",
+    "subjects": [
+      "thread"
+    ],
+    "fields": {
+      "anchor_message": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "message"
+        ]
+      },
+      "observed_marks": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "person": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "person"
+        ]
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": true
   },
   "transport.observed": {
     "kind": "transport.observed",

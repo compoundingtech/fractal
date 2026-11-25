@@ -11,6 +11,7 @@ use super::*;
 use crate::store::attention_list::{AttentionDelta, AttentionFleet, AttentionPublication};
 use crate::store::owner_lists::OwnerView;
 use std::collections::HashMap;
+use anyhow::Context as _;
 use fractal_store::store::attention_list::AttentionPresentationDependencies;
 use std::cell::RefCell;
 
@@ -439,14 +440,21 @@ fn attention_resource_rows(
     let mut rows = Vec::with_capacity(snapshot.items.len());
     for item in &snapshot.items {
         let key = (item.subject.as_str(), item.person.as_str(), item.episode.as_str());
+        let context_key = (item.subject.clone(), item.person.clone(), item.episode.clone());
+        let contexts = snapshot.contexts.get(&context_key)
+            .context("current attention discussion context is missing")?;
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
         let reusable = changed.is_some_and(|changed| !changed.contains(&item.subject))
-            && old_items.get(&key).is_some_and(|before| *before == item);
+            && old_items.get(&key).is_some_and(|before| *before == item)
+            && previous.and_then(|previous| previous.source_snapshot.as_ref())
+                .and_then(|before| before.contexts.get(&context_key)) == Some(contexts);
         if reusable && let Some(row) = old_rows.get(id.as_str()) {
             rows.push((*row).clone());
         } else {
             store.note_attention_list_fold("card/resource");
-            rows.extend(client_attention_resources_from_items(store, vec![item.clone()])?);
+            rows.extend(client_attention_resources_from_items(
+                store, vec![item.clone()], BTreeMap::from([(context_key, contexts.clone())]),
+            )?);
         }
     }
     Ok(rows)
@@ -786,6 +794,36 @@ pub fn published_view_not_ready(collection: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_items_refresh_changed_discussion_context() {
+        let store = Store::open_memory("node").unwrap();
+        let item = serde_json::from_value(json!({
+            "kind": "agent-request", "subject": "agent/example/oak", "person": "person/example",
+            "title": "Question", "detail": "", "requested_at_unix_ms": 0
+        })).unwrap();
+        let mut snapshot = fractal_store::store::attention_snapshot::AttentionSourceSnapshot::default();
+        snapshot.items.push(item);
+        let key = ("agent/example/oak".into(), "person/example".into(), String::new());
+        snapshot.contexts.insert(key.clone(), vec![json!({
+            "start_recipient": {"agent_id": "agent/example/fallback", "basis": {"_tag": "original"}}
+        }).as_object().unwrap().clone()]);
+        let rows = attention_resource_rows(&store, &snapshot, None, None).unwrap();
+        let previous = AttentionPublication {
+            cut: 0, projection: None, evaluated_at_unix_ms: 0, due_at_unix_ms: None,
+            published_at_unix_ms: 0, owners: AttentionPublication::index_owners(&rows),
+            rows: Arc::new(rows), fleet: None, source_snapshot: Some(Arc::new(snapshot.clone())),
+            presentation_dependencies: BTreeMap::new(), ask_deadline_policy: (0, 0),
+        };
+        snapshot.contexts.get_mut(&key).unwrap()[0]["start_recipient"] = json!({
+            "agent_id": "agent/example/fallback",
+            "basis": {"_tag": "fallback", "original_agent_id": "agent/example/original",
+                "retirement": {"claim_id": "retirement", "kind": "agent.retired", "state": "retired"}}
+        });
+        let rows = attention_resource_rows(&store, &snapshot, Some(&previous), Some(&BTreeSet::new())).unwrap();
+        assert_eq!(rows[0]["start_recipient"]["basis"]["_tag"], "fallback",
+            "an unchanged projected item must not retain a stale recipient basis");
+    }
 
     #[test]
     fn idle_attention_leaves_prompt_changes_for_returning_demand() {

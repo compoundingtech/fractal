@@ -12,6 +12,8 @@ import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
 import { useAutoResolved, type Override } from '../conversation/alerts/useAutoResolved.ts'
 import { useAttentionDecode, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
+import { LivePendingInboxStarts, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
+import { LiveMarkedUnreadThreads } from '../threads/MarkedUnreadThreads.tsx'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 import { AutoResolvedSection } from './AutoResolvedAsks.tsx'
 import { DecodeNotice } from './LiveRoster.tsx'
@@ -22,25 +24,40 @@ import { DecodeNotice } from './LiveRoster.tsx'
 
 const GLYPH_WORDS: Record<AlertsTabRow['glyph'], string> = { '?': 'asks a question', '◆': 'needs you', '!': 'fault' }
 
-/** The Alerts tab over the active source: its attention feed, without answers on their way, its clock and its auto-resolved asks. */
+/**
+ * The Alerts tab over the active source: its attention feed, without answers on their way, its clock and its
+ * auto-resolved asks. Private unread reminders, thread starts whose Inbox item has left the list, and recently
+ * closed threads stay reachable below it.
+ */
 export const AlertsTab = ({ onOpen, selected, onSelect }: {
   readonly onOpen: (ref: string) => void
   readonly selected?: string
   readonly onSelect?: (id: string) => void
 }): React.ReactNode => {
+  const feed = useVisibleAttention()
+  const now = useNow()
   const { read, onOverride } = useAutoResolved()
-  return <AlertsList
-    feed={useVisibleAttention()} decode={useAttentionDecode()} now={useNow()} onOpen={onOpen}
-    {...(selected === undefined ? {} : { selected })} {...(onSelect === undefined ? {} : { onSelect })}
-    {...(read === undefined ? {} : { autoResolved: read })} {...(onOverride === undefined ? {} : { onOverride })}
-  />
+  const currentItems = feed._tag === 'Observed' ? alertsTabRows(feed.value, now).map(row => row.item) : []
+  return (
+    <AlertsList
+      feed={feed}
+      decode={useAttentionDecode()}
+      now={now}
+      onOpen={onOpen}
+      footer={<><LiveMarkedUnreadThreads onOpenThread={onOpen} /><LivePendingInboxStarts items={currentItems} onOpenThread={onOpen} /><LiveRecentlyClosedThreads onOpenThread={onOpen} /></>}
+      {...(selected === undefined ? {} : { selected })}
+      {...(onSelect === undefined ? {} : { onSelect })}
+      {...(read === undefined ? {} : { autoResolved: read })}
+      {...(onOverride === undefined ? {} : { onOverride })}
+    />
+  )
 }
 
 /**
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
  * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row stays reachable.
  */
-export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect, autoResolved, onOverride }: {
+export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect, autoResolved, onOverride, footer }: {
   readonly feed: Feed<readonly Native.Attention[]>
   readonly decode?: RosterDecode
   readonly now: number
@@ -54,6 +71,8 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
   readonly autoResolved?: AutoResolvedRead
   /** Replaces a default with the person's own answer; absent without control access. */
   readonly onOverride?: Override
+  /** Shown after the rows: private reminders, thread recovery and recently closed threads. */
+  readonly footer?: React.ReactNode
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const shownIds = React.useMemo(() => new Set(feed._tag === 'Observed' ? feed.value.map((row) => row.id) : []), [feed])
@@ -127,13 +146,20 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
                     onSelect={() => onSelect?.(row.id)}
                     onFocusWithin={() => { focused.current = row.id }}
                     onOpen={onOpen}
+
                   />
                 ))}
               </ul>
             )}
-            <AutoResolvedSection read={autoResolved} now={now} {...(onOverride === undefined ? {} : { onOverride })} />
+            {feed.value.some(item => item.state !== 'open') ? <section aria-label="Resolved Inbox items">
+              <h3 {...stylex.props(styles.empty)}>Resolved</h3>
+              <ul {...stylex.props(styles.list)}>{feed.value.filter(item => item.state !== 'open').map(item =>
+                <li key={item.id} data-resolved-alert-id={item.id}><Aria.Button onPress={() => onSelect?.(item.id)} {...stylex.props(styles.main)}>{item.title}</Aria.Button></li>)}</ul>
+            </section> : null}
+            <AutoResolvedSection read={autoResolved} now={now} {...(onOverride === undefined ? {} : { onOverride })} {...(onSelect === undefined ? {} : { onSelect })} />
           </>
         )}
+      {footer}
     </div>
   )
 }
@@ -145,6 +171,7 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
   /** Focus arrived in this row, including its menu, which React bubbles here from the popover. */
   readonly onFocusWithin: () => void
   readonly onOpen: (ref: string) => void
+
 }): React.ReactNode => {
   const touch = React.useContext(NarrowLayoutContext)
   const [menu, setMenu] = React.useState(false)
@@ -159,7 +186,7 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
         <Aria.Button
           data-alert-open=""
           aria-current={selected ? 'true' : undefined}
-          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
+          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}${row.item.thread_unread === true ? ', unread thread replies' : ''}`}
           onPress={onSelect}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
@@ -170,6 +197,7 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
           <span {...stylex.props(styles.line)}>
             <span aria-hidden="true" data-alert-row-glyph={row.glyph} {...stylex.props(styles.glyph, row.glyph === '?' && styles.question, row.glyph === '!' && styles.fault)} />
             <span {...stylex.props(styles.title)}>{row.title}</span>{' '}
+            {row.item.thread_unread === true ? <span aria-hidden="true" title="Unread thread replies" {...stylex.props(styles.threadUnread)}>●</span> : null}
             <span {...stylex.props(styles.metric)}>{row.age}</span>
           </span>
           {row.line2 === '' ? null : <>{' '}<span {...stylex.props(styles.meta)}>{row.line2}</span></>}
@@ -190,6 +218,7 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
           </Aria.Popover>
         </Aria.MenuTrigger>
       </div>
+
     </li>
   )
 }
@@ -207,6 +236,7 @@ const styles = stylex.create({
   question: { color: c.primary },
   fault: { color: c.danger },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  threadUnread: { flexShrink: 0, color: c.primary },
   metric: { flexShrink: 0, color: c.fgSoft, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums' },
   meta: { paddingInlineStart: `calc(${g.iconSm} + ${s.sm})`, color: c.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   more: { flexShrink: 0, width: 24, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fgSoft, cursor: 'pointer', ':hover': { color: c.fg }, ...focus },

@@ -225,6 +225,16 @@ pub fn groups<'a>(rows: impl Iterator<Item = &'a UsageRow>, by: By) -> Vec<(Stri
     groups
 }
 
+fn step_name<'a>(world: &'a World, id: &str) -> &'a str {
+    world
+        .missions
+        .items()
+        .iter()
+        .flat_map(|mission| &mission.steps)
+        .find(|step| step.id == id)
+        .map_or("a step", |step| step.name.as_str())
+}
+
 /// A group as a person reads it: an agent's or mission's name, a step with its mission.
 pub fn label(world: &World, id: &str) -> String {
     if let Some(attempt) = id.strip_prefix("step-attempt/").and_then(|rest| rest.rsplit_once('/')) {
@@ -267,7 +277,7 @@ pub fn label(world: &World, id: &str) -> String {
         if let Some(agent) = world.agents.items().iter().find(|agent| agent.id == id) {
             return agent.name.clone();
         }
-        return id.trim_start_matches("agent/").to_owned();
+        return "an agent".into();
     }
     if id.starts_with("mission/") {
         if let Some(mission) = world
@@ -278,10 +288,10 @@ pub fn label(world: &World, id: &str) -> String {
         {
             return mission.title.clone();
         }
-        return id.trim_start_matches("mission/").to_owned();
+        return "a mission".into();
     }
     if id.starts_with("step-run/") {
-        let step = id.rsplit('/').next().unwrap_or(id);
+        let step = step_name(world, id);
         let mission = world.usage.items().iter().find_map(|row| {
             (row.step.as_deref() == Some(id))
                 .then(|| row.mission_run.as_deref().map(mission_of))
@@ -775,8 +785,8 @@ pub fn detail(world: &World, id: Option<&str>, hours: u64, width: usize) -> Doc 
         for (group, spent) in groups.iter().take(8) {
             // Inside a mission its steps need no mission name.
             let name = match (own, by) {
-                (Some(By::Mission), By::Step) => {
-                    group.rsplit('/').next().unwrap_or(group).to_owned()
+                (Some(By::Mission), By::Step) if group.starts_with("step-run/") => {
+                    step_name(world, group).to_owned()
                 }
                 _ => label(world, group),
             };
@@ -951,7 +961,47 @@ mod tests {
         );
         assert_eq!(By::of("usage/no-mission"), Some(By::Mission));
         assert_eq!(By::of("step-run/atlas-1/compare"), Some(By::Step));
-        assert!(label(&world, "step-run/atlas-1/compare").ends_with(" · compare"));
+        assert_eq!(
+            label(&world, "step-run/atlas-1/compare"),
+            "Move the atlas store · a step"
+        );
+    }
+
+    #[test]
+    fn identity_labels_use_human_names_or_plain_role_words() {
+        let mut world = super::super::demo::test_world();
+        for (id, expected) in [
+            ("agent/not-loaded/opaque-agent", "an agent"),
+            ("mission/not-loaded/opaque-mission", "a mission"),
+            ("step-run/not-loaded/opaque-step", "a step"),
+            ("step-attempt/step-run/not-loaded/opaque-step/2", "a step · attempt 2"),
+            ("agent/example/atlas/builder", "Atlas Builder"),
+            ("mission/fleet/atlas/store-move", "Move the atlas store"),
+        ] {
+            assert_eq!(label(&world, id), expected);
+        }
+        let mut missions = world.missions.items().to_vec();
+        let mission = missions
+            .iter_mut()
+            .find(|mission| mission.id == "mission/fleet/atlas/store-move")
+            .unwrap();
+        mission.steps[0].id = "step-run/atlas-1/compare".into();
+        mission.steps[0].name = "Compare records".into();
+        world.missions = super::super::view::Load::Ready(missions);
+        assert_eq!(
+            label(&world, "step-run/atlas-1/compare"),
+            "Move the atlas store · Compare records"
+        );
+        let pane = detail(&world, Some("mission/fleet/atlas/store-move"), 24, 80)
+            .lines
+            .iter()
+            .map(text::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(pane.contains("Compare records"), "{pane}");
+        assert!(pane.contains("a step"), "{pane}");
+        assert!(!pane.contains("cut-over"), "{pane}");
+        assert!(!pane.contains("step-run/"), "{pane}");
     }
 
     #[test]
@@ -1110,7 +1160,8 @@ mod tests {
             60,
         ));
         assert!(mission.contains("$58.20 API-equivalent"), "{mission}");
-        assert!(mission.contains("compare"), "{mission}");
+        assert!(mission.contains("a step"), "{mission}");
+        assert!(!mission.contains("compare"), "{mission}");
         assert!(!mission.contains("captain"), "{mission}");
         let all = plain(&detail(&world, None, 24, 60));
         assert!(all.contains("weekly   23%"), "{all}");

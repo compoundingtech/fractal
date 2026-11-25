@@ -56,6 +56,8 @@ vi.mock('../data/react.tsx', async () => {
   useConnection: () => ({ _tag: 'Live' }),
   // Roster names for mail headers; an empty roster reads refs by their last segment.
   useFleetSelection: () => noRosterNames,
+  // No roster row for the seat: its turn is unknown, so the transcript's own run evidence stands.
+  useAgent: () => ({ _tag: 'Observed', value: undefined, freshness: 'live' }),
   // A sendable view exposes attachments; the composer stays disabled otherwise.
   useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls, ...(source.sendable ? { attachments: {} } : {}) }),
   useFeedInterest: () => {},
