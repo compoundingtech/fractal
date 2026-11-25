@@ -1402,15 +1402,16 @@ mod tests {
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
 
     #[test]
-    fn legacy_successful_starts_without_custody_do_not_exhaust_upgrade_capacity() {
+    fn legacy_native_closure_proofs_release_historical_upgrade_capacity() {
         let store = Store::open_memory("node").unwrap();
         store.connection.write().execute_batch(
             "WITH RECURSIVE starts(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM starts WHERE n<5000)
              INSERT INTO local_runtime_starts
-                (id,subject,owner,body,finished,result,applied,dispatched,receipted)
+                (id,subject,owner,body,finished,result,applied,dispatched,receipted,cleanup_verified)
              SELECT 'legacy-'||n,'agent/legacy/restarted','old-owner',
                 json_object('member',json_object('runtime_id','legacy-runtime','terminal',json('true')),'start_request_position',n),1,
-                json_object('verification','operation-incarnation','incarnation','generation-'||n),1,1,1
+                json_object('verification','operation-incarnation','incarnation','generation-'||n,
+                    'producer_closed',n%2=0),1,1,1,n%2
              FROM starts").unwrap();
         let custody_rows: u64 = store.readers.get().query_row(
             "SELECT count(*) FROM local_session_custody", [], |row| row.get(0)).unwrap();
@@ -1422,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn five_thousand_distinct_retired_legacy_subjects_release_only_their_reservations() {
+    fn logical_retirement_alone_does_not_release_legacy_reservations() {
         let store = legacy_live_capacity_fixture("operation-incarnation");
         store.connection.write().execute_batch(
             "WITH RECURSIVE subjects(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM subjects WHERE n<5000)
@@ -1440,19 +1441,19 @@ mod tests {
                 (id,writer,sequence,envelope_hash,subject,kind,predecessors,accepted_at_unix_ms,checkpoint)
              SELECT 'custody-retirement-'||subject,'node',1,'envelope',subject,'agent.retired','[]',1,'checkpoint'
              FROM local_session_custody;").unwrap();
-        // Retirement of 5,000 other identities must neither exhaust capacity
-        // nor erase the single live legacy producer (4095 custody + 1 live).
+        // Neither logical retirement nor the loss of one live custody row
+        // proves closure of the retired subjects' native generations.
         assert!(fractal_store::store::local_sessions::admit_capacity(
             &store.connection.write(), None).is_err());
         store.connection.write().execute(
             "UPDATE local_session_custody SET custody_settled=1 WHERE subject='agent/retained/1'",
             []).unwrap();
-        fractal_store::store::local_sessions::admit_capacity(
-            &store.connection.write(), None).unwrap();
+        assert!(fractal_store::store::local_sessions::admit_capacity(
+            &store.connection.write(), None).is_err());
     }
 
     #[test]
-    fn exact_legacy_end_observations_preserve_runtime_incarnation_and_native_kind() {
+    fn exact_legacy_end_observations_do_not_prove_whole_scope_closure() {
         for status in ["stopped", "exited", "absent"] {
             for mismatch in ["none", "runtime_id", "incarnation_id", "terminal"] {
                 let store = legacy_live_capacity_fixture("operation-incarnation");
@@ -1469,20 +1470,20 @@ mod tests {
                     [json!({"fields":fields}).to_string()]).unwrap();
                 let admitted = fractal_store::store::local_sessions::admit_capacity(
                     &store.connection.write(), None).is_ok();
-                assert_eq!(admitted, mismatch == "none", "{status}: {mismatch}");
+                assert!(!admitted, "{status}: {mismatch}");
             }
         }
     }
 
     #[test]
-    fn exact_legacy_operation_endings_do_not_release_new_protocol_reservations() {
+    fn operation_end_labels_without_native_closure_proof_remain_reserved() {
         for verification in ["operation-ended", "operation-retired"] {
             let store = legacy_live_capacity_fixture("operation-incarnation");
             store.connection.write().execute(
                 "UPDATE local_runtime_starts SET result=json_set(result,'$.verification',?1)
                  WHERE id='legacy-live'", [verification]).unwrap();
-            fractal_store::store::local_sessions::admit_capacity(
-                &store.connection.write(), None).unwrap();
+            assert!(fractal_store::store::local_sessions::admit_capacity(
+                &store.connection.write(), None).is_err());
             store.connection.write().execute(
                 "UPDATE local_runtime_starts SET body=json_set(body,'$.custody_reserved',json('true'))
                  WHERE id='legacy-live'", []).unwrap();
@@ -1492,18 +1493,37 @@ mod tests {
     }
 
     #[test]
-    fn positive_removed_desired_subject_releases_legacy_reservation() {
+    fn legacy_supersession_requires_native_closure_proof_to_release_capacity() {
         let store = legacy_live_capacity_fixture("operation-incarnation");
-        // This fixture has no desired rows: absence alone cannot close it.
+        store.connection.write().execute_batch(
+            "UPDATE local_session_custody SET custody_settled=1 WHERE subject='agent/retained/1';
+             INSERT INTO local_runtime_starts
+                (id,subject,owner,body,finished,result,applied,dispatched,receipted)
+             SELECT 'legacy-replacement',subject,owner,
+                json_set(body,'$.start_request_position',json_extract(body,'$.start_request_position')+1),
+                1,json_object('verification','operation-incarnation','incarnation','replacement-generation'),
+                1,1,1 FROM local_runtime_starts WHERE id='legacy-live';").unwrap();
         assert!(fractal_store::store::local_sessions::admit_capacity(
             &store.connection.write(), None).is_err());
-        publish(&store, "version 2\nstop \"agent/legacy/live\"", "remove-legacy");
+        store.connection.write().execute(
+            "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id='legacy-live'", []).unwrap();
         fractal_store::store::local_sessions::admit_capacity(
             &store.connection.write(), None).unwrap();
     }
 
     #[test]
-    fn terminal_owner_step_releases_only_legacy_exec_reservation() {
+    fn desired_removal_alone_does_not_release_legacy_reservation() {
+        let store = legacy_live_capacity_fixture("operation-incarnation");
+        // This fixture has no desired rows: absence alone cannot close it.
+        assert!(fractal_store::store::local_sessions::admit_capacity(
+            &store.connection.write(), None).is_err());
+        publish(&store, "version 2\nstop \"agent/legacy/live\"", "remove-legacy");
+        assert!(fractal_store::store::local_sessions::admit_capacity(
+            &store.connection.write(), None).is_err());
+    }
+
+    #[test]
+    fn terminal_owner_step_alone_does_not_release_legacy_exec_reservation() {
         for status in ["completed", "failed", "cancelled"] {
             let store = legacy_live_capacity_fixture("operation-incarnation");
             publish(&store,
@@ -1524,8 +1544,8 @@ mod tests {
                 &store.connection.write(), None).is_err());
             store.connection.write().execute(
                 "UPDATE step_runs SET status=?1 WHERE subject=?2", params![status, step]).unwrap();
-            fractal_store::store::local_sessions::admit_capacity(
-                &store.connection.write(), None).unwrap();
+            assert!(fractal_store::store::local_sessions::admit_capacity(
+                &store.connection.write(), None).is_err());
             store.connection.write().execute(
                 "UPDATE local_runtime_starts SET body=json_set(body,'$.subject.kind','agent')
                  WHERE id='legacy-live'", []).unwrap();
