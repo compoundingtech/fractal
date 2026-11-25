@@ -879,6 +879,34 @@ async fn native_start_runs_real_bun_with_sealed_render_then_reconnects_reopens_a
 }
 
 #[tokio::test]
+async fn graph_free_start_refuses_shared_custody_capacity_before_native_backend() {
+    let mut pair = NativePair::for_start().await;
+    // Retained, inactive and still-unsettled custody is not free capacity.
+    // It is deliberately not exposed as live native bindings or closure evidence.
+    pair.store.connection.write().execute_batch(
+        "WITH RECURSIVE slots(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM slots WHERE n<4096)
+         INSERT INTO local_session_custody(subject,incarnation,body,active)
+         SELECT 'agent/retained/'||n,'retained-generation','{}',0 FROM slots").unwrap();
+    let authorization = pair.start_authorization("printf forbidden > capacity-backend-entered; exec sleep 600");
+    let member = authorization.member.clone();
+    let start = pair.home.enqueue(pair.draft("shared-capacity-refusal",
+        Operation::Start { authorization: Box::new(authorization) })).unwrap();
+    pair.connect();
+    pair.settled(&start).await;
+    pair.disconnect().await;
+    let receipt = pair.home.command_receipt(&start.execution_id).unwrap().unwrap();
+    assert!(matches!(receipt.state, ReceiptState::Settled { outcome: Outcome::Refused { reason } }
+        if reason.contains("executor session custody capacity reached")));
+    let operation = pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap();
+    assert!(!operation.dispatched, "capacity refusal must not commit backend entry");
+    assert!(operation.body["backend_entry"].is_null());
+    assert!(operation.cleanup_verified, "predispatch refusal must finish its own resource cleanup");
+    assert!(!pair.root.path().join("capacity-backend-entered").exists());
+    assert!(pair.runtime.observe_start(&member).unwrap().is_none());
+    assert!(pair.store.local_session(&start.binding.subject).unwrap().is_none());
+}
+
+#[tokio::test]
 async fn native_start_preentry_withdrawal_never_creates_native_producer() {
     let mut pair = NativePair::for_start().await;
     let mut authorization = pair.start_authorization("printf entered > forbidden; exec sleep 600");

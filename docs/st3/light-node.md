@@ -254,6 +254,15 @@ The home's selected launch geometry and continuation are sealed at admission;
 later pane-size preferences or the producer's own harness-session publication
 do not revoke a running producer or cause a restart.
 
+Remote Start shares the executor's 4096-slot unsettled native-custody budget with
+ordinary starts. Inside the same immediate SQLite transaction that commits its
+`dispatched` backend-entry fence, it calls the canonical
+`local_sessions::admit_capacity` with its own operation ID. Capacity refusal leaves
+the operation undispatched and cannot enter the native backend. An unbound
+dispatched producer keeps its reservation until `cleanup_verified` or retained
+`producer_closed` proof; result labels, logical withdrawal, observed leader exit,
+desired removal and supersession do not release it.
+
 Graph commits and reopened custody trigger bounded home authorization
 reconciliation without timer polling. A changed declaration, publication, helper
 lifetime or permission durably withdraws the original Start; an earlier operator

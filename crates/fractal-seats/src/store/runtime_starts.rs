@@ -495,13 +495,19 @@ impl RuntimeStartsStore for Store {
     }
 
     fn enter_remote_runtime_start(&self, id: &str, owner: &str) -> Result<()> {
-        let changed = self.connection.write().execute(
+        let mut connection = self.connection.write();
+        let tx = Connection::transaction_with_behavior(&mut connection, rusqlite::TransactionBehavior::Immediate)?;
+        // Shared native custody, including dispatched starts without a binding,
+        // reserves capacity until positive cleanup/producer closure, never a label.
+        fractal_store::store::local_sessions::admit_capacity(&tx, Some(id))?;
+        let changed = tx.execute(
             /* sqlite-large-value: allow-for-now lv-hb0bc33cd4512 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,
              body=json_set(body,'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','backend-entering'))
              WHERE id=?1 AND owner=?2 AND dispatched=0 AND finished=0 AND revoked_by IS NULL
                AND json_extract(body,'$.remote_start') IS NOT NULL",
             params![id, owner])?;
         anyhow::ensure!(changed == 1, "remote runtime backend entry fence was rejected");
+        tx.commit()?;
         Ok(())
     }
 
@@ -1779,6 +1785,58 @@ mod tests {
         assert_eq!(store.admit_runtime_start(&mut third, 2).unwrap(), RuntimeStartAdmission::Admitted);
         assert!(store.dispatch_runtime_start(&third.id, 2).unwrap(),
             "a proven failed producer releases its reserved slot");
+    }
+
+    #[test]
+    fn remote_backend_entry_shares_capacity_with_unbound_local_producers() {
+        let store = legacy_live_capacity_fixture("operation-incarnation");
+        let mut remote = operation("remote-at-capacity", "agent/remote/candidate", None);
+        // This DB boundary consumes an already-authorized envelope; wire/auth is
+        // exercised by the real two-node session fixtures, not reimplemented here.
+        remote.body["remote_start"] = json!({"capacity_fixture": true});
+        assert!(store.admit_remote_runtime_start(&remote, 2).unwrap());
+        let error = store.enter_remote_runtime_start(&remote.id, &remote.owner).unwrap_err();
+        assert!(error.is::<fractal_store::store::local_sessions::SessionCustodyCapacityReached>());
+        let retained = store.remote_runtime_start(&remote.id).unwrap().unwrap();
+        assert!(!retained.dispatched);
+        assert!(retained.body["backend_entry"].is_null(), "capacity refusal must precede backend entry");
+        store.runtime_start_cleanup_verified("legacy-live").unwrap();
+        store.enter_remote_runtime_start(&remote.id, &remote.owner).unwrap();
+        assert!(store.remote_runtime_start(&remote.id).unwrap().unwrap().dispatched);
+    }
+
+    #[test]
+    fn remote_reservations_release_only_after_positive_producer_or_cleanup_closure() {
+        for producer_closed in [false, true] {
+            let store = legacy_live_capacity_fixture("operation-incarnation");
+            store.runtime_start_cleanup_verified("legacy-live").unwrap();
+            let mut first = operation("remote-retained", "agent/remote/retained", None);
+            let mut second = operation("remote-next", "agent/remote/next", None);
+            first.body["remote_start"] = json!({"capacity_fixture": true});
+            second.body["remote_start"] = json!({"capacity_fixture": true});
+            assert!(store.admit_remote_runtime_start(&first, 2).unwrap());
+            assert!(store.admit_remote_runtime_start(&second, 2).unwrap());
+            store.enter_remote_runtime_start(&first.id, &first.owner).unwrap();
+            for phase in ["completed", "failed", "stopped", "superseded"] {
+                store.finish_remote_runtime_start(&first.id,
+                    &json!({"phase": phase, "verification": "operation-incarnation", "producer_closed": false})).unwrap();
+                let error = store.enter_remote_runtime_start(&second.id, &second.owner).unwrap_err();
+                assert!(error.is::<fractal_store::store::local_sessions::SessionCustodyCapacityReached>(),
+                    "logical result {phase} cannot release native custody");
+                assert!(!store.remote_runtime_start(&second.id).unwrap().unwrap().dispatched);
+            }
+            store.revoke_remote_runtime_start(&first.id, "logical withdrawal").unwrap();
+            assert!(store.enter_remote_runtime_start(&second.id, &second.owner).unwrap_err()
+                .is::<fractal_store::store::local_sessions::SessionCustodyCapacityReached>());
+            if producer_closed {
+                store.finish_remote_runtime_start(&first.id,
+                    &json!({"phase": "closed", "producer_closed": true})).unwrap();
+            } else {
+                store.verify_remote_runtime_start_cleanup(&first.id).unwrap();
+            }
+            store.enter_remote_runtime_start(&second.id, &second.owner).unwrap();
+            assert!(store.remote_runtime_start(&second.id).unwrap().unwrap().dispatched);
+        }
     }
 
     #[test]
