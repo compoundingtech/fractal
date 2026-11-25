@@ -2,6 +2,7 @@
 
 #![allow(unused_imports)]
 
+use crate::MissionsStore;
 use crate::PersonWorkStore;
 use crate::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
