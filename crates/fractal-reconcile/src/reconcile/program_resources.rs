@@ -52,6 +52,21 @@ struct Child {
 #[serde(deny_unknown_fields)]
 struct Release { membership: Grant }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScratchAcquire {
+    host: String,
+    root: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScratchInventory {
+    host: String,
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
 fn failure(code: &str, message: impl Into<String>) -> Value {
     serde_json::json!({"_tag":"Failure","error":{"_tag":"ResourceError","code":code,"message":message.into()}})
 }
@@ -94,6 +109,68 @@ fn command_environment(
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Every incarnation in the owning runtime's history needs its own native
+    /// retirement receipt; the latest payload exit cannot retire predecessors.
+    pub(super) fn scratch_runtime_tree_retired(&self, subject: &str) -> Result<bool> {
+        let Some(actual) = self.store.latest_actual_value(subject)? else { return Ok(false); };
+        let (Some(runtime_id), Some(incarnation), Some(terminal), Some(host)) = (
+            actual_field(&actual, "runtime_id").and_then(Value::as_str),
+            actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+            actual_field(&actual, "terminal").and_then(Value::as_bool),
+            actual_field(&actual, "host").and_then(Value::as_str),
+        ) else { return Ok(false); };
+        if host != self.host { return Ok(false); }
+        if self.store.runtime_cleanup_settled(runtime_id, incarnation)? {
+            return self.store.runtime_history_retired(subject);
+        }
+        let settled = if terminal {
+            self.runtime.stop_with_retirement_proof(runtime_id, true, incarnation)?
+        } else {
+            self.runtime.end_leftovers(runtime_id, false);
+            self.runtime.leftovers_settled(runtime_id, incarnation)?
+        };
+        if settled { self.store.settle_runtime_cleanup(subject, runtime_id, incarnation)?; }
+        Ok(settled && self.store.runtime_history_retired(subject)?)
+    }
+
+    /// Native mission-final work, after authored finalizers and execution quiescence.
+    /// Refusal is a durable fault and retains custody without replacing the normal outcome.
+    pub(super) fn finalize_mission_scratch(
+        &self,
+        run: &MissionRunView,
+        owned: &[DesiredSubject],
+    ) -> Result<()> {
+        if run.deadline_at_unix_ms.is_some_and(|deadline| deadline <= now_ms()) {
+            return Ok(());
+        }
+        let release = self.ensure_resource_authority().and_then(|()| {
+            // Reuse native scope retirement: payload exit alone is not proof
+            // that the owning execution tree has stopped consuming scratch.
+            for membership in self.store.resource_memberships_for_host(&self.host)? {
+                if membership.request.owner.run == run.subject
+                    && !matches!(membership.state.as_str(), "retired" | "refused" | "withdrawn")
+                {
+                    anyhow::ensure!(self.retire_program_membership(&membership)?,
+                        "scratch owner execution tree retirement unconfirmed; custody retained");
+                }
+            }
+            for subject in owned {
+                anyhow::ensure!(self.scratch_runtime_tree_retired(&subject.subject)?,
+                    "scratch owner runtime scope retirement unconfirmed; custody retained");
+            }
+            let proof = crate::store::scratch_resources::ScratchReleaseProof::after_quiescence(
+                &run.subject, &run.generation,
+            );
+            anyhow::ensure!(
+                self.store.release_scratch_for_owner(&self.host, &run.subject, &run.generation, &proof)?,
+                "scratch final release refused: live or unknown consumers; custody retained"
+            );
+            Ok(())
+        });
+        self.record_fault(&run.subject, "final-scratch-release", release)?;
+        Ok(())
+    }
+
     /// A single authority epoch for this daemon's host, never one per program or membership.
     pub(super) fn ensure_resource_authority(&self) -> Result<()> {
         let initialized = self.resource_authority.get_or_init(|| {
@@ -226,6 +303,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
         match operation {
             "agent.turn" => self.settle_program_turn(engine, run, request, payload, cancelled),
+            "resource.scratch.acquire" => {
+                let options: ScratchAcquire = serde_json::from_value(payload.clone())?;
+                anyhow::ensure!(options.host == self.host, "scratch belongs to this execution host");
+                anyhow::ensure!(!cancelled && run.phase == "normal", "scratch acquisition owner is closing");
+                let view = self.store.step_run(&request.step)?.context("scratch owner step missing")?;
+                anyhow::ensure!(view.attempt == request.attempt
+                    && program::RUNNING_STATES.contains(&view.status.as_str()),
+                    "scratch owner left its attempt");
+                let handle = self.store.acquire_scratch(&crate::store::scratch_resources::ScratchRequest {
+                    id: request.idempotency_key(),
+                    host: options.host,
+                    owner: run.subject.clone(),
+                    owner_generation: run.generation.clone(),
+                    root: options.root,
+                })?;
+                engine.resolve_resource(request, success(handle))?;
+                Ok(true)
+            }
+            "resource.scratch.inventory" => {
+                let options: ScratchInventory = serde_json::from_value(payload.clone())?;
+                anyhow::ensure!(options.host == self.host, "scratch inventory belongs to this execution host");
+                let limit = options.limit.unwrap_or(100);
+                anyhow::ensure!((1..=1000).contains(&limit), "scratch inventory limit must be between 1 and 1000");
+                let rows = self.store.scratch_inventory(&options.host, options.after.as_deref(), limit)?;
+                engine.resolve_resource(request, success(rows))?;
+                Ok(true)
+            }
             "resource.lane.acquire" => {
                 if !cancelled {
                     let view = self.store.step_run(&request.step)?.context("resource owner step missing")?;

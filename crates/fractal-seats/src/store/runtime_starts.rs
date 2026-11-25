@@ -1676,7 +1676,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_receipts_are_reclaimed_only_by_a_fenced_start_result() {
+    fn fenced_restarts_preserve_owned_cleanup_receipts_and_reclaim_only_forgotten_subjects() {
         let store = Store::open_memory("node").unwrap();
         let subject = "agent/example/current";
         let historical = "agent/example/history";
@@ -1708,13 +1708,14 @@ mod tests {
         assert!(store.runtime_cleanup_settled(&runtime_id, "old").unwrap());
         observed.fields.insert("incarnation_id".into(), json!("new"));
         assert!(store.apply_runtime_start_result(&start.id, &[receipt(subject), observed]).unwrap());
-        assert!(!store.runtime_cleanup_settled(&runtime_id, "old").unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "old").unwrap());
         assert!(!store.runtime_cleanup_settled(&runtime_id, "forgotten").unwrap());
         assert!(store.runtime_cleanup_settled(&runtime_id, "historical").unwrap());
         store.settle_runtime_cleanup(subject, &runtime_id, "new").unwrap();
         // Replaying the already-receipted result is not another generation transition.
         assert!(store.apply_runtime_start_result(&start.id, &[]).unwrap());
         assert!(store.runtime_cleanup_settled(&runtime_id, "new").unwrap());
+        assert!(store.runtime_cleanup_settled(&runtime_id, "old").unwrap());
         assert!(store.runtime_cleanup_settled(&runtime_id, "historical").unwrap());
     }
 

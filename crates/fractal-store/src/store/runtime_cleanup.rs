@@ -33,17 +33,17 @@ pub fn forget_subject(connection: &Connection, subject: &str) -> Result<()> {
     Ok(())
 }
 
-/// Only a fenced, newly applied start result can supersede this subject's generation.
-/// Another retained desired subject may still reconcile an older historical incarnation.
+/// A new generation cannot invalidate proof that an older generation retired.
+/// Keep historical receipts while their owning desired subject is retained.
 pub fn apply_generation(
     connection: &Connection, subject: &str, runtime_id: &str, incarnation: &str,
 ) -> Result<()> {
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h355a9421263e owner=fractal_store::store::runtime_cleanup TODO=bound-or-reference-values-and-reclamation */
+        /* sqlite-large-value: allow-for-now lv-h277ea536f611 owner=fractal_store::store::runtime_cleanup TODO=bound-or-reference-values-and-reclamation */
         "DELETE FROM local_runtime_cleanup_settled
          WHERE runtime_id=?1 AND incarnation<>?2
-           AND (subject=?3 OR NOT EXISTS(SELECT 1 FROM desired
-             WHERE desired.subject=local_runtime_cleanup_settled.subject))",
+           AND subject<>?3 AND NOT EXISTS(SELECT 1 FROM desired
+             WHERE desired.subject=local_runtime_cleanup_settled.subject)",
         params![runtime_id, incarnation, subject],
     )?;
     Ok(())
@@ -54,6 +54,27 @@ impl Store {
         Ok(self.readers.get().prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM local_runtime_cleanup_settled WHERE runtime_id=?1 AND incarnation=?2)",
         )?.query_row(/* sqlite-large-value: allow-for-now lv-hf597e11eb8de owner=fractal_store::store::runtime_cleanup TODO=trace-statement-and-value-representation */ params![runtime_id, incarnation], |row| row.get(0))?)
+    }
+
+    /// Every historical owner incarnation needs its own positive retirement
+    /// receipt. Terminal observations describe payloads, not their descendants.
+    pub fn runtime_history_retired(&self, subject: &str) -> Result<bool> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        Ok(self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-hb0398db54d42 owner=fractal_store::store::runtime_cleanup TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT NOT EXISTS(
+               SELECT 1 FROM claims JOIN batches ON batches.id=claims.batch_id
+               WHERE claims.subject=?1 AND {} AND (
+                 (json_type(claims.body,'$.fields.incarnation_id')='text'
+                  AND NOT EXISTS(
+                    SELECT 1 FROM local_runtime_cleanup_settled receipt
+                    WHERE receipt.subject=claims.subject
+                      AND receipt.incarnation=json_extract(claims.body,'$.fields.incarnation_id')
+                      AND (json_type(claims.body,'$.fields.runtime_id') IS NOT 'text'
+                           OR receipt.runtime_id=json_extract(claims.body,'$.fields.runtime_id'))))
+                 OR (json_type(claims.body,'$.fields.incarnation_id') IS NOT 'text'
+                     AND json_extract(claims.body,'$.fields.status')<>'absent')
+               ))", ACTUAL_FOLD_CLAIM.as_str(),
+        ))?.query_row(/* sqlite-large-value: allow-for-now lv-h60fce449a468 owner=fractal_store::store::runtime_cleanup TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?)
     }
 
     /// Call only after native exact-generation whole-scope retirement has been proven.
@@ -71,6 +92,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restarting_preserves_historical_owner_retirement_receipts() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/history";
+        runtime_starts_tests_shared_seats::publish(&store,
+            "version 2\nagent \"example/history\" { command \"true\" }\n", "history");
+        store.settle_runtime_cleanup(subject, "work", "previous").unwrap();
+        apply_generation(&store.connection.write(), subject, "work", "current").unwrap();
+        assert!(store.runtime_cleanup_settled("work", "previous").unwrap());
+        forget_subject(&store.connection.write(), subject).unwrap();
+        assert!(!store.runtime_cleanup_settled("work", "previous").unwrap());
+    }
 
     #[test]
     fn cleanup_receipts_survive_late_observations_and_reconstruction() {
