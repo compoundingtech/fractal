@@ -79,6 +79,8 @@ pub struct SeatChecks<'a> {
     store: &'a Store,
     previous: &'a AttentionPublication,
     seat_items: Option<BTreeSet<String>>,
+    #[cfg(test)]
+    seat_item_scans: usize,
     needs_login: HashMap<String, bool>,
     retiring: HashMap<String, bool>,
     subjects: BTreeSet<String>,
@@ -91,6 +93,8 @@ impl<'a> SeatChecks<'a> {
             store,
             previous,
             seat_items: None,
+            #[cfg(test)]
+            seat_item_scans: 0,
             needs_login: HashMap::new(),
             retiring: HashMap::new(),
             subjects: BTreeSet::new(),
@@ -103,9 +107,16 @@ impl<'a> SeatChecks<'a> {
     fn has_seat_item(&mut self, seat: &str) -> bool {
         let previous = self.previous;
         self.seat_items
-            .get_or_insert_with(|| item_seats(&previous.rows))
+            .get_or_insert_with(|| {
+                #[cfg(test)]
+                { self.seat_item_scans += 1; }
+                let mut seats = item_seats(&previous.rows);
+                if let Some(source) = previous.source_snapshot.as_deref() {
+                    seats.extend(source.candidate_seats().map(str::to_owned));
+                }
+                seats
+            })
             .contains(seat)
-            || previous.source_snapshot.as_deref().is_some_and(|source| source.has_seat_item(seat))
     }
 
     /// Whether `seat`'s harness needs a login at this snapshot, by the login fold attention

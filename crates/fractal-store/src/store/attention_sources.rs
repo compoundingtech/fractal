@@ -24,11 +24,10 @@ pub struct AttentionSourceSnapshot {
 
 impl AttentionSourceSnapshot {
     /// Runtime-derived candidates include rows whose admission time is still in the future.
-    pub fn has_seat_item(&self, seat: &str) -> bool {
-        self.entries.values().any(|entry| entry.rows.iter().any(|(item, _)| {
-            matches!(item.kind.as_str(), "harness-login" | "harness-prompt" | "model-drift")
-                && (item.subject == seat || item.targets.iter().any(|target| target == seat))
-        }))
+    pub fn candidate_seats(&self) -> impl Iterator<Item = &str> {
+        self.entries.values().flat_map(|entry| entry.rows.iter())
+            .filter(|(item, _)| matches!(item.kind.as_str(), "harness-login" | "harness-prompt" | "model-drift"))
+            .flat_map(|(item, _)| std::iter::once(item.subject.as_str()).chain(item.targets.iter().map(String::as_str)))
     }
 
     /// Number of subject candidates, excluding the fixed shared reducer groups.

@@ -1222,7 +1222,7 @@ fn a_future_prompt_is_invalidated_by_runtime_stop_before_admission() {
     store.start_attention_list_refresher().unwrap();
     let before = refresh_and_check(&store);
     assert!(before.rows.iter().all(|row| row["attention_kind"] != "harness-prompt"));
-    assert!(before.source_snapshot.as_deref().unwrap().has_seat_item(seat));
+    assert!(before.source_snapshot.as_deref().unwrap().candidate_seats().any(|candidate| candidate == seat));
     store.append_claim(&input(seat, "runtime.observed", Some(seat),
         json!({"status":"stopped","incarnation_id":"one"}))).unwrap();
     store.read_snapshot(|index| {
