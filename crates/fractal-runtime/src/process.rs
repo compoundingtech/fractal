@@ -478,6 +478,7 @@ impl ExecRuntime {
         } else { unit };
         // Finite placement is host-supplied, never selected by payload environment.
         let mut env = env.clone();
+        env.remove(crate::payload_receipt::GENERATION_ENV);
         env.remove(crate::payload_receipt::PATH_ENV);
         if env.remove(crate::payload_receipt::TRACK_ENV).as_deref() == Some("1") {
             let operation = env.get("ST3_START_OPERATION").context("tracked payload requires a start operation")?;
@@ -500,7 +501,7 @@ impl ExecRuntime {
         let (program, arguments) = if self.finite_lane.is_some() {
             let gated_arguments = std::iter::once(OsString::from("-c"))
                 .chain(std::iter::once(OsString::from(
-                    "IFS= read -r gate && [ \"$gate\" = release ] || exit 125; exec \"$@\"",
+                    "IFS= read -r gate && [ \"$gate\" = release ] || exit 125; IFS= read -r FRACTAL_FINITE_EXEC_GENERATION && [ -n \"$FRACTAL_FINITE_EXEC_GENERATION\" ] || exit 125; export FRACTAL_FINITE_EXEC_GENERATION; exec \"$@\"",
                 )))
                 .chain(std::iter::once(OsString::from("fractal-finite-gate")))
                 .chain(std::iter::once(program))
@@ -639,8 +640,8 @@ impl ExecRuntime {
                 let mut release = || -> Result<u64> {
                     anyhow::ensure!(!attempted, "finite execution payload release was already attempted");
                     attempted = true;
-                    payload_gate.as_mut().context("finite execution lacks its payload gate")?
-                        .write_all(b"release\n").context("release finite execution payload")?;
+                    writeln!(payload_gate.as_mut().context("finite execution lacks its payload gate")?,
+                        "release\n{}", generation.generation_id).context("release finite execution payload")?;
                     let timestamp = u64::try_from(
                         SystemTime::now().duration_since(UNIX_EPOCH)
                             .context("execution release clock predates UNIX epoch")?.as_millis(),
@@ -2254,15 +2255,18 @@ mod tests {
             member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
+        let mut environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        environment.insert(crate::payload_receipt::GENERATION_ENV.into(), "untrusted-parent-generation".into());
         let generation = runtime.spawn_in_lane_checked(
             "finite-argv", &crate::Launch::Argv(vec![
-                "sh".into(), "-c".into(), "printf '%s' \"$1\"; sleep 60".into(),
+                "sh".into(), "-c".into(), "printf '%s\\n%s\\n' \"$1\" \"$FRACTAL_FINITE_EXEC_GENERATION\"; sleep 60".into(),
                 "fixture".into(), "literal $HOME % value".into(),
-            ]), root.path(), &std::env::vars().collect(), &policy, &|| Ok(()),
+            ]), root.path(), &environment, &policy, &|| Ok(()),
         ).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !runtime.read_output("finite-argv", &generation.generation_id).unwrap().0.contains("literal $HOME % value") {
-            assert!(std::time::Instant::now() < deadline, "finite gate changed payload argv");
+        while !runtime.read_output("finite-argv", &generation.generation_id).unwrap().0
+            .contains(&format!("literal $HOME % value\n{}\n", generation.generation_id)) {
+            assert!(std::time::Instant::now() < deadline, "finite gate changed argv or failed to replace inherited provenance");
             thread::sleep(Duration::from_millis(10));
         }
         assert!(runtime.kill_if("finite-argv", Some("stale-generation")).is_err());

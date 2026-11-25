@@ -11,11 +11,9 @@ use tokio::sync::{Semaphore, watch};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::{Message as ClientMessage, client::IntoClientRequest as _}};
 
 use super::journal::{Admission, Command, Journal, Outcome, Receipt, Recovery, RunRequest, RunResult, Selection, VERSION};
-use crate::config::LIGHT_NODE_SESSION_PATH;
+use crate::config::{LIGHT_NODE_SESSION_PATH, LIGHT_NODE_SESSION_MAX_FRAME as MAX_FRAME, LIGHT_NODE_SESSION_CAPABILITIES as CAPABILITIES};
 use crate::store::run_credentials::local::AuthorityChange;
 
-const MAX_FRAME: usize = 64 * 1024;
-const CAPABILITIES: [&str; 6] = ["commands-v1", "receipts-v1", "joint-checkpoints-v1", "run-effects-v1", "authority-v1", "signed-channel-v1"];
 type RawClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type ClientSocket = AuthenticatedSocket<RawClientSocket>;
 type ServerSocket = AuthenticatedSocket<WebSocket>;
@@ -90,12 +88,15 @@ fn websocket_key(headers:&HeaderMap)->Result<&str> {
 }
 type Work = Pin<Box<dyn Future<Output = (String, Result<Outcome>)> + Send>>;
 
-/// Entry must reuse current native admission/custody, not launch from a decoded payload
-/// directly. Recovery resolves the existing operation/incarnation and must never relaunch.
+/// Entry consumes immutable locally admitted Start facts and reuses native resource/custody
+/// gates. Recovery resolves existing operation/incarnation custody and must never relaunch.
 pub trait Executor: Send + Sync + 'static {
     fn enter(&self, command: &Command, authority: &rusqlite::Connection) -> Result<String>;
     fn cancel(&self, command: &Command, authority: &rusqlite::Connection, reason: &str) -> Result<()>;
     fn recover<'a>(&'a self, recovery: Recovery) -> Pin<Box<dyn Future<Output = Result<Outcome>> + Send + 'a>>;
+    /// Monotonic actual native provenance/liveness evidence, never journal writes or
+    /// recovery attempts. Publishing a changed generation must wake `journal.changed`.
+    fn recovery_generation(&self) -> u64 { 0 }
 }
 
 /// Implement with the graph writer's atomic asserted-effect + retry-receipt transaction.
@@ -148,7 +149,7 @@ enum Frame {
     Retired { epoch: u64, receipt_ack: u64, authority_ack: u64 },
     Authority { change: AuthorityChange },
     AuthorityAck { through: u64 },
-    Command { command: Command },
+    Command { command: Command, cancellation_reason: Option<String> },
     Cancel { execution_id: String, reason: String },
     Replay { next_sequence: u64 },
     ResultExpired { execution_id: String },
@@ -216,6 +217,7 @@ impl Home {
         let mut hosts = BTreeSet::new();
         for journal in &journals {
             let selected = journal.selection()?;
+            selected.validate_hello_budget(auth.fleet_id())?;
             ensure!(selected.home == node && auth.member_key() == Some(selected.home_key.as_str()), "home signing identity differs from provisioned grant");
             ensure!(hosts.insert(selected.host), "duplicate home seat journal");
         }
@@ -335,9 +337,9 @@ async fn serve_home(home: &Home, journal: &Journal, connection:&Semaphore, socke
         if drained {
             for command in journal.pending_commands()? {
                 if command.binding.epoch == selected.epoch && command.sequence > sent {
-                    journal.mark_sent(&command)?;
+                    let cancellation_reason=journal.prepare_delivery(&command)?;
                     sent = command.sequence;
-                    server_send(socket, Frame::Command { command }).await?;
+                    server_send(socket, Frame::Command { command, cancellation_reason }).await?;
                 }
             }
             for (execution_id, reason) in journal.pending_cancellations()? {
@@ -378,8 +380,8 @@ async fn serve_home(home: &Home, journal: &Journal, connection:&Semaphore, socke
                 Some(Frame::Replay { next_sequence }) => {
                     sent=next_sequence.saturating_sub(1);
                     for command in journal.replay_commands(next_sequence)? {
-                        journal.mark_sent(&command)?; sent=command.sequence;
-                        server_send(socket,Frame::Command {command}).await?;
+                        let cancellation_reason=journal.prepare_delivery(&command)?; sent=command.sequence;
+                        server_send(socket,Frame::Command {command,cancellation_reason}).await?;
                     }
                 }
                 Some(Frame::CheckpointAck { epoch, through }) => {
@@ -435,6 +437,7 @@ pub struct SeatClient {
 impl SeatClient {
     pub fn new(journal: Journal, auth: FleetAuth, node: String, endpoint: String, executor: Arc<dyn Executor>) -> Result<Self> {
         let selection = journal.selection()?;
+        selection.validate_hello_budget(auth.fleet_id())?;
         crate::config::LightNodeSessionConfig::Agent { home_endpoint: endpoint.clone(), grant: selection.clone() }.validate_for(&node)?;
         ensure!(selection.host == node && auth.member_key() == Some(selection.host_key.as_str()), "seat signing identity differs from provisioned grant");
         journal.remember_endpoint(&selection,&endpoint)?;
@@ -535,6 +538,7 @@ impl SeatClient {
         if closing_sent { client_send(socket,Frame::Closing {}).await?; }
         client_send(socket, Frame::Drained {}).await?;
         let mut attempted = BTreeMap::new();
+        let mut attempted_starts = BTreeMap::new();
         let mut sent_requests = BTreeSet::new();
         let mut cancelled_native = BTreeSet::new();
         let mut ready_sent=false;
@@ -586,9 +590,15 @@ impl SeatClient {
                     break;
                 }
                 let progress=(socket.channel.received,self.journal.local_change_count()?);
+                let native_generation=self.executor.recovery_generation();
                 for recovery in self.journal.recoverable()? {
-                    if !may_attempt_recovery(&self.journal,&attempted,&recovery.command.execution_id,progress)? {continue;}
-                    let id = recovery.command.execution_id.clone(); attempted.insert(id.clone(),progress);
+                    let id = recovery.command.execution_id.clone();
+                    if matches!(&recovery.command.operation,super::journal::Operation::Start {..}) {
+                        let progress=(native_generation,recovery.cancellation_reason.is_some());
+                        if !may_attempt_start_recovery(&attempted_starts,&id,progress) {continue;}
+                        attempted_starts.insert(id.clone(),progress);
+                    } else if !may_attempt_recovery(&self.journal,&attempted,&id,progress)? {continue;}
+                    attempted.insert(id.clone(),progress);
                     let executor = self.executor.clone(); let journal = self.journal.clone();
                     work = Some(Box::pin(async move {
                         let result = async {
@@ -610,17 +620,30 @@ impl SeatClient {
                     let (execution,result) = finished;
                     match result {
                         Ok(outcome) => {
+                            // A launch result can race an ordered withdrawal while its future
+                            // runs. Never publish that stale positive proof as withdrawal closure.
+                            if matches!(&outcome, Outcome::Started { .. }) && self.journal.recoverable()?.iter().any(|recovery|
+                                recovery.command.execution_id == execution && recovery.cancellation_reason.is_some()) {
+                                attempted.remove(&execution);
+                                attempted_starts.remove(&execution);
+                                continue;
+                            }
                             self.journal.complete(&execution,outcome)?;
-                            attempted.remove(&execution); cancelled_native.remove(&execution);
+                            attempted.remove(&execution); attempted_starts.remove(&execution); cancelled_native.remove(&execution);
                         }
                         Err(error) => tracing::warn!(execution=%execution,error=%error,"native custody remains unresolved; epoch replacement stays blocked"),
                     }
                 }
                 frame = client_next(socket) => match frame? {
                     None => return Ok(LinkEnd::Disconnected),
-                    Some(Frame::Command { command }) => match self.journal.admit(&command)? {
-                        // Replay uses the same gated contiguous outbox as first delivery.
-                        Admission::Accepted(_) | Admission::Duplicate(_) => {},
+                    Some(Frame::Command { command,cancellation_reason }) => match self.journal.admit_withdrawal(&command,cancellation_reason.as_deref())? {
+                        // Duplicate entered custody may need native revocation; fresh withdrawn
+                        // admission was already terminalized atomically without backend entry.
+                        Admission::Accepted(_) | Admission::Duplicate(_) => {
+                            if let Some(reason)=cancellation_reason {
+                                self.journal.cancel_or_revoke(&command.execution_id,reason,|command,authority,reason|self.executor.cancel(command,authority,reason))?;
+                            }
+                        },
                         Admission::Replay { next_sequence } => client_send(socket,Frame::Replay { next_sequence }).await?,
                         Admission::ResultExpired => client_send(socket,Frame::ResultExpired { execution_id: command.execution_id }).await?,
                     },
@@ -658,6 +681,12 @@ fn may_attempt_recovery(journal:&Journal,attempted:&BTreeMap<String,(u64,u64)>,e
         Some(previous) if *previous!=progress=>journal.is_local_finalization_pending(execution),
         Some(_)=>Ok(false),
     }
+}
+
+// Start recovery only resolves immutable producer custody; it never re-enters. Each
+// meaningful native evidence generation and first ordered withdrawal permits one attempt.
+fn may_attempt_start_recovery(attempted:&BTreeMap<String,(u64,bool)>,execution:&str,progress:(u64,bool))->bool {
+    attempted.get(execution).is_none_or(|previous|*previous!=progress)
 }
 
 #[cfg(test)]

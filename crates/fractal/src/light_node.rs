@@ -25,6 +25,15 @@ use smallclaims::sync::FleetAuth;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use tokio::sync::watch;
 
+#[path = "light_node_start.rs"]
+mod start;
+
+fn native_executor(reconciler: Arc<Reconciler>) -> Result<Arc<NativeSessionExecutor>> {
+    let executor = Arc::new(NativeSessionExecutor::new(reconciler));
+    executor.watch_native_custody()?;
+    Ok(executor)
+}
+
 fn now_ms() -> Result<u64> {
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).context("session clock predates Unix epoch")?;
     u64::try_from(elapsed.as_millis()).context("session clock overflow")
@@ -118,7 +127,11 @@ impl LocalRunAuthority for NativeRunAuthority {
 }
 
 #[derive(Clone)]
-struct Controls { journals: BTreeMap<String, Journal> }
+struct Controls {
+    journals: BTreeMap<String, Journal>,
+    reconciler: Arc<Reconciler>,
+    changed: Arc<tokio::sync::Notify>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Enqueue {
@@ -141,9 +154,16 @@ fn control_error(error: anyhow::Error) -> ControlError {
 }
 async fn enqueue(State(controls): State<Controls>, Json(request): Json<Enqueue>) -> Result<Json<Value>, ControlError> {
     let journal = controls.journals.get(&request.host).ok_or_else(|| control_error(anyhow::anyhow!("host has no explicit session grant")))?;
+    // A home graph write cannot race the decision-to-journal admission cut.
+    let _decision = matches!(&request.operation, Operation::Start { .. })
+        .then(|| controls.reconciler.store.connection.write());
+    if let Operation::Start { authorization } = &request.operation {
+        controls.reconciler.validate_home_start(&request.binding, authorization).map_err(control_error)?;
+    }
     let command = journal.enqueue(CommandDraft {
         decision_id: request.decision_id, binding: request.binding, operation: request.operation,
     }).map_err(control_error)?;
+    controls.changed.notify_one();
     Ok(Json(json!(command)))
 }
 async fn executions(State(controls): State<Controls>) -> Result<Json<Value>, ControlError> {
@@ -210,7 +230,8 @@ impl Service {
                 let effects = Arc::new(StoreRunEffects::new(reconciler.store.clone()));
                 let home = Home::new(journals.values().cloned().collect(), auth, config.node.clone(), effects.clone())?;
                 let listener = tokio::net::TcpListener::bind(listen).await.context("bind authenticated home session listener")?;
-                Ok(Some(Self { role: Role::Home { listener, home, pending, effects }, authority: None, controls: Some(Controls { journals }) }))
+                Ok(Some(Self { role: Role::Home { listener, home, pending, effects }, authority: None,
+                    controls: Some(Controls { journals, reconciler, changed: Arc::new(tokio::sync::Notify::new()) }) }))
             }
             LightNodeSessionConfig::Agent { home_endpoint, grant } => {
                 let journal = open_journal(&root, "agent.sqlite3")?;
@@ -220,7 +241,7 @@ impl Service {
                 reconciler.install_home_session_journal(journal.clone())?;
                 let selected = journal.selection()?;
                 let endpoint = journal.endpoint(selected.epoch)?.context("retained home endpoint is required to drain its epoch")?;
-                let client = SeatClient::new(journal.clone(), auth.clone(), config.node.clone(), endpoint, Arc::new(NativeSessionExecutor::new(reconciler.clone())))?;
+                let client = SeatClient::new(journal.clone(), auth.clone(), config.node.clone(), endpoint, native_executor(reconciler.clone())?)?;
                 let authority = Arc::new(NativeRunAuthority {
                     journal: journal.clone(), selection: grant.clone(), key, requester: client.requester(),
                 });
@@ -238,6 +259,7 @@ impl Service {
         match &self.controls {
             Some(controls) => Router::new()
                 .route("/v1/internal/light-node/commands", post(enqueue))
+                .route("/v1/internal/light-node/starts", post(start::enqueue_start))
                 .route("/v1/internal/light-node/commands/{execution}", get(receipt))
                 .route("/v1/internal/light-node/executions", get(executions))
                 .route("/v1/internal/light-node/commands/{execution}/cancel", post(cancel))
@@ -247,6 +269,7 @@ impl Service {
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
+        let controls = self.controls;
         match self.role {
             Role::Home { listener, home, pending, effects } => {
                 struct StopHome(Home);
@@ -254,13 +277,16 @@ impl Service {
                 let _stop = StopHome(home.clone());
                 let shutting_down = home.clone();
                 let transition_shutdown = shutdown.clone();
+                let withdrawal_shutdown = shutdown.clone();
+                let controls = controls.context("home session is missing its command admission owner")?;
                 let serving = async move { axum::serve(listener, home.router()).with_graceful_shutdown(async move {
                     while !*shutdown.borrow_and_update() {
                         if shutdown.changed().await.is_err() { break; }
                     }
                     shutting_down.shutdown();
                 }).await.context("serve authenticated home sessions") };
-                tokio::try_join!(serving, advance_home(pending, effects, transition_shutdown))?;
+                tokio::try_join!(serving, advance_home(pending, effects, transition_shutdown),
+                    start::watch_home_starts(controls, withdrawal_shutdown))?;
                 Ok(())
             }
             Role::Agent(agent) => {
@@ -326,7 +352,7 @@ async fn run_agent(agent: AgentSession, shutdown: watch::Receiver<bool>) -> Resu
             journal.remember_endpoint(&target, &endpoint)?;
             let client = match first.take() {
                 Some(client) => client,
-                None => SeatClient::new(journal.clone(), auth, node, endpoint, Arc::new(NativeSessionExecutor::new(reconciler)))?,
+                None => SeatClient::new(journal.clone(), auth, node, endpoint, native_executor(reconciler)?)?,
             };
             client.run(shutdown.clone()).await?;
             if !*shutdown.borrow() && !journal.closing()? {
@@ -347,7 +373,7 @@ async fn run_agent(agent: AgentSession, shutdown: watch::Receiver<bool>) -> Resu
         let prior_endpoint = journal.endpoint(retained.epoch)?.context("retained home endpoint is required to drain its epoch")?;
         let client = match first.take() {
             Some(client) => client,
-            None => SeatClient::new(journal.clone(), auth.clone(), node.clone(), prior_endpoint, Arc::new(NativeSessionExecutor::new(reconciler.clone())))?,
+            None => SeatClient::new(journal.clone(), auth.clone(), node.clone(), prior_endpoint, native_executor(reconciler.clone())?)?,
         };
         // Keep the old authenticated connection alive until its durable, paired barrier
         // permits replacement. Dropping this scope closes it before the new client starts.
