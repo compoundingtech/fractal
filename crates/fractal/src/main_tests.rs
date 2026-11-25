@@ -2059,7 +2059,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
     assert_eq!(omp["meta"]["messageId"], "message/0123456789abcdef");
     message.from = "person/operator".into();
     message.delivery_thread = Some("thread/topic".into());
-    let threaded = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
+    let threaded = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", "runtime-1", &[]);
     assert_eq!(threaded["meta"]["threadId"], "thread/topic");
     let content = threaded["content"].as_str().unwrap();
     assert!(content.contains("fractal conversations reply-in-thread 'thread/topic' --quote 'message/0123456789abcdef'"));

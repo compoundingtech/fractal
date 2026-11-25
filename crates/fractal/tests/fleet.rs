@@ -3825,6 +3825,22 @@ async fn previous_release_replicates_over_emptied_valid_record_bytes_and_refuses
     // The privacy floor is one-way: rollback requires restoring a pre-upgrade backup.
     o.stop();
     let database = o.state_dir().join("claims.sqlite3");
+    // Checkpoint crash-stop WAL before establishing the physical baseline, not as an
+    // exemption for obsolete-reader mutations. This tests a checkpointed baseline,
+    // not unchanged physical bytes during crash recovery.
+    {
+        let candidate = rusqlite::Connection::open_with_flags(
+            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        ).unwrap();
+        let (busy, log_frames, checkpointed_frames): (i32, i32, i32) = candidate.query_row(
+            "PRAGMA wal_checkpoint(TRUNCATE)", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(busy, 0, "the candidate must complete the baseline checkpoint");
+        // TRUNCATE leaves zero frames; SQLite reports -1/-1 when there is no WAL.
+        assert!(matches!((log_frames, checkpointed_frames), (0, 0) | (-1, -1)),
+            "baseline checkpoint left WAL frames: log={log_frames}, checkpointed={checkpointed_frames}");
+    }
     let storage_state = || {
         let reader = rusqlite::Connection::open_with_flags(
             &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
