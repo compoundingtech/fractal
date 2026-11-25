@@ -113,6 +113,14 @@ pub fn enqueue_legacy_host(store: &Store, host: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn cancel_legacy_host(store: &Store, host: &str) -> Result<()> {
+    store.connection.write_background().execute(
+        /* sqlite-large-value: allow-for-now lv-h742da1565e0d owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */
+        "DELETE FROM local_relayed_close_work WHERE kind='legacy_host' AND key=?1", [host],
+    )?;
+    Ok(())
+}
+
 pub fn enqueue_recipient(store: &Store, recipient: &str) -> Result<()> {
     store.connection.write_background().execute(/* sqlite-large-value: allow-for-now lv-ha848c1f3c46a owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO local_relayed_close_work(kind,key) SELECT 'recipient',?1 WHERE EXISTS(SELECT 1 FROM local_relayed_close_candidates WHERE recipient=?1)", [recipient])?;
     Ok(())
@@ -144,13 +152,12 @@ fn discovery_at(connection: &Connection, origin: &str, limit: usize) -> Result<V
     for _ in 0..limit {
         // Expand hosts before recipients, and recipients before message leaves.
         let pending: Option<(String,String,String)> = connection.query_row(
-            "SELECT kind,key,after_key FROM local_relayed_close_work ORDER BY CASE kind WHEN 'host' THEN 0 WHEN 'recipient' THEN 1 ELSE 2 END,key LIMIT 1", [],
+            "SELECT kind,key,after_key FROM local_relayed_close_work WHERE kind!='legacy_host' ORDER BY CASE kind WHEN 'host' THEN 0 WHEN 'recipient' THEN 1 ELSE 2 END,key LIMIT 1", [],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
         let Some((kind,key,after)) = pending else { break };
         let next: Option<String> = match kind.as_str() {
             "host" => connection.query_row("SELECT subject AS next FROM desired INDEXED BY desired_member_host_subject WHERE CASE WHEN json_valid(member) THEN json_extract(member,'$.host') END=?1 AND subject>?2 UNION ALL SELECT recipient AS next FROM local_relayed_close_candidates INDEXED BY relayed_close_candidates_host_recipient WHERE host=?1 AND recipient>?2 ORDER BY next LIMIT 1", params![key,after], |row| row.get(0)).optional()?,
             "recipient" => connection.query_row("SELECT subject AS next FROM local_client_message_selectors_v1 INDEXED BY relayed_close_selector_recipient WHERE recipient=?1 AND subject>?2 AND born_index>=0 AND retired_index IS NULL AND closed=0 UNION ALL SELECT message AS next FROM local_relayed_close_candidates INDEXED BY relayed_close_candidates_recipient WHERE recipient=?1 AND message>?2 ORDER BY next LIMIT 1", params![key,after], |row| row.get(0)).optional()?,
-            "legacy_host" => connection.query_row("SELECT message FROM local_relayed_close_candidates INDEXED BY relayed_close_candidates_host WHERE host=?1 AND message>?2 ORDER BY message LIMIT 1", params![key,after], |row| row.get(0)).optional()?,
             _ => None,
         };
         let message = if let Some(next) = next {
@@ -159,7 +166,7 @@ fn discovery_at(connection: &Connection, origin: &str, limit: usize) -> Result<V
                 connection.execute(/* sqlite-large-value: allow-for-now lv-hda91c3c6a37d owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO local_relayed_close_work(kind,key) VALUES('recipient',?1)", [&next])?;
                 continue;
             }
-            // Consume the recipient or legacy-host leaf immediately within the page budget.
+            // Consume the recipient leaf immediately within the page budget.
             connection.execute(/* sqlite-large-value: allow-for-now lv-hbd15d41e6b80 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_work WHERE kind='message' AND key=?1", [&next])?;
             next
         } else {
@@ -177,8 +184,8 @@ fn discovery_at(connection: &Connection, origin: &str, limit: usize) -> Result<V
         {
             connection.execute(/* sqlite-large-value: allow-for-now lv-h313b145b0c4e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_candidates(message,recipient,host) VALUES(?1,?2,?3)", params![key,recipient,member.host])?;
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h4b61be01a35e owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_reads(message,host) VALUES(?1,?2) ON CONFLICT(message) DO UPDATE SET host=excluded.host,next_attempt_ms=0,attempts=0 WHERE ?3!='legacy_host' OR local_relayed_close_reads.host IS NOT excluded.host",
-                params![key,member.host,kind],
+                /* sqlite-large-value: allow-for-now lv-he44afb703826 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_relayed_close_reads(message,host) VALUES(?1,?2) ON CONFLICT(message) DO UPDATE SET host=excluded.host,next_attempt_ms=0,attempts=0",
+                params![key,member.host],
             )?;
             result.push((key,recipient,member.host));
             continue;
@@ -186,6 +193,63 @@ fn discovery_at(connection: &Connection, origin: &str, limit: usize) -> Result<V
         connection.execute(/* sqlite-large-value: allow-for-now lv-h7416c9aa5f89 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_relayed_close_reads WHERE message=?1", [&key])?;
     }
     Ok(result)
+}
+
+/// A compatibility poll reads the retained mapping, never rediscovers/rebuilds it. Its cursor
+/// is acknowledged only after answers (or failed-read retry jobs) have committed.
+pub struct LegacyPage {
+    pub host: String,
+    pub messages: Vec<String>,
+    after: String,
+    through: String,
+}
+
+pub fn legacy_read_batch(store: &Store, limit: usize, now_ms: u64) -> Result<Option<LegacyPage>> {
+    let connection = store.readers.get();
+    legacy_read_at(&connection, limit, now_ms)
+}
+
+fn legacy_read_at(connection: &Connection, limit: usize, now_ms: u64) -> Result<Option<LegacyPage>> {
+    let pending: Option<(String,String)> = connection.query_row(
+        "SELECT key,after_key FROM local_relayed_close_work WHERE kind='legacy_host' ORDER BY key LIMIT 1",
+        [], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    let Some((host,after)) = pending else { return Ok(None) };
+    let mut statement = connection.prepare_cached(
+        "SELECT candidate.message FROM local_relayed_close_candidates AS candidate
+         WHERE candidate.host=?1 AND candidate.message>?2
+         AND NOT EXISTS(SELECT 1 FROM local_relayed_close_reads AS retry
+             WHERE retry.message=candidate.message AND retry.next_attempt_ms>?3)
+         ORDER BY candidate.message LIMIT ?4",
+    )?;
+    let messages: Vec<String> = statement.query_map(
+        params![host,after,now_ms.min(i64::MAX as u64),limit.min(i64::MAX as usize)],
+        |row| row.get(0),
+    )?.collect::<rusqlite::Result<_>>()?;
+    let through = messages.last().cloned().unwrap_or_else(|| after.clone());
+    Ok(Some(LegacyPage { host, messages, after, through }))
+}
+
+pub fn acknowledge_legacy_page(store: &Store, page: &LegacyPage) -> Result<()> {
+    let connection = store.connection.write_background();
+    acknowledge_legacy_at(&connection, page)
+}
+
+fn acknowledge_legacy_at(connection: &Connection, page: &LegacyPage) -> Result<()> {
+    if page.messages.is_empty() {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-had51635ed890 owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */
+            "DELETE FROM local_relayed_close_work WHERE kind='legacy_host' AND key=?1 AND after_key=?2",
+            params![page.host,page.after],
+        )?;
+    } else {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hc9278883d93b owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */
+            "UPDATE local_relayed_close_work SET after_key=?3 WHERE kind='legacy_host' AND key=?1 AND after_key=?2",
+            params![page.host,page.after,page.through],
+        )?;
+    }
+    Ok(())
 }
 
 /// Read jobs stay durable until an explicit successful acknowledgement. Merely selecting
@@ -201,6 +265,7 @@ pub fn read_batch(store: &Store, limit: usize, now_ms: u64) -> Result<Vec<(Strin
 }
 
 pub fn read_succeeded(store: &Store, messages: &[String]) -> Result<()> {
+    if messages.is_empty() { return Ok(()); }
     let mut connection = store.connection.write_background();
     let transaction = connection.transaction()?;
     for message in messages {
@@ -213,9 +278,17 @@ pub fn read_succeeded(store: &Store, messages: &[String]) -> Result<()> {
 /// Only failed network reads acquire retry deadlines. Local database errors propagate
 /// to the maintenance owner, rather than gaining a timer-based rediscovery fallback.
 pub fn read_failed(store: &Store, messages: &[String], now_ms: u64) -> Result<()> {
+    if messages.is_empty() { return Ok(()); }
     let mut connection = store.connection.write_background();
     let transaction = connection.transaction()?;
     for message in messages {
+        // Compatibility reads only persist failures; successful/open answers need no job.
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h73c014c8f67d owner=fractal_store::store::relayed_close_work TODO=bound-or-reference-values-and-reclamation */
+            "INSERT OR IGNORE INTO local_relayed_close_reads(message,host)
+             SELECT message,host FROM local_relayed_close_candidates WHERE message=?1",
+            [message],
+        )?;
         let attempts: Option<u32> = transaction.query_row(
             "SELECT attempts FROM local_relayed_close_reads WHERE message=?1", [message], |row| row.get(0),
         ).optional()?;
@@ -405,19 +478,78 @@ mod tests {
         assert_eq!(discovery_at(&connection, "local", 20).unwrap().len(), 4);
         assert_eq!(pending(&connection), 0);
         connection.execute("UPDATE local_client_message_selectors_v1 SET closed=1 WHERE subject='message/a2'", []).unwrap();
-        // Leave terminal candidate cleanup to the compatibility leaf evaluation itself.
-        connection.execute("DELETE FROM local_relayed_close_work", []).unwrap();
+        // A real selector delta cleans up the candidate, independently of compatibility polls.
+        assert!(discovery_at(&connection, "local", 20).unwrap().is_empty());
+        connection.execute("DELETE FROM local_relayed_close_reads", []).unwrap();
         connection.execute("INSERT INTO local_relayed_close_work(kind,key) VALUES('legacy_host','remote-a')", []).unwrap();
-        let first = discovery_at(&connection, "local", 1).unwrap();
-        assert_eq!(first, vec![("message/a1".into(), "pty/a".into(), "remote-a".into())]);
-        assert!(discovery_at(&connection, "local", 1).unwrap().is_empty());
-        let last = discovery_at(&connection, "local", 1).unwrap();
-        assert_eq!(last, vec![("message/a3".into(), "pty/a".into(), "remote-a".into())]);
-        assert!(discovery_at(&connection, "local", 1).unwrap().is_empty());
+        let first = legacy_read_at(&connection, 1, 0).unwrap().unwrap();
+        assert_eq!(first.messages, ["message/a1"]);
+        assert_eq!(legacy_read_at(&connection, 1, 0).unwrap().unwrap().messages, first.messages,
+            "cancelled network selection must replay the same page");
+        acknowledge_legacy_at(&connection, &first).unwrap();
+        let last = legacy_read_at(&connection, 1, 0).unwrap().unwrap();
+        assert_eq!(last.messages, ["message/a3"]);
+        acknowledge_legacy_at(&connection, &last).unwrap();
+        let empty = legacy_read_at(&connection, 1, 0).unwrap().unwrap();
+        assert!(empty.messages.is_empty());
+        acknowledge_legacy_at(&connection, &empty).unwrap();
         assert_eq!(pending(&connection), 0);
-        assert!(discovery_at(&connection, "local", 10).unwrap().is_empty());
+        assert!(legacy_read_at(&connection, 1, 0).unwrap().is_none());
         let retained: usize = connection.query_row("SELECT count(*) FROM local_relayed_close_candidates WHERE host='remote-b'", [], |row| row.get(0)).unwrap();
         assert_eq!(retained, 1);
+    }
+
+    #[test]
+    fn unchanged_legacy_pages_write_one_cursor_not_every_candidate() {
+        let connection = database();
+        for number in 0..1024 {
+            connection.execute(
+                "INSERT INTO local_relayed_close_candidates VALUES(?1,'pty/a','remote')",
+                [format!("message/{number:04}")],
+            ).unwrap();
+        }
+        connection.execute_batch("
+            INSERT INTO local_relayed_close_work(kind,key) VALUES('legacy_host','remote');
+            CREATE TEMP TRIGGER no_candidate_delete BEFORE DELETE ON local_relayed_close_candidates
+                BEGIN SELECT RAISE(ABORT,'unchanged poll deleted a candidate'); END;
+            CREATE TEMP TRIGGER no_candidate_insert BEFORE INSERT ON local_relayed_close_candidates
+                BEGIN SELECT RAISE(ABORT,'unchanged poll inserted a candidate'); END;
+            CREATE TEMP TRIGGER no_read_insert BEFORE INSERT ON local_relayed_close_reads
+                BEGIN SELECT RAISE(ABORT,'unchanged poll inserted a read job'); END;
+        ").unwrap();
+        let before = connection.total_changes();
+        let mut messages = 0;
+        while let Some(page) = legacy_read_at(&connection, 256, 0).unwrap() {
+            assert_eq!(connection.total_changes() - before, messages / 256);
+            messages += page.messages.len() as u64;
+            let empty = page.messages.is_empty();
+            acknowledge_legacy_at(&connection, &page).unwrap();
+            if empty { break; }
+        }
+        assert_eq!(messages, 1024);
+        assert_eq!(connection.total_changes() - before, 5, "four page cursors and one completion");
+        assert_eq!(pending(&connection), 0);
+    }
+
+    #[test]
+    fn a_failed_legacy_read_acquires_a_durable_retry_but_open_answers_do_not() {
+        let store = Store::open_memory("local").unwrap();
+        store.connection.write_background().execute_batch("
+            INSERT INTO local_relayed_close_candidates VALUES('message/a','pty/a','remote');
+            INSERT INTO local_relayed_close_candidates VALUES('message/b','pty/a','remote');
+        ").unwrap();
+        enqueue_legacy_host(&store, "remote").unwrap();
+        let page = legacy_read_batch(&store, 256, 0).unwrap().unwrap();
+        assert_eq!(page.messages, ["message/a", "message/b"]);
+        assert!(read_batch(&store, 256, 0).unwrap().is_empty());
+        read_failed(&store, &["message/a".into()], 0).unwrap();
+        acknowledge_legacy_page(&store, &page).unwrap();
+        assert!(read_batch(&store, 256, 999).unwrap().is_empty());
+        assert_eq!(read_batch(&store, 256, 1000).unwrap(), [("message/a".into(), "remote".into())]);
+        cancel_legacy_host(&store, "remote").unwrap();
+        assert!(!has_pending(&store).unwrap());
+        assert_eq!(next_read_deadline(&store).unwrap(), Some(1000),
+            "switching to event support must not discard failed network reads");
     }
 
     #[test]
@@ -457,7 +589,9 @@ mod tests {
         assert_eq!(discovery_at(&connection, "local", 10).unwrap().len(), 1);
         connection.execute("UPDATE local_relayed_close_reads SET attempts=4,next_attempt_ms=10000", []).unwrap();
         connection.execute("INSERT INTO local_relayed_close_work(kind,key) VALUES('legacy_host','remote')", []).unwrap();
-        assert_eq!(discovery_at(&connection, "local", 10).unwrap().len(), 1);
+        assert!(discovery_at(&connection, "local", 10).unwrap().is_empty());
+        assert!(legacy_read_at(&connection, 10, 9_999).unwrap().unwrap().messages.is_empty());
+        assert_eq!(legacy_read_at(&connection, 10, 10_000).unwrap().unwrap().messages, ["message/a"]);
         let retry: (u32,u64) = connection.query_row("SELECT attempts,next_attempt_ms FROM local_relayed_close_reads", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
         assert_eq!(retry, (4,10_000));
         connection.execute("INSERT INTO local_relayed_close_work(kind,key) VALUES('message','message/a')", []).unwrap();
