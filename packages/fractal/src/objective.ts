@@ -684,6 +684,9 @@ const checkTargets = ({
       fail(`repeats target \`${target.stat}\``)
     }
     if (target.scope === 'remote' && indicator.kind !== 'latency') fail('only a latency target has a remote scope')
+    if (target.goal !== undefined && (indicator.kind === 'database' || (indicator.kind === 'statement' && target.stat === 'max'))) {
+      fail(`target \`${target.stat}\`'s \`goal\` has no independently representable native row`)
+    }
   })
   if (indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') {
     if (hasWindow) fail('GitHub indicators own their rolling hour and calendar windows')

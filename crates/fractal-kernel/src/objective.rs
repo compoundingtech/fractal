@@ -937,6 +937,12 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
         if target.remote && !matches!(objective.indicator, Indicator::Latency { .. }) {
             return Err(fail("only a latency target has a remote scope".into()));
         }
+        if target.goal.is_some()
+            && (matches!(objective.indicator, Indicator::Database)
+                || (matches!(objective.indicator, Indicator::Statement) && target.stat == "max"))
+        {
+            return Err(fail(format!("target `{}`'s `goal` has no independently representable native row", target.stat)));
+        }
     }
     let kind = objective.indicator.kind();
     if let Indicator::GithubMergedCount(config) | Indicator::GithubReadyToMerged(config) = &objective.indicator {

@@ -1349,6 +1349,37 @@ objective "delivery/selected" {
 }
 
 #[test]
+fn native_github_merged_count_goal_is_served_without_changing_the_target_or_verdict() {
+    let source = r#"version 2
+objective "factory/merged-prs" {
+  about "Merged pull requests"
+  indicator "github-merged-count" {
+    source "github-source/example"
+    roster "github-scope/example"
+    timezone "UTC"
+    cut "now"
+    measurement "targeted"
+  }
+  target "per-hour" min=5
+}"#;
+    let state = tempfile::tempdir().unwrap();
+    let plain = store_with(source);
+    let with_goal = store_with(&source.replace("min=5", "min=5 goal=20"));
+    let mut expected = github_rows(&plain, state.path(), *NOW).unwrap().remove(0);
+    let mut actual = github_rows(&with_goal, state.path(), *NOW).unwrap().remove(0);
+    assert_eq!(actual["id"], "factory/merged-prs");
+    assert_eq!(actual.as_object_mut().unwrap().remove("goal"), Some(json!(20.0)));
+    assert!(expected.get("goal").is_none());
+    // Source absence stays unknown; the goal must not manufacture coverage or a verdict.
+    assert_eq!(actual["status"], "no-data");
+    for row in [&mut expected, &mut actual] {
+        row.as_object_mut().unwrap().remove("explain");
+        row.as_object_mut().unwrap().remove("declaration_revision");
+    }
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn native_producer_reports_only_its_bound_declarations_and_episodes() {
     let store = store_with(r#"version 2
 objective "example/mail" {

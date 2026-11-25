@@ -137,7 +137,7 @@ public struct SignalBoard: Sendable, Equatable {
           value = "\(missedCount)/\(measuredCount)"
         }
         if worst.kind == .objective, let goal = worst.goal {
-          let detail = "target \(worst.target) · goal \(goal.formatted(.number.precision(.fractionLength(0...2)).grouping(.never)))"
+          let detail = "target \(worst.target) · goal \(Self.goalText(goal, target: worst.target))"
           goalDetail = members.count == 1 || current.isEmpty ? detail : "\(current) · \(detail)"
         }
       } else {
@@ -149,5 +149,25 @@ public struct SignalBoard: Sendable, Equatable {
         subtitle: worst?.id ?? (members.isEmpty ? "no objective" : "no data"), goalDetail: goalDetail)
     }
     needsAttention = signals.reduce(0) { $0 + ($1.tone == .red || $1.tone == .yellow ? 1 : 0) }
+  }
+
+  /// A goal is in its bound's unit, milliseconds for a duration bound, so it reads in the unit
+  /// of the target's last duration (`p95 ≤ 5 min` with 240000 reads `4 min`, `≤ 48h` with
+  /// 86400000 reads `24h`). A target without a duration keeps the plain number.
+  private static func goalText(_ goal: Double, target: String) -> String {
+    func number(_ value: Double) -> String {
+      value.formatted(.number.precision(.fractionLength(0...2)).grouping(.never))
+    }
+    guard let duration = target.matches(of: /\d(\s?)(ms|min|[smhd])\b/).last else { return number(goal) }
+    let unit = duration.output.2
+    let milliseconds: Double =
+      switch unit {
+      case "ms": 1
+      case "s": 1_000
+      case "m", "min": 60_000
+      case "h": 3_600_000
+      default: 86_400_000
+      }
+    return "\(number(goal / milliseconds))\(duration.output.1)\(unit)"
   }
 }

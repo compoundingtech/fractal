@@ -172,6 +172,39 @@ objective "factory/work-throughput" {
     expect(() => render({ ...throughput, targets: [{ stat: 'per-hour', min: 5, goal: '20' } as never] })).toThrow(/goal/u)
   })
 
+  it('rejects display goals on native forms without an independent row', () => {
+    for (const [name, stat, goal] of [
+      ['sql-statement', 'max', 50],
+      ['database', 'live-gb', 4],
+      ['database', 'growth-mb-per-day', 100],
+    ] as const) {
+      const objective = objectives.find((objective) => objective.name === name)!
+      const input = { ...objective, targets: objective.targets.map((target) => target.stat === stat ? { ...target, goal } : target) }
+      expect(() => Fractal.objective(input)).toThrow(/no independently representable native row/u)
+      expect(() => render(input)).toThrow(/no independently representable native row/u)
+    }
+  })
+
+  it('preserves display goals on every row-addressable native form', () => {
+    for (const [name, stat, scope, goal] of [
+      ['person-read', 'p99', undefined, 100],
+      ['person-read', 'p99', 'remote', 200],
+      ['sql-statement', 'p99', undefined, 5],
+      ['transaction', 'max', undefined, 100],
+      ['writer-hold', 'max', undefined, 100],
+      ['cpu', 'cores', undefined, 0.5],
+      ['cpu', 'idle-cores', undefined, 0.25],
+      ['ios-live-share', 'live-share', undefined, 99.9],
+      ['projection-divergence', 'open', undefined, 0],
+    ] as const) {
+      const objective = objectives.find((objective) => objective.name === name)!
+      const input = { ...objective, targets: objective.targets.map((target) => target.stat === stat && target.scope === scope ? { ...target, goal } : target) }
+      const checked = Fractal.objective(input)
+      expect(checked.targets.find((target) => target.stat === stat && target.scope === scope)?.goal).toBe(goal)
+      expect(render(input)).toContain(`goal=${goal}`)
+    }
+  })
+
   it('lowers one claim as the whole sample and an only per field', () => {
     expect(render(runs)).toBe(`version 2
 objective "acme/merge-latency" {

@@ -249,6 +249,40 @@ fn target_goals_reject_non_numeric_non_finite_and_repeated_values() {
 }
 
 #[test]
+fn target_goals_reject_native_forms_without_an_independent_row() {
+    for (target, goal) in [
+        ("target \"max\" within=\"100ms\"", 50),
+        ("target \"live-gb\" max=8", 4),
+        ("target \"growth-mb-per-day\" max=300", 100),
+    ] {
+        let message = parse_document(&SHIPPED.replace(target, &format!("{target} goal={goal}"))).unwrap_err().message;
+        assert!(message.contains("no independently representable native row"), "{target}: {message}");
+    }
+}
+
+#[test]
+fn target_goals_accept_all_row_addressable_native_forms() {
+    let mut source = SHIPPED.to_owned();
+    for (target, goal) in [
+        ("target \"p99\" within=\"300ms\"", 100.0),
+        ("target \"p99\" scope=\"remote\" within=\"300ms\"", 200.0),
+        ("target \"p99\" within=\"10ms\"", 5.0),
+        ("target \"max\" within=\"300ms\"", 100.0),
+        ("target \"cores\" max=1", 0.5),
+        ("target \"idle-cores\" max=0.5", 0.25),
+        ("target \"live-share\" min-percent=99", 99.9),
+        ("target \"open\" max=0", 0.0),
+    ] {
+        source = source.replace(target, &format!("{target} goal={goal}"));
+    }
+    let objectives = parse_document(&source).unwrap();
+    for name in ["person-read", "sql-statement", "transaction", "writer-hold", "cpu", "ios-live-share", "projection-divergence"] {
+        let objective = objectives.iter().find(|objective| objective.name == name).unwrap();
+        assert!(objective.targets.iter().filter(|target| target.stat != "max" || name != "sql-statement").all(|target| target.goal.is_some()), "{name}");
+    }
+}
+
+#[test]
 fn target_goal_n_minus_one_property_reader_refuses_instead_of_dropping_goal() {
     let document: KdlDocument = "target \"per-hour\" min=10 goal=20".parse().unwrap();
     let node = canonical_node(&document.nodes()[0]).unwrap();

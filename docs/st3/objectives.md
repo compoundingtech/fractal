@@ -47,7 +47,14 @@ objective "ops/change-rollout" {
   different statistics and units in one objective never share an ambiguous aspiration.
   `fractal slo ls --json` and `/v1/slo` expose numeric `goal` only for rows whose target
   declares one. Count label breakdowns have no target of their own and do not inherit it.
-  The Mac Signals tile adds compact target and goal details only when a goal is present.
+  The Mac Signals tile adds compact target and goal details only when a goal is present;
+  millisecond duration goals are displayed in the target's duration unit, such as `15m` or `48h`.
+  Shipped native goals are supported for targets with independently addressable rows.
+  The database's combined size/growth row and SQL statement's unrepresented `max`
+  diagnostic cannot carry an unambiguous goal, so authoring a goal there is rejected.
+  SQL statement `p99`, latency (local/remote), live share, transaction, writer hold, CPU
+  (busy/idle) and divergence goals are projected after evaluation. Source-backed
+  `github-merged-count` per-hour goals remain supported, including `min=5 goal=20`.
   A goal never changes verdicts, burn rates, budgets, alerts or attention.
 - `window` is the span an interval or count is measured over, and `min-samples` the samples an
   interval needs before it is met or missed; with fewer it is `no-data`.
