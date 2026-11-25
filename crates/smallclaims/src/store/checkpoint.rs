@@ -16,7 +16,8 @@ use stage_times::delete_statement;
 
 pub use tombstones::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
-    CheckpointManifestPage, CheckpointManifestRequest, SnapshotPatch, verify_checkpoint_manifest,
+    CheckpointManifestPage, CheckpointManifestRequest, SnapshotPatch, check_checkpoint_manifest,
+    verify_checkpoint_manifest,
 };
 pub use tombstones::{
     checkpointed_operation, checkpointed_operations, claim_or_tombstone_exists, claim_tombstoned,
