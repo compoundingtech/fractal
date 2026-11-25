@@ -1,9 +1,9 @@
 //! The Unix-only authority bridge. The parent supplies the selected journal/host-key/session
 //! service; this API never opens a second authority store or exports the bearer credential.
 use super::{ApiError, BoundRun, RunCredential};
-use crate::model::{ClaimInput, FractalError};
-use crate::store::run_credentials::{ExecutionBinding, assertions::{RequestAssertion, RequestIdentity}};
-use crate::light_node::journal::RunResult;
+use fractal_wire::{ClaimInput, Error as FractalError};
+use fractal_light_node_core::authority::{ExecutionBinding, assertions::{RequestAssertion, RequestIdentity}};
+use fractal_light_node_core::journal::RunResult;
 use axum::{Extension, Json, http::Method};
 use serde::Deserialize;
 use serde_json::Value;

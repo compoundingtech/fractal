@@ -32,6 +32,8 @@ let
   });
   runtime = result: result.packages.${system}.st3;
   checked = result: result.checks.${system}.st3;
+  lightAgent = result: result.packages.${system}.fractal-light-node-agent;
+  ptyChanged = vary "pty" "default";
 in
 assert (runtime original).outPath == (runtime collectorChanged).outPath;
 assert (runtime original).outPath == (varyBaseline (runtime original)).outPath;
@@ -40,4 +42,10 @@ assert builtins.any (input: input.outPath == baseline.outPath) (checked original
 assert (checked original).outPath != (varyBaseline (checked original)).outPath;
 assert !(runtime original).doCheck;
 assert (checked original).doCheck;
+assert (lightAgent original).outPath == (lightAgent collectorChanged).outPath;
+assert (lightAgent original).outPath != (lightAgent ptyChanged).outPath;
+assert (lightAgent original).cargoBuildFlags == [ "-p" "fractal-light-node-agent" "--bin" "fractal-light-node-agent" ];
+assert (lightAgent original).postInstall ==
+  ''ln -s ${inputs.pty.packages.${system}.default.overrideAttrs (_: { doCheck = false; })}/bin/pty "$out/bin/pty"'';
+assert !(lightAgent original).doCheck;
 true

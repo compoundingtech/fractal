@@ -249,7 +249,7 @@ fn native_store_revocation_restart_and_no_frontier_remain_honest() {
     evidence["source_frontier"]["observed_at"]=json!(time(now));
     evidence["source_frontier"]["covered_through"]=json!(time(now));
     evidence["source_frontier"]["covered_from"]=json!(time(now-31*DAY));
-    store.append_claim(&crate::model::ClaimInput{subject:ACTOR.into(),kind:"usage.limits.observed".into(),actor:Some(ACTOR.into()),
+    store.append_claim(&fractal_wire::ClaimInput{subject:ACTOR.into(),kind:"usage.limits.observed".into(),actor:Some(ACTOR.into()),
         fields:serde_json::from_value(evidence).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
     assert_eq!(cam(&rows(&store,now,DAY).unwrap(),"cam-r01")["status"],"no-data");
     store.set_usage_limits_writers(vec![]).unwrap();
@@ -310,7 +310,7 @@ fn uncertain_loss_intervals_do_not_wash_confirmed_bad_time() {
 
 fn append_delta(store:&Store,actor:&str,mut delta:Delta)->ClaimRecord {
     delta.claim.body["fields"]["source_frontier"]["previous_claim"]=json!(delta.frontier.previous_claim);
-    store.append_claim(&crate::model::ClaimInput{subject:actor.into(),kind:"usage.limits.observed".into(),
+    store.append_claim(&fractal_wire::ClaimInput{subject:actor.into(),kind:"usage.limits.observed".into(),
         actor:Some(actor.into()),fields:serde_json::from_value(delta.claim.body["fields"].clone()).unwrap(),
         evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap()
 }

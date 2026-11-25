@@ -7,9 +7,11 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = []
+test-support = ["fractal-auth/test-support"]
 
 [dependencies]
+fractal-auth = { path = "../fractal-auth" }
+fractal-wire = { path = "../fractal-wire" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
@@ -36,6 +38,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["a
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 futures-util = "0.3"
 opentelemetry_sdk = { version = "0.30", features = ["testing"] }
 tokio = { version = "1", features = ["test-util"] }

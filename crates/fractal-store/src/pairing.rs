@@ -3,7 +3,8 @@ use anyhow::Result;
 use rusqlite::{Connection, Transaction, OptionalExtension as _, params};
 use serde_json::Value;
 use crate::{config::LegacyPairingAllowance, store::Store};
-use smallclaims::claim::{ClaimInput, ClaimRecord};
+use smallclaims::claim::{ ClaimRecord};
+use fractal_wire::{ClaimInput};
 
 /// Every configured allowance ends no later than 2026-11-15T23:00:00Z.
 pub const LEGACY_ALLOWANCE_CAP_UNIX_MS: u128 = 1_794_783_600_000;
@@ -285,15 +286,15 @@ impl Store {
         &self,
         input: &ClaimInput,
         owner: &ClientWorkClaimFence<'_>,
-    ) -> Result<ClaimRecord, crate::FractalError> {
+    ) -> Result<ClaimRecord, fractal_wire::Error> {
         if !matches!(input.kind.as_str(), "custom.client.control-granted" | "custom.client.control-consumed")
             || input.actor.as_deref() != Some(owner.actor) {
-            return Err(crate::FractalError::new("claim-write-forbidden", "a work-bound client admission record is required"));
+            return Err(fractal_wire::Error::new("claim-write-forbidden", "a work-bound client admission record is required"));
         }
         let admission = |connection: &Connection| {
             let now = smallclaims::store::now_ms();
             if now >= owner.expires_at {
-                return Err(crate::FractalError::new("grant-expired", "the grant expired before client admission committed"));
+                return Err(fractal_wire::Error::new("grant-expired", "the grant expired before client admission committed"));
             }
             let now = now.to_string();
             let live: bool = connection.query_row(
@@ -318,7 +319,7 @@ impl Store {
                 |row| row.get(0),
             ).map_err(smallclaims::error::internal)?;
             if live { Ok(()) } else {
-                Err(crate::FractalError::new("grant-expired", "the native worker claim ended before client admission committed"))
+                Err(fractal_wire::Error::new("grant-expired", "the native worker claim ended before client admission committed"))
             }
         };
         let subjects = [owner.step.to_owned()];
@@ -329,9 +330,9 @@ impl Store {
             }).map(|(claim, _)| claim)
     }
 
-    pub fn append_client_operation_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, crate::FractalError> {
+    pub fn append_client_operation_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, fractal_wire::Error> {
         if !input.kind.starts_with("custom.client.pairing") && !input.kind.starts_with("custom.client.terminal") {
-            return Err(crate::FractalError::new("claim-write-forbidden", "a dedicated client operation record is required"));
+            return Err(fractal_wire::Error::new("claim-write-forbidden", "a dedicated client operation record is required"));
         }
         crate::store::append_claim_with_commit_context(self, input, None, None, None, None,
             crate::store::ClaimCommitContext { client_operation:true, ..Default::default() })
@@ -409,7 +410,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smallclaims::claim::ClaimInput;
+    use fractal_wire::ClaimInput;
     use serde_json::json;
 
     fn completion_input(actor: Option<&str>) -> ClaimInput {
@@ -437,7 +438,7 @@ mod tests {
         }
         let source = Store::open_memory("issuer").unwrap();
         source.bind_fleet("receipt-fleet").unwrap();
-        let key = std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let key = std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         source.pin_fleet_anchor(key.public()).unwrap();
         source.set_member_key(Some(key.clone())).unwrap();
         source.admit_fleet_anchor("receipt-fleet", key.public(), "listening").unwrap();
@@ -488,7 +489,7 @@ mod tests {
     /// key membership admits for the issuer. Without that signature it is not trusted.
     #[test]
     fn an_operation_receipt_stays_trusted_once_its_envelope_is_released() {
-        let key = std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let key = std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         let source = Store::open_memory("issuer").unwrap();
         source.bind_fleet("receipt-fleet").unwrap();
         source.pin_fleet_anchor(key.public()).unwrap();

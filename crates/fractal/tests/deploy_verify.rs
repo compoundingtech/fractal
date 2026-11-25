@@ -6,8 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fractal_daemon::api::{AppState, router, serve_unix};
 use fractal_daemon::client::{Client, Endpoint};
-use fractal_daemon::fleet::MemberKey;
-use fractal_daemon::model::{ClaimInput, PlannerSpec};
+use fractal_auth::{MemberKey};
+use fractal_daemon::model::{ PlannerSpec};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use fractal_schema::deploy::{PackageIdentity, VerifyGoReceipt, VerifyGoRequest};
 use fractal_schema::deploy_policy::Policy;

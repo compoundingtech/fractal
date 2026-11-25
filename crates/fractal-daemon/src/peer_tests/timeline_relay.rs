@@ -22,12 +22,14 @@ use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
-use smallclaims::sync::{ Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, WorkerConfig, };
+use fractal_auth::{FleetAuth};
+use smallclaims::sync::{Backend, Local, MAX_EXCHANGE_BYTES, WorkerConfig};
 use smallclaims::sync::{dial_targets, signed_error_response_for, signed_response_for};
 use crate::client::Client;
 use crate::config::{Config, PeerConfig};
 use crate::fleet::transport::{Fabric, LocalTransports, Route, local_addresses, parse_route, resolve_tool};
-use crate::fleet::{FleetView, MemberKey};
+use fractal_auth::{MemberKey};
+use crate::fleet::{FleetView};
 use crate::model::{ ApiResponse, ReplicaEnvelopeId, ReplicationExchange, ReplicationExportRequest, ReplicationExportResponse, ReplicationInventory, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse, };
 use crate::store::Store;
 use crate::relay_trace::{self, Outcome, Phase};
@@ -238,7 +240,7 @@ let peer_server = tokio::spawn(async move {
 });
 let owner_store = Store::open_memory("owner").unwrap();
 owner_store
-    .append_claim(&crate::model::ClaimInput {
+    .append_claim(&fractal_wire::ClaimInput {
         subject: agent.into(),
         kind: "runtime.observed".into(),
         actor: Some(agent.into()),

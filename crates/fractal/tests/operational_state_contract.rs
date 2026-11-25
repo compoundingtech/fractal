@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use fractal_daemon::model::{ClaimInput, MissionRunRequest};
+use fractal_daemon::model::{ MissionRunRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 
 fn fixture_root() -> PathBuf {

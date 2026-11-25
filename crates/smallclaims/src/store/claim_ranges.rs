@@ -934,7 +934,7 @@ mod tests {
         let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
         for n in 0..20 {
             store
-                .append_claim(&crate::claim::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: format!("note/{n}"),
                     kind: "example.note".into(),
                     actor: None,

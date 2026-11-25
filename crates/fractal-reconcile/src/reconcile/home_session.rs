@@ -1,10 +1,10 @@
 //! The first session slice controls existing native custody; it cannot launch work.
 use super::*;
-use crate::model::FractalError;
-use fractal_peer::light_node::journal::{Command, Journal, Operation, Outcome, Recovery, Selection};
-use fractal_peer::light_node::session::Executor;
-use crate::store::local_sessions::{LocalSession, SessionCustody};
-use crate::store::run_credentials::{ExecutionBinding, local};
+use fractal_wire::{Error as FractalError};
+use fractal_light_node_core::journal::{Command, Journal, Operation, Outcome, Recovery, Selection};
+use fractal_light_node_core::session::Executor;
+use fractal_light_node_core::custody::{LocalSession, SessionCustody};
+use fractal_light_node_core::authority::{ExecutionBinding, local};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::pin::Pin;

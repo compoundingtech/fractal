@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use sha2::{Digest as _, Sha256};
 
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 
 /// The context variables st sets for mission steps and gates (`mission`).
 pub const VARIABLES: &[&str] = &[

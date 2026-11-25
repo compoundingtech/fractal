@@ -2,7 +2,8 @@
 //! A former owner acknowledges the selected placement only after its local runtime is gone.
 use crate::MissionsStore;
 use crate::SeatsStore;
-use crate::model::{ClaimInput, ClaimRecord, DesiredSubject, FractalError};
+use crate::model::{ ClaimRecord, DesiredSubject};
+use fractal_wire::{ClaimInput, Error as FractalError};
 use crate::store::Store;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

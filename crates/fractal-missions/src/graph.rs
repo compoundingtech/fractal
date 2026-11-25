@@ -9,13 +9,13 @@ pub use crate::declaration_syntax::parse_duration;
 #[cfg(test)]
 use crate::model::GateSpec;
 use crate::model::{
-    DesiredSubject, LaneSpec, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec,
+    DesiredSubject, LaneSpec, LaunchSpec, MemberKind, MemberSpec,
     MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation,
     NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation,
     PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec,
     ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType,
-    RuntimeResetOperation, ScheduleSpec, FractalError, SubscriptionConditionSpec, SubscriptionSpec,
-};
+    RuntimeResetOperation, ScheduleSpec, SubscriptionConditionSpec, SubscriptionSpec};
+use fractal_wire::{Error as FractalError};
 pub use fractal_delivery::graph::*;
 pub use fractal_delivery::graph::{agent_under, observer_spec, parse_execution_intent, parse_intent, parse_internal_intent, planning_planner_request, planning_planner_subject, runtime_id, runtime_proof_variables, schedule_spec, subscription_spec, validate_mission_runtimes};
 

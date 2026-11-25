@@ -1050,13 +1050,13 @@ async fn native_session_continuity_requires_every_fleet_member_to_advertise_work
     for supported in [false, true] {
         let fixture = Fixture::new(false).await;
         let store = &fixture.state.store;
-        let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let anchor = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         store.bind_fleet(FLEET).unwrap();
         store.pin_fleet_anchor(anchor.public()).unwrap();
         store.set_member_key(Some(anchor.clone())).unwrap();
         store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
 
-        let peer_key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let peer_key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         store.append_claim(&ClaimInput {
             subject: "host/birch".into(),
             kind: "fleet.member-admitted".into(),

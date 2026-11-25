@@ -9,7 +9,8 @@ pub use crate::store::provenance_tests_shared_missions::*;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::provenance_tests_shared_missions::{publish};
-use crate::model::{IntentInput, FractalError};
+use crate::model::{IntentInput};
+use fractal_wire::{Error as FractalError};
 use std::collections::BTreeMap;
 use crate::provenance::tests::*;
 use crate::provenance::*;

@@ -190,7 +190,8 @@ fn live(pid: i32) -> bool {
 
 #[test]
 fn isolated_daemon_deduplicates_completed_reviews_and_cancels_a_superseded_head() {
-    use fractal_daemon::model::{ClaimInput, MissionRunRequest};
+    use fractal_daemon::model::{ MissionRunRequest};
+    use fractal_wire::{ClaimInput};
     use fractal_daemon::store::Store;
     use std::collections::BTreeMap;
 

@@ -5715,7 +5715,7 @@ mission "pin-parent" state="ready" {{
         }).unwrap();
         if legacy {
             // Author a pre-metadata creation receipt, rather than modifying signed history.
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: "mission-run/legacy-pin-child".into(),
                 kind: "mission-run.created".into(),
                 actor: Some("person/test".into()),
@@ -33073,7 +33073,7 @@ mission "fresh" state="ready" {
             anchor: Option<&str>,
             actor: &str,
             key: &str,
-        ) -> Result<crate::model::ClaimRecord, crate::model::FractalError> {
+        ) -> Result<crate::model::ClaimRecord, fractal_wire::Error> {
             self.store
                 .move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
                     agent: self.agent.into(),
@@ -33086,7 +33086,7 @@ mission "fresh" state="ready" {
                 })
         }
 
-        fn work(&self, step: &str, action: &str, key: &str) -> Result<(), crate::model::FractalError> {
+        fn work(&self, step: &str, action: &str, key: &str) -> Result<(), fractal_wire::Error> {
             self.store
                 .work_action(
                     step,

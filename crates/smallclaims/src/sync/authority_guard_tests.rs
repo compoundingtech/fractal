@@ -1,6 +1,6 @@
 //! Count actual worker requests while store-scoped subscriptions follow committed changes.
 use super::*;
-use crate::fleet::handshake::JoinRequest;
+use fractal_auth::{handshake::JoinRequest};
 use crate::replication::{ReceiveOptions, ReplicationExportResponse, ReplicationReceiveResponse};
 use crate::store::Runtime as _;
 use crate::sync::Local;
@@ -204,7 +204,7 @@ async fn shard_exchanges_and_empty_offers_do_not_fold_graph_membership() {
             &backend, &fleet, "peer", FLEET, &exchange, ReceiveOptions::default(),
         ).await.unwrap();
         assert_eq!(backend.views.load(Ordering::Relaxed), 0);
-        backend.store.append_claim(&crate::claim::ClaimInput {
+        backend.store.append_claim(&fractal_wire::ClaimInput {
             subject: "note/ordinary".into(), kind: "example.note".into(), actor: None,
             fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None,
             idempotency_key: None,
@@ -232,7 +232,7 @@ async fn signed_peer_request_cannot_select_the_local_reduced_mode() {
     );
     store.bind_fleet(FLEET).unwrap();
     store
-        .append_claim(&crate::claim::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "note/fixture".into(),
             kind: "example.note".into(),
             actor: None,

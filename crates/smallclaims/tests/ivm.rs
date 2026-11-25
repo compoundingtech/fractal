@@ -333,7 +333,8 @@ fn bounded_index_lookup_exposes_no_fullscan_or_sort_in_candidate_selection() {
 
 #[test]
 fn registered_runtime_automatically_projects_real_local_and_shuffled_remote_store_writes() {
-    use smallclaims::{ClaimInput, ivm::runtime::ViewRuntime, replication::ReplicationInventory};
+    use smallclaims::{ ivm::runtime::ViewRuntime, replication::ReplicationInventory};
+    use fractal_wire::{ClaimInput};
     fn node(name: &str) -> (Store, Arc<ViewRuntime>) {
         let runtime = Arc::new(ViewRuntime::new(views()).unwrap());
         let store = Store::open_memory(name, runtime.clone()).unwrap();
@@ -598,9 +599,8 @@ fn latest_numeric_adapter_creates_no_claims_and_keeps_samples_windows_and_owner_
 #[test]
 fn unready_projection_preserves_valid_source_admission_without_advancing_view_frontier() {
     use smallclaims::{
-        ClaimInput,
-        ivm::{Readiness, runtime::ViewRuntime},
-    };
+        ivm::{Readiness, runtime::ViewRuntime}};
+    use fractal_wire::{ClaimInput};
     let runtime = Arc::new(ViewRuntime::new(views()).unwrap());
     let store = Store::open_memory("alder", runtime.clone()).unwrap();
     let input = |remaining| ClaimInput {
@@ -725,9 +725,8 @@ impl View for Faulty {
 #[test]
 fn operator_failure_rolls_back_projection_keeps_source_and_records_unready_evidence() {
     use smallclaims::{
-        ClaimInput,
-        ivm::{Readiness, runtime::ViewRuntime},
-    };
+        ivm::{Readiness, runtime::ViewRuntime}};
+    use fractal_wire::{ClaimInput};
     let runtime = Arc::new(ViewRuntime::new(Views::new(vec![Box::new(Faulty)]).unwrap()).unwrap());
     let store = Store::open_memory("alder", runtime.clone()).unwrap();
     let claim = store
@@ -766,7 +765,8 @@ fn operator_failure_rolls_back_projection_keeps_source_and_records_unready_evide
 
 #[test]
 fn registered_runtime_reopens_persisted_view_without_history_rebuild() {
-    use smallclaims::{ClaimInput, ivm::runtime::ViewRuntime};
+    use smallclaims::{ ivm::runtime::ViewRuntime};
+    use fractal_wire::{ClaimInput};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("invented.sqlite");
     let runtime = Arc::new(ViewRuntime::new(views()).unwrap());
@@ -1010,7 +1010,7 @@ fn custom_only_operator_registers_provenance_and_rank_mutation_fences_durably() 
         Arc::new(ViewRuntime::new(Views::new(vec![Box::new(CustomOnly)]).unwrap()).unwrap());
     let store = Store::open_memory("alder", runtime.clone()).unwrap();
     let claim = store
-        .append_claim(&smallclaims::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "account/ada".into(),
             kind: "account.limits".into(),
             actor: None,
@@ -1080,7 +1080,7 @@ fn unrelated_remote_source_pending_and_ready_are_durable_without_key_changes() {
     let source_runtime = Arc::new(ViewRuntime::new(views()).unwrap());
     let source = Store::open_memory("alder", source_runtime).unwrap();
     source
-        .append_claim(&smallclaims::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "example/unrelated".into(),
             kind: "example.unrelated".into(),
             actor: None,
@@ -1159,7 +1159,7 @@ fn retracting_one_input_preserves_another_inputs_referenced_claim_dependency() {
     let runtime =
         Arc::new(ViewRuntime::new(Views::new(vec![Box::new(CustomOnly)]).unwrap()).unwrap());
     let store = Store::open_memory("alder", runtime.clone()).unwrap();
-    let input = |subject: &str, fields| smallclaims::ClaimInput {
+    let input = |subject: &str, fields| fractal_wire::ClaimInput {
         subject: subject.into(),
         kind: "account.limits".into(),
         actor: None,

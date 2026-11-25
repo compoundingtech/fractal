@@ -258,7 +258,7 @@ async fn empty_receive_retains_stale_final_drain_until_maintenance_commits_rebui
 fn deadline_request(store: &Store) -> ReplicationReceiveRequest {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("deadline-source").unwrap();
-    source.append_client_claim(&smallclaims::ClaimInput {
+    source.append_client_claim(&fractal_wire::ClaimInput {
         subject: "resource/receive-deadline".into(),
         kind: "resource.observed".into(),
         actor: None,
@@ -628,7 +628,7 @@ fn quiet_receive_during_recovery_preserves_completion_but_new_admission_survives
         assert!(state.store.replication_projection_deferred());
 
         let source = Store::open_memory("late-source").unwrap();
-        source.append_client_claim(&smallclaims::ClaimInput {
+        source.append_client_claim(&fractal_wire::ClaimInput {
             subject: "resource/completion-late".into(),
             kind: "resource.observed".into(),
             actor: None,
@@ -693,7 +693,7 @@ async fn shard_receive_and_wake_do_not_wait_for_projection_and_preserve_admitted
     source_graph.bind_fleet(fleet).unwrap();
     let source = crate::store::messages_shard::open(&source_graph, source_root.path()).unwrap();
     for subject in ["message/0123456789abcdef", "message/0123456789abcdee"] {
-        source.append_claim(&smallclaims::ClaimInput {
+        source.append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: "message.sent".into(),
             actor: Some("agent/birch".into()),

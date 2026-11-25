@@ -341,7 +341,7 @@ fn a_signed_thread_stays_until_the_forget_bound() {
     use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
     let dir = tempfile::tempdir().unwrap();
     let store = member(&dir.path().join("claims.sqlite3"), true);
-    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.set_node_key(std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     let written = FRESHNESS_FROM_UNIX_MS + 60_000;
     store.set_write_clock_at(u128::from(written)).unwrap();
     let ids = thread(&store, "message/signed", SENDER, RECIPIENT, true);
@@ -362,7 +362,7 @@ fn a_late_claim_after_the_close_defers_the_thread_until_it_is_past_the_bound() {
     use smallclaims::principal::{FORGET_SIGNED_AFTER_MS, FRESHNESS_FROM_UNIX_MS};
     let dir = tempfile::tempdir().unwrap();
     let store = member(&dir.path().join("claims.sqlite3"), true);
-    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.set_node_key(std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     let written = FRESHNESS_FROM_UNIX_MS + 60_000;
     store.set_write_clock_at(u128::from(written)).unwrap();
     let ids = thread(&store, "message/late-read", SENDER, RECIPIENT, true);
@@ -389,7 +389,7 @@ fn a_thread_the_bound_still_holds_is_deferred_and_the_step_goes_on() {
     use smallclaims::principal::FRESHNESS_FROM_UNIX_MS;
     let dir = tempfile::tempdir().unwrap();
     let store = member(&dir.path().join("claims.sqlite3"), true);
-    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.set_node_key(std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     // An old thread, from before the window could matter.
     store.set_write_clock_at(u128::from(FRESHNESS_FROM_UNIX_MS - 30 * DAY_MS)).unwrap();
     let old = thread(&store, "message/old", SENDER, RECIPIENT, true);

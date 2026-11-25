@@ -334,7 +334,7 @@ async fn summary_socket_tiny_snapshot_count_delta_silence_and_person_refusal() {
     let before = observed.load(Ordering::SeqCst);
     writer
         .store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: step.clone(),
             kind: "work.progress".into(),
             actor: None,
@@ -664,7 +664,7 @@ fn published_machines_are_reused_until_a_claim_can_change_them() {
     let peer = crate::store::Store::open_memory("owner-node").unwrap();
     let claim = |store: &crate::store::Store, subject: &str, kind: &str, actor: Option<&str>, fields: Value| {
         store
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
                 actor: actor.map(Into::into),
@@ -809,7 +809,7 @@ fn summary_mission_work_is_keyed_and_ignores_unrelated_commits() {
     assert_eq!(before, 2);
     read(now);
     assert_eq!(store.summary_work()["mission_subject_rebuilds"], before);
-    store.append_claim(&crate::model::ClaimInput {
+    store.append_claim(&fractal_wire::ClaimInput {
         subject: "agent/unrelated-summary-fixture".into(),
         kind: "harness.observed".into(),
         actor: None,

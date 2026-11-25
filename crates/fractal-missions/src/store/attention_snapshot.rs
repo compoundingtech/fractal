@@ -14,7 +14,7 @@ pub use crate::store::attention_snapshot_tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::attention_snapshot_tests_shared_seats::{parity, step_back_in_time};
     use super::*;
-    use crate::model::ClaimInput;
+    use fractal_wire::{ClaimInput};
 
     /// Registered custom attention is admitted with its request, so an active custom card
     /// leaves no future change, and only its recipient ever sees it.

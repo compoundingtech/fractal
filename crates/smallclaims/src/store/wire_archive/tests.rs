@@ -131,10 +131,10 @@ fn signature_only_receipt_exports_without_any_envelope() {
     let source = node("alder");
     let target = node("birch");
     let id = ReplicaEnvelopeId { writer: "alder".into(), sequence: 42, hash: "a".repeat(64) };
-    let (key, _) = crate::fleet::MemberKey::generate().unwrap();
+    let (key, _) = fractal_auth::MemberKey::generate().unwrap();
     let signature = crate::claim::ReplicaEnvelopeSignature {
         writer: id.writer.clone(), sequence: id.sequence, hash: id.hash.clone(), member_key: key.public().into(),
-        signature: key.sign(&crate::fleet::envelope_signature_message(FLEET, &id.writer, id.sequence, &id.hash)),
+        signature: key.sign(&fractal_auth::envelope_signature_message(FLEET, &id.writer, id.sequence, &id.hash)),
     };
     let mut exchange = source.export_replication_exchange(FLEET, &target.replication_inventory().unwrap()).unwrap();
     assert!(exchange.envelopes.is_empty());

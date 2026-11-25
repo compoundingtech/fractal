@@ -384,7 +384,7 @@ fn releasable(
         crate::fleet::Window::Keyed(keys) => keys,
         crate::fleet::Window::Legacy | crate::fleet::Window::Fenced => return Ok(Err("writer-not-keyed")),
     };
-    let message = crate::fleet::envelope_signature_message_in(
+    let message = fractal_auth::envelope_signature_message_in(
         authority.shard.as_deref(), &authority.fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
     );
     let Some(envelope_signature) = tx
@@ -397,7 +397,7 @@ fn releasable(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
-        .find(|(key, signature)| keys.contains(key) && crate::fleet::verify_signature(key, &message, signature))
+        .find(|(key, signature)| keys.contains(key) && fractal_auth::verify_signature(key, &message, signature))
     else {
         return Ok(Err("no-envelope-signature"));
     };
@@ -418,14 +418,14 @@ fn releasable(
         if claim.origin != envelope.writer || !crate::hash::claim_id_is_content_hash(claim)? {
             return Ok(Err("claim-not-its-hash"));
         }
-        let message = crate::fleet::keys::claim_signature_message(
+        let message = fractal_auth::claim_signature_message(
             &authority.fleet_id, &envelope.writer, envelope.sequence, &claim.id,
         );
         let signed = signatures
             .query_map([&claim.id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?
             .iter()
-            .any(|(key, signature)| keys.contains(key) && crate::fleet::verify_signature(key, &message, signature));
+            .any(|(key, signature)| keys.contains(key) && fractal_auth::verify_signature(key, &message, signature));
         if !signed {
             return Ok(Err(UNSIGNED_CLAIM));
         }
@@ -527,8 +527,8 @@ pub fn released_claim_signed(
     mut admits: impl FnMut(&str, u64, &str) -> Result<bool>,
 ) -> Result<bool> {
     for (writer, sequence, key, signature) in released_claim_signers(connection, claim_id, writer)? {
-        let message = crate::fleet::keys::claim_signature_message(fleet_id, &writer, sequence, claim_id);
-        if admits(&writer, sequence, &key)? && crate::fleet::verify_signature(&key, &message, &signature) {
+        let message = fractal_auth::claim_signature_message(fleet_id, &writer, sequence, claim_id);
+        if admits(&writer, sequence, &key)? && fractal_auth::verify_signature(&key, &message, &signature) {
             return Ok(true);
         }
     }
@@ -570,14 +570,14 @@ mod tests {
     /// newest is releasable at age zero.
     fn signed_alder(notes: usize) -> (Store, Authority) {
         let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
-        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         store.bind_fleet("sample-fleet").unwrap();
         store.pin_fleet_anchor(key.public()).unwrap();
         store.set_member_key(Some(key.clone())).unwrap();
         store.admit_fleet_anchor("sample-fleet", key.public(), "listening").unwrap();
         for n in 0..notes {
             store
-                .append_claim(&crate::claim::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: format!("note/{n}"),
                     kind: "example.note".into(),
                     actor: None,

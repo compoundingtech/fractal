@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::Connection;
+use fractal_wire::ClaimInput;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -21,7 +22,7 @@ use crate::suspension::*;
 
 #[test]
 fn a_move_survives_a_crash_after_placement_and_a_later_label_change() {
-    use crate::model::ClaimInput;
+    use fractal_wire::{ClaimInput};
     use serde_json::json;
     let store = Store::open_memory("amber").unwrap();
     let intent = crate::parse_intent("version 2\nagent \"sample\" { host \"amber\"; workspace \"/sample\"; harness \"omp\" { model \"canary\" } }", "amber").unwrap();

@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::answers::{AnswersCheck, AnswersReply, AnswersRequest};
 use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
-use crate::fleet::handshake::JoinRequest;
+use fractal_auth::{handshake::JoinRequest};
 use crate::replication::{
     ReceiveOptions, ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
     ReplicationReceiveResponse,

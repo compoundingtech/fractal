@@ -6,7 +6,8 @@ pub use crate::store::fleet_admission_tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::fleet_admission_tests_shared_seats::{FLEET, admit, admitted, append, key, node, note, sync};
 use crate::store::*;
-use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_signature};
+use fractal_auth::{MemberKey, envelope_signature_message, verify_signature};
+use crate::fleet::{MemberState};
 
 /// The anchor `a` founds the fleet and admits each named member.
 pub fn fleet(members: &[(&str, &Arc<MemberKey>)]) -> (Arc<MemberKey>, Store, Vec<Store>) {

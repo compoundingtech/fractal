@@ -6,17 +6,17 @@ description = "A replicated claims graph: the claim log, its canonical order and
 license = "MIT"
 
 [dependencies]
+fractal-auth = { path = "../fractal-auth" }
+fractal-wire = { path = "../fractal-wire" }
 fractal-storage-version = { path = "../fractal-storage-version" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 ciborium = "0.2"
-data-encoding = "2"
 flate2 = "1"
 getrandom = { version = "0.3", features = ["std"] }
 hex = "0.4"
-hmac = "0.12"
 hyper = { version = "1", features = ["client", "http1"] }
 libc = "0.2"
 opentelemetry = { version = "0.30", default-features = false, features = ["metrics", "trace"] }
@@ -46,11 +46,12 @@ sha2 = { version = "0.10", features = ["asm"] }
 [features]
 # Counters that tests of a runtime built on the graph read, such as the SQLite statements a
 # thread ran. Off in every non-test build.
-test-support = ["dep:tempfile"]
+test-support = ["fractal-auth/test-support", "dep:tempfile"]
 # Opt-in standalone transport benchmark; absent from production builds.
 transport-bench = []
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 smallclaims_self = { package = "smallclaims", path = ".", features = ["test-support"] }
 futures-util = "0.3"
 opentelemetry_sdk = { version = "0.30", features = ["testing"] }

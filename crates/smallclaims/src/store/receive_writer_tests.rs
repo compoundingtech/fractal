@@ -2,7 +2,7 @@
 use super::runtime::Plain;
 use super::*;
 use crate::claim::ReplicaEnvelopeSignature;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use crate::sqlite::WriterJob;
 use rusqlite::functions::FunctionFlags;
 use std::sync::mpsc;
@@ -349,7 +349,7 @@ fn preverified_receipt_stays_atomic_and_signature_retry_stays_idempotent() {
     let (key, _) = MemberKey::generate().unwrap();
     for envelope in &mut exchange.envelopes {
         envelope.member_key = Some(key.public().into());
-        envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(
+        envelope.signature = Some(key.sign(&fractal_auth::envelope_signature_message(
             FLEET,
             &envelope.writer,
             envelope.sequence,
@@ -357,7 +357,7 @@ fn preverified_receipt_stays_atomic_and_signature_retry_stays_idempotent() {
         )));
     }
     let wrong_fleet = &exchange.envelopes[1];
-    exchange.envelopes[1].signature = Some(key.sign(&crate::fleet::envelope_signature_message(
+    exchange.envelopes[1].signature = Some(key.sign(&fractal_auth::envelope_signature_message(
         "another-fleet",
         &wrong_fleet.writer,
         wrong_fleet.sequence,
@@ -405,7 +405,7 @@ fn preverified_receipt_stays_atomic_and_signature_retry_stays_idempotent() {
         sequence: unsigned.sequence,
         hash: unsigned.hash.clone(),
         member_key: key.public().into(),
-        signature: key.sign(&crate::fleet::envelope_signature_message(
+        signature: key.sign(&fractal_auth::envelope_signature_message(
             FLEET,
             &unsigned.writer,
             unsigned.sequence,
@@ -467,7 +467,7 @@ fn preverification_cannot_restore_a_checkpointed_payload_or_signature() {
     let mut exchange = page(&source, &target, 1);
     let (key, _) = MemberKey::generate().unwrap();
     let envelope = &mut exchange.envelopes[0];
-    let signature = key.sign(&crate::fleet::envelope_signature_message(
+    let signature = key.sign(&fractal_auth::envelope_signature_message(
         FLEET,
         &envelope.writer,
         envelope.sequence,
@@ -587,7 +587,7 @@ fn admission_rechecks_authority_when_a_foreground_change_overtakes_its_preparati
         sequence: envelope.sequence,
         hash: envelope.hash.clone(),
         member_key: key.public().into(),
-        signature: key.sign(&crate::fleet::envelope_signature_message(
+        signature: key.sign(&fractal_auth::envelope_signature_message(
             FLEET,
             &envelope.writer,
             envelope.sequence,
@@ -1237,7 +1237,7 @@ fn sealing_recovery_ignores_trimmed_sources_and_preserves_a_complete_cursor() {
 fn credential_loading_leaves_many_skipped_batches_for_resumable_history_activation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cedar.sqlite3");
-    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     {
         let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
         store.bind_fleet(FLEET).unwrap();

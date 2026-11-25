@@ -932,7 +932,7 @@ mod tests {
         let path = root.path().join("source.sqlite");
         let source = Store::open(&path, "issuer").unwrap();
         source.bind_fleet("observation-fixture-fleet").unwrap();
-        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         source.pin_fleet_anchor(key.public()).unwrap();
         source.set_member_key(Some(key.clone())).unwrap();
         source.admit_fleet_anchor("observation-fixture-fleet", key.public(), "listening").unwrap();

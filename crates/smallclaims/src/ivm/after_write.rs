@@ -9,7 +9,8 @@ use super::{
     Readiness, Views,
     events::{self, Boundary, ProviderIdentity, Publisher},
 };
-use crate::{ClaimInput, ClaimRecord, Store};
+use crate::{ ClaimRecord, Store};
+use fractal_wire::{ClaimInput};
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -42,7 +43,7 @@ pub enum WriteOutcome {
 
 /// Opt-in wrapper around the existing admitted Store append. No source replay or new write
 /// semantics. Production runtimes retain admission/idempotency and their own view adapters.
-pub fn write(store: &Store, input: &ClaimInput) -> std::result::Result<WriteOutcome, crate::Error> {
+pub fn write(store: &Store, input: &ClaimInput) -> std::result::Result<WriteOutcome, fractal_wire::Error> {
     let claim = store.append_claim(input)?;
     Ok(match committed_receipt(store, &claim) {
         Ok(receipt) => WriteOutcome::Committed { claim, receipt },

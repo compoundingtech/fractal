@@ -1672,7 +1672,7 @@ fn load_fixture_starts_the_shared_worker_and_steady_waits_for_completion() {
         let store = Store::open(&path, NODE).unwrap();
         for number in 0..65 {
             store
-                .append_claim(&fractal_daemon::model::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: format!("custom/test/migration-{number}"),
                     kind: "custom.test.recorded".into(),
                     actor: None,

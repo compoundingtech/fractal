@@ -939,7 +939,7 @@ fn a_trim_never_makes_a_write_wait_long() {
 fn signed_store_with_drops(origin: &str) -> (Store, DropPlan) {
     let store = Store::open_memory(origin).unwrap();
     store
-        .set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0))
+        .set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0))
         .unwrap();
     store.bind_fleet(FLEET).unwrap();
     write_diagnostics(&store, "daemon/alder", 5);
@@ -1118,7 +1118,7 @@ fn trimmed_and_untrimmed_nodes_still_agree_after_the_sweep() {
 fn a_resumed_trim_holding_a_young_signed_claim_is_set_aside_and_named() {
     use smallclaims::principal::FRESHNESS_FROM_UNIX_MS;
     let store = Store::open_memory("alder").unwrap();
-    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     store.bind_fleet(FLEET).unwrap();
     let at = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
     store.set_write_clock_at(at).unwrap();

@@ -20,17 +20,13 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use super::{
-    ACCEPTED_PEER_API_VERSIONS, Backend, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING,
-    EXCHANGE_PATH, FleetAuth, HEADER_SIGNATURE, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES,
-    PeerResponse, accepts_deflate, deflate, deflated, inflate,
-};
-use crate::fleet::transport::{
-    Fabric, FabricError, FabricErrorClass, FabricGrantRefusal, LocalTransports, Route,
-    bindable_tailnet_addresses, default_fabric_protocol, is_tailnet_address, local_addresses,
-    parse_route, resolve_tool, routes_from_endpoints, tailscale_addresses,
-};
-use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
+use fractal_auth::FleetAuth;
+const HEADER_SIGNATURE: &str = "x-st3-signature";
+use super::{ACCEPTED_PEER_API_VERSIONS, Backend, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING, EXCHANGE_PATH, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES, PeerResponse, accepts_deflate, deflate, deflated, inflate};
+use fractal_auth::{is_tailnet_address};
+use crate::fleet::transport::{Fabric, FabricError, FabricErrorClass, FabricGrantRefusal, LocalTransports, Route, bindable_tailnet_addresses, default_fabric_protocol, local_addresses, parse_route, resolve_tool, routes_from_endpoints, tailscale_addresses};
+use fractal_auth::{MemberKey, Sender};
+use crate::fleet::{Acceptance, FleetFile, FleetView, PeerConfig, Refusal};
 use crate::replication::{ReceiveOptions, ReplicationExchange, ReplicationInventory};
 use crate::replication_diagnostics::{FAILURE_DIAGNOSTICS, FailureDiagnostics, FailureKind};
 
@@ -3298,7 +3294,7 @@ fn signed_overload<B>(state: &PeerState<B>, request_digest: &str) -> Response {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairingAdmissionRequest {
-    request: crate::fleet::handshake::JoinRequest,
+    request: fractal_auth::handshake::JoinRequest,
     node_id: String,
     expected_fleet_id: String,
     expected_sponsor_key: String,
@@ -3312,7 +3308,7 @@ async fn receive_pairing_admission<B: Backend>(
         return StatusCode::BAD_REQUEST.into_response();
     };
     if admission.expected_fleet_id != state.auth.fleet_id()
-        || state.auth.member.as_ref().map(|key| key.public())
+        || state.auth.member_key()
             != Some(admission.expected_sponsor_key.as_str())
         || admission.request.node_id.as_deref() != Some(admission.node_id.as_str())
         || admission.node_id.len() != 64
@@ -3341,12 +3337,12 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
         )
             .into_response()
     };
-    let Ok(request) = serde_json::from_slice::<crate::fleet::handshake::JoinRequest>(&body) else {
+    let Ok(request) = serde_json::from_slice::<fractal_auth::handshake::JoinRequest>(&body) else {
         return refused();
     };
-    let Some(member) = state.auth.member.clone() else {
+    if state.auth.member_key().is_none() {
         return StatusCode::NOT_FOUND.into_response();
-    };
+    }
     let answer = match state.backend.redeem(&request).await {
         Ok(answer) => answer,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -3360,7 +3356,7 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
     let Some(token) = text("token").and_then(|token| hex::decode(token).ok()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let payload = crate::fleet::handshake::SealedJoin {
+    let payload = fractal_auth::handshake::SealedJoin {
         fleet_id: text("fleet_id").unwrap_or_else(|| state.auth.fleet_id().to_owned()),
         // A migrating node already holds the secret; it is never sent again.
         secret: (!request.migrate).then(|| state.auth.secret_hex()),
@@ -3376,7 +3372,7 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
             Vec::new()
         },
     };
-    match crate::fleet::handshake::seal_response(&request, &token, &state.node, &member, &payload) {
+    match state.auth.seal_join_response(&request, &token, &state.node, &payload) {
         Ok(response) => {
             // A test fault point: drop this one answer after the invite is bound, as a lost
             // response would.

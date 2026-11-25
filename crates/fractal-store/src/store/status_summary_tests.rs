@@ -8,7 +8,7 @@ const SEAT: &str = "agent/example/worker";
 
 fn observe(store: &Store, fields: serde_json::Value) {
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: SEAT.into(),
             kind: "runtime.observed".into(),
             actor: None,
@@ -112,7 +112,7 @@ fn activity_fixture(store: &Store, count: usize) {
         subject.clone(), store.selected_desired_token(subject).unwrap().into_iter().collect(),
     )).collect();
     store.apply(&intent, &expected, "activity-declare").unwrap();
-    store.append_claim(&crate::model::ClaimInput {
+    store.append_claim(&fractal_wire::ClaimInput {
         subject: SEAT.into(), kind: "workspace.observed".into(), actor: None,
         fields: serde_json::from_value(json!({"workspace":"/observed", "host":"runtime-host"})).unwrap(),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,

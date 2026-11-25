@@ -101,7 +101,7 @@ struct Running {
 }
 
 fn refusal(message: &str) -> anyhow::Error {
-    crate::error::Error::new("writer-budget-unsupported", message).into()
+    fractal_wire::Error::new("writer-budget-unsupported", message).into()
 }
 
 fn gcd(mut a: i32, mut b: i32) -> i32 {
@@ -246,7 +246,7 @@ impl WriterGuard<'_> {
                     || running.instructions.load(Ordering::Relaxed) >= budget.vm_steps
                 {
                     running.interrupted.store(true, Ordering::Relaxed);
-                    return Err(crate::error::Error::new(
+                    return Err(fractal_wire::Error::new(
                         "writer-budget-exhausted",
                         "managed transaction exceeded its budget before COMMIT",
                     )
@@ -297,13 +297,13 @@ impl WriterGuard<'_> {
                     .unwrap_or_else(PoisonError::into_inner)
                     .take()
                 {
-                    return Err(error.context(crate::error::Error::new(
+                    return Err(error.context(fractal_wire::Error::new(
                         "writer-handler-panicked",
                         format!("owner progress callback panicked: {cause}"),
                     )));
                 }
                 if recorded.interrupted {
-                    return Err(error.context(crate::error::Error::new(
+                    return Err(error.context(fractal_wire::Error::new(
                         "writer-budget-exhausted",
                         "managed transaction interrupted before a successful COMMIT",
                     )));

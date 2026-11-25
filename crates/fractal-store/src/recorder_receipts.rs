@@ -13,7 +13,8 @@ use serde_json::Value;
 use notify::Watcher as _;
 use tokio::sync::{Notify, watch};
 
-use crate::{model::ClaimInput, recorder::Receipt, store::Store};
+use crate::{ recorder::Receipt, store::Store};
+use fractal_wire::{ClaimInput};
 
 /// Watches the spool, with bounded exponential backoff scans as a fallback.
 pub async fn run(

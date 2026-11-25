@@ -15,7 +15,7 @@ fn older_build_store(path: &std::path::Path) {
     let store = Store::open(path, "alder").unwrap();
     store.bind_fleet("sample-fleet").unwrap();
     // Only a member with a key keeps signed envelopes to convert.
-    store.set_member_key(Some(Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0))).unwrap();
+    store.set_member_key(Some(Arc::new(fractal_auth::MemberKey::generate().unwrap().0))).unwrap();
     for n in 0..1_500 {
         store
             .append_as_older_build_for_test(&ClaimInput {

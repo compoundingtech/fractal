@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::{Json, Router, extract::State, routing::post};
 use serde_json::{Value, json};
-use fractal_daemon::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 
 #[derive(Clone)]

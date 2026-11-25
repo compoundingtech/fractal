@@ -777,7 +777,7 @@ pub async fn shard_replication_wake(
 #[cfg(feature = "test-support")]
 pub async fn test_shard_append(
     State(state): State<AppState>,
-    Json(input): Json<smallclaims::claim::ClaimInput>,
+    Json(input): Json<fractal_wire::ClaimInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
     let (claim, appended) = blocking_action(move || store.append_claim_outcome(&input)).await?;
@@ -795,7 +795,7 @@ pub async fn test_shard_append(
 #[cfg(feature = "test-support")]
 pub async fn test_shard_copy(
     State(state): State<AppState>,
-    Json(input): Json<smallclaims::claim::ClaimInput>,
+    Json(input): Json<fractal_wire::ClaimInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
     let (claim, _) = blocking_action(move || crate::store::messages_shard::append_replicated_copy(&store, &input)).await?;

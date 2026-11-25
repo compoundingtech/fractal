@@ -148,7 +148,8 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{claim::ClaimInput, store::runtime::Plain};
+    use crate::{ store::runtime::Plain};
+    use fractal_wire::{ClaimInput};
     use std::collections::BTreeMap;
 
     fn store() -> Store {

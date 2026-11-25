@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::otlp::*;
 use crate::store::Store;
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

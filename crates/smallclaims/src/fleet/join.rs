@@ -14,15 +14,15 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use super::code::{CodeEndpoint, JoinCode, fingerprint};
+use fractal_auth::{code::{CodeEndpoint, JoinCode, fingerprint}};
 use super::file::{FleetFile, FleetMode};
-use super::handshake::{JoinRequest, JoinResponse, Joiner, SealedJoin, WriterHead, verify_response};
-use super::keys::MemberKey;
+use fractal_auth::{handshake::{JoinRequest, JoinResponse, Joiner, SealedJoin, WriterHead, verify_response}};
+use fractal_auth::{MemberKey};
 use super::transport::{
     Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_fabric_adapter,
     resolve_tool, tailscale_addresses,
 };
-use crate::error::Error;
+use fractal_wire::Error;
 use crate::store::{AdmittedStore, Runtime, Store, valid_fleet_node_name};
 
 pub const DEFAULT_PORT: u16 = 31313;
@@ -473,7 +473,7 @@ fn load_pairing_recovery(state_dir: &Path, code: &JoinCode, name: &str, key: &Me
             && recovery.resume.sponsor_key == recovery.resume.response.sponsor_key,
         "authenticated pairing recovery belongs to another code, name, or member key"
     );
-    super::handshake::verify_request(&recovery.resume.request, &code.token)
+    fractal_auth::handshake::verify_request(&recovery.resume.request, &code.token)
         .map_err(|_| anyhow::anyhow!("authenticated pairing recovery request is invalid"))?;
     verify_response(code, &recovery.resume.request, &recovery.resume.response)?;
     Ok(Some(recovery))
@@ -911,7 +911,7 @@ pub fn migrate_anchor(options: MigrateAnchorOptions<'_>) -> Result<Founded> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet::code::PairingData;
+    use fractal_auth::{code::PairingData};
     use crate::sync::Backend as _;
 
     #[test]
@@ -989,7 +989,7 @@ mod tests {
             let app = axum::Router::new().route("/v1/fleet/join", axum::routing::post({
                 let waiting = waiting.clone();
                 let release = release.clone();
-                move |axum::Json(request): axum::Json<super::super::handshake::JoinRequest>| {
+                move |axum::Json(request): axum::Json<fractal_auth::handshake::JoinRequest>| {
                     let backend = backend.clone();
                     let key = key.clone();
                     let secret = secret.clone();
@@ -1009,7 +1009,7 @@ mod tests {
                             sponsor_node_id: answer["sponsor_node_id"].as_str().map(str::to_owned),
                             sponsor_endpoints: answer["sponsor_endpoints"].as_array().unwrap().clone(),
                         };
-                        let response = super::super::handshake::seal_response(
+                        let response = fractal_auth::handshake::seal_response(
                             &request, &hex::decode(answer["token"].as_str().unwrap()).unwrap(),
                             "sponsor", &key, &payload,
                         ).unwrap();
@@ -1094,7 +1094,7 @@ mod tests {
         let backend = crate::sync::Local(store.clone());
         let secret = fs::read_to_string(sponsor_dir.join("fleet/secret")).unwrap();
         let app = axum::Router::new().route("/v1/fleet/join", axum::routing::post(
-            move |axum::Json(request): axum::Json<super::super::handshake::JoinRequest>| {
+            move |axum::Json(request): axum::Json<fractal_auth::handshake::JoinRequest>| {
                 let backend = backend.clone();
                 let key = sponsor_key.clone();
                 let secret = secret.clone();
@@ -1112,7 +1112,7 @@ mod tests {
                         sponsor_node_id: answer["sponsor_node_id"].as_str().map(str::to_owned),
                         sponsor_endpoints: answer["sponsor_endpoints"].as_array().unwrap().clone(),
                     };
-                    axum::Json(super::super::handshake::seal_response(
+                    axum::Json(fractal_auth::handshake::seal_response(
                         &request, &hex::decode(answer["token"].as_str().unwrap()).unwrap(),
                         "sponsor", &key, &payload,
                     ).unwrap())

@@ -4,7 +4,8 @@ use fractal_kernel::model::PersonStepResponse;
 use fractal_runtime::native_attach::{self, AttachWitness, ProofListener};
 use fractal_store::store::native_attach::{Candidate, Preparation};
 use serde_json::json;
-use smallclaims::claim::{ClaimInput, ClaimRecord};
+use smallclaims::claim::{ ClaimRecord};
+use fractal_wire::{ClaimInput};
 use std::{fs::{self, File}, path::PathBuf, time::Duration};
 
 const PERSON: &str = "person/operator";

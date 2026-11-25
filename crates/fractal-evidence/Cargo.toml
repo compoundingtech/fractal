@@ -10,6 +10,7 @@ license = "MIT"
 test-support = ["fractal-attention/test-support"]
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
 fractal-attention = { path = "../fractal-attention" }
 anyhow = "1"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }

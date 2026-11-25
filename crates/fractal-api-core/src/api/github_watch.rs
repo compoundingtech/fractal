@@ -898,7 +898,7 @@ mod tests {
             &crate::github_watch::WatchEvent::Checks(normalized["required_checks"].clone()),
             "legacy-observation", None,
         ).unwrap();
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: legacy_subject.clone(), kind: "message.sent".into(), actor: None,
             fields: serde_json::from_value(json!({
                 "from":"daemon/watch-test", "to":agent, "status":"sent",

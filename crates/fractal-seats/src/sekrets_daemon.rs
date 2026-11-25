@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use rusqlite::OptionalExtension as _;
 use crate::sekrets::identity::{self, STATEMENT_VERSION, Statement};
 use crate::sekrets::protocol::Attestation;
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 use crate::store::Store;
 pub use fractal_missions::sekrets_daemon::*;
 
@@ -143,7 +143,7 @@ pub fn claim_for(
     node: &str,
     person: &str,
     entry: &crate::sekrets::store::LogEntry,
-) -> Option<smallclaims::ClaimInput> {
+) -> Option<fractal_wire::ClaimInput> {
     use serde_json::{Value, json};
     if entry.caller_person.as_deref() != Some(person) {
         return None;
@@ -195,7 +195,7 @@ pub fn claim_for(
         }
         _ => return None,
     };
-    Some(smallclaims::ClaimInput {
+    Some(fractal_wire::ClaimInput {
         subject,
         kind: kind.into(),
         actor: None,
@@ -284,7 +284,7 @@ fn import_entries(
     person: &str,
     cursor_path: &Path,
     cursor: &mut i64,
-    mut append: impl FnMut(&smallclaims::ClaimInput) -> Result<(), FractalError>,
+    mut append: impl FnMut(&fractal_wire::ClaimInput) -> Result<(), FractalError>,
 ) -> anyhow::Result<()> {
     let Some(last) = entries.last().map(|entry| entry.seq) else {
         return Ok(());

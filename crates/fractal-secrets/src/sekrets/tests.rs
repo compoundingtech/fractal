@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use smallclaims::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 
 use super::client::{Connection, Streams};
 use super::gateway::{Gateway, GatewayConfig, Kernel};

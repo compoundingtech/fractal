@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
-use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest};
+use fractal_daemon::model::{ IntentInput, MissionRunRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use fractal_client::{ActionResult, Client, ClientError, Envelope, ErrorCode, Fence};
 use tokio::sync::{Notify, watch};
@@ -35,7 +36,7 @@ async fn cli_native_roll_receipts_and_intent_proof_survive_restart() {
         return;
     }
     let mut daemon = Daemon::new().await;
-    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     daemon.store().bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
     daemon.store().pin_fleet_anchor(key.public()).unwrap();
     daemon.store().set_member_key(Some(key.clone())).unwrap();

@@ -1,8 +1,11 @@
-//! Real loopback websocket and SQLite boundaries. Native execution coverage lives with the
-//! production Reconciler adapter, rather than replacing it with a fake executor in this crate.
+// Real loopback websocket and SQLite boundaries. Native execution coverage lives with the
+// production Reconciler adapter, rather than replacing it with a fake executor in this crate.
 use super::*;
 use super::super::journal::{CommandDraft, Limits, Operation, OperationKind, Scope};
-use smallclaims::fleet::MemberKey;
+use fractal_auth::MemberKey;
+
+/// Supply real graph effects at the Store integration boundary; no Store dependency here.
+pub type EffectsFactory = fn(&std::path::Path, &str) -> Arc<dyn RunEffects>;
 
 struct Fixture {
     _root: tempfile::TempDir,
@@ -16,7 +19,7 @@ struct Fixture {
     server: tokio::task::JoinHandle<()>,
 }
 impl Fixture {
-    async fn new() -> Self {
+    async fn new(effects: EffectsFactory) -> Self {
         let root=tempfile::tempdir().unwrap();
         let home_key=Arc::new(MemberKey::generate().unwrap().0);
         let seat_key=Arc::new(MemberKey::generate().unwrap().0);
@@ -26,8 +29,7 @@ impl Fixture {
         let home_journal=Journal::open(&root.path().join("home.sqlite3"),Limits::default()).unwrap();
         let seat_journal=Journal::open(&root.path().join("seat.sqlite3"),Limits::default()).unwrap();
         home_journal.install_epoch(&selected).unwrap(); seat_journal.install_epoch(&selected).unwrap();
-        let graph=Arc::new(crate::store::Store::open(&root.path().join("graph"),selected.home.clone()).unwrap());
-        let home=Home::new(vec![home_journal.clone()],home_auth,selected.home.clone(),Arc::new(StoreRunEffects::new(graph))).unwrap();
+        let home=Home::new(vec![home_journal.clone()],home_auth,selected.home.clone(),effects(&root.path().join("graph"),&selected.home)).unwrap();
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint=format!("ws://{}{LIGHT_NODE_SESSION_PATH}",listener.local_addr().unwrap());
         let app=home.router();
@@ -52,7 +54,7 @@ impl Fixture {
                 Ok((socket,response))=> {
                     let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch={}",self.selected.epoch);
                     let channel=authenticate_response(self.seat_auth.clone(),&self.selected,&path,&digest,response.headers()).unwrap();
-                    return AuthenticatedSocket {socket,channel};
+                    return AuthenticatedSocket {socket,channel,observer:None};
                 }
                 Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status()==StatusCode::CONFLICT=> {
                     // Reconnect only: the old socket must release its exclusive seat lease.
@@ -67,8 +69,8 @@ impl Fixture {
         let Frame::Resume { version,receipt_ack,authority_ack,capabilities:offered }=next(socket).await else { panic!("expected resume") };
         check_capabilities(version,&offered).unwrap(); (receipt_ack,authority_ack)
     }
-    fn binding(&self)->crate::store::run_credentials::ExecutionBinding {
-        crate::store::run_credentials::ExecutionBinding {version:VERSION,home:self.selected.home.clone(),host:self.selected.host.clone(),epoch:1,subject:self.selected.grant.subjects[0].clone(),runtime:"runtime/example".into(),incarnation:"native-birth/example".into(),authorization_revision:"authorization/example".into(),run:None}
+    fn binding(&self)->crate::authority::ExecutionBinding {
+        crate::authority::ExecutionBinding {version:VERSION,home:self.selected.home.clone(),host:self.selected.host.clone(),epoch:1,subject:self.selected.grant.subjects[0].clone(),runtime:"runtime/example".into(),incarnation:"native-birth/example".into(),authorization_revision:"authorization/example".into(),run:None}
     }
     async fn stop(self) {
         self.home.shutdown(); self.server.abort();
@@ -79,9 +81,25 @@ async fn next(socket:&mut ClientSocket)->Frame {
     tokio::time::timeout(Duration::from_secs(5),client_next(socket)).await.unwrap().unwrap().expect("session closed before expected frame")
 }
 
-#[tokio::test]
-async fn pinned_signers_are_required_even_with_the_shared_fleet_secret() {
-    let f=Fixture::new().await;
+pub async fn session_observer_counts_actual_authenticated_io_only(effects: EffectsFactory) {
+    #[derive(Default)]
+    struct Events(std::sync::Mutex<Vec<SessionEvent>>);
+    impl SessionObserver for Events {
+        fn record(&self, event: SessionEvent) { self.0.lock().unwrap().push(event); }
+    }
+    let f = Fixture::new(effects).await;
+    let events = Arc::new(Events::default());
+    let mut socket = f.connect().await;
+    socket.observer = Some(events.clone());
+    assert!(events.0.lock().unwrap().is_empty());
+    assert_eq!(f.hello(&mut socket).await, (0, 0));
+    assert_eq!(*events.0.lock().unwrap(), [SessionEvent::Send, SessionEvent::Receive]);
+    socket.socket.close(None).await.unwrap();
+    f.stop().await;
+}
+
+pub async fn pinned_signers_are_required_even_with_the_shared_fleet_secret(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await;
     let wrong=FleetAuth::test("light-session-tests",&[7;32]).with_member_key(Some(Arc::new(MemberKey::generate().unwrap().0)));
     let unsigned=FleetAuth::test("light-session-tests",&[7;32]);
     for auth in [&wrong,&unsigned] {
@@ -97,9 +115,8 @@ async fn pinned_signers_are_required_even_with_the_shared_fleet_secret() {
     socket.socket.close(None).await.unwrap(); f.stop().await;
 }
 
-#[tokio::test]
-async fn reconnect_recovers_lost_receipt_ack_without_readmitting_or_reidentifying_work() {
-    let f=Fixture::new().await;
+pub async fn reconnect_recovers_lost_receipt_ack_without_readmitting_or_reidentifying_work(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await;
     let binding=f.binding(); f.seat_journal.offer_execution(&binding).unwrap();
     let command=f.home_journal.enqueue(CommandDraft {decision_id:"decision/reconnect".into(),binding,operation:Operation::Observe}).unwrap();
     let mut socket=f.connect().await; let (receipts,authority)=f.hello(&mut socket).await;
@@ -141,10 +158,9 @@ async fn reconnect_recovers_lost_receipt_ack_without_readmitting_or_reidentifyin
     socket.socket.close(None).await.unwrap(); f.stop().await;
 }
 
-#[tokio::test]
-async fn unknown_versions_and_stale_home_epochs_fail_before_session_admission() {
+pub async fn unknown_versions_and_stale_home_epochs_fail_before_session_admission(effects: EffectsFactory) {
     for bad_version in [true,false] {
-        let f=Fixture::new().await; let mut socket=f.connect().await; let mut selection=f.selected.clone();
+        let f=Fixture::new(effects).await; let mut socket=f.connect().await; let mut selection=f.selected.clone();
         if !bad_version {selection.epoch+=1;}
         client_send(&mut socket,Frame::Hello {version:if bad_version {VERSION+1}else{VERSION},selection,capabilities:capabilities()}).await.unwrap();
         let result=tokio::time::timeout(Duration::from_secs(5),client_next(&mut socket)).await.unwrap();
@@ -155,16 +171,14 @@ async fn unknown_versions_and_stale_home_epochs_fail_before_session_admission() 
     }
 }
 
-#[test]
-fn protocol_frames_are_bounded_and_unknown_shapes_are_not_accepted() {
+pub fn protocol_frames_are_bounded_and_unknown_shapes_are_not_accepted() {
     assert!(serde_json::from_slice::<Frame>(br#"{"type":"drained","unknown":true}"#).is_err());
     assert!(check_capabilities(VERSION+1,&capabilities()).is_err());
     assert!(check_capabilities(VERSION,&[]).is_err());
 }
 
-#[tokio::test]
-async fn paired_epoch_rollover_delivers_terminal_custody_before_retired_only_resume() {
-    let f=Fixture::new().await;
+pub async fn paired_epoch_rollover_delivers_terminal_custody_before_retired_only_resume(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await;
     let binding=f.binding(); f.seat_journal.offer_execution(&binding).unwrap();
     let command=f.home_journal.enqueue(CommandDraft {decision_id:"decision/rollover".into(),binding,operation:Operation::Observe}).unwrap();
     let mut successor=f.selected.clone(); successor.epoch+=1;
@@ -235,10 +249,9 @@ async fn paired_epoch_rollover_delivers_terminal_custody_before_retired_only_res
     f.stop().await;
 }
 
-#[tokio::test]
-async fn requester_retains_original_receipt_for_freshly_signed_retries_across_restart() {
-    use crate::store::run_credentials::{RunBinding,assertions::{RequestAssertion,RequestIdentity}};
-    let f=Fixture::new().await;
+pub async fn requester_retains_original_receipt_for_freshly_signed_retries_across_restart(effects: EffectsFactory) {
+    use crate::authority::{RunBinding,assertions::{RequestAssertion,RequestIdentity}};
+    let f=Fixture::new(effects).await;
     let mut binding=f.binding();
     binding.run=Some(RunBinding {run:"mission-run/example".into(),step_run:"mission-step-run/example".into(),attempt:1});
     f.seat_journal.offer_execution(&binding).unwrap();
@@ -247,15 +260,14 @@ async fn requester_retains_original_receipt_for_freshly_signed_retries_across_re
     let through=f.seat_journal.pending_authority().unwrap().last().unwrap().sequence;
     f.seat_journal.acknowledge_authority(through).unwrap();
     let secret=f.seat_journal.activate_and_issue(&binding,10_000,100).unwrap();
-    let claim=crate::model::ClaimInput {subject:binding.subject.clone(),kind:"note".into(),actor:None,fields:Default::default(),evidence:vec![],expected_subject:None,idempotency_key:Some("request/example".into())};
+    let claim=fractal_wire::ClaimInput {subject:binding.subject.clone(),kind:"note".into(),actor:None,fields:Default::default(),evidence:vec![],expected_subject:None,idempotency_key:Some("request/example".into())};
     let identity=RequestIdentity::new("request/example".into(),"POST".into(),"/v1/claims".into(),&serde_json::to_vec(&claim).unwrap());
     let sign=|now|f.seat_journal.with_authority(|connection|Ok(RequestAssertion::sign_local(connection,&secret,identity.clone(),&f.seat_key,now,1000)?)).unwrap();
     let request=RunRequest {assertion:sign(100),claim:claim.clone()};
     let retry=RunRequest {assertion:sign(200),claim};
     assert_ne!(request.assertion.signature,retry.assertion.signature);
     f.seat_journal.enqueue_run_request(&request).unwrap();
-    let graph=Arc::new(crate::store::Store::open(&f._root.path().join("requester-graph"),f.selected.home.clone()).unwrap());
-    let original=StoreRunEffects::new(graph).execute(/* sqlite-large-value: allow-for-now lv-h40707d5ec849 owner=fractal_peer::light_node::session_tests TODO=trace-statement-and-value-representation */ &request).unwrap();
+    let original=effects(&f._root.path().join("requester-graph"),&f.selected.home).execute(/* sqlite-large-value: allow-for-now lv-h2b3b02477b75 owner=fractal_light_node_core::session_tests TODO=trace-statement-and-value-representation */ &request).unwrap();
     assert!(original.result.is_err(),"the actual graph must refuse an expired assertion");
     f.seat_journal.accept_run_result(&original).unwrap();
     let requester=Requester {journal:f.seat_journal.clone()};
@@ -285,9 +297,8 @@ async fn assert_raw_closed(socket:&mut RawClientSocket) {
     assert!(matches!(frame,None | Some(Ok(ClientMessage::Close(_))) | Some(Err(_))),"unauthenticated application frame must close the channel");
 }
 
-#[tokio::test]
-async fn copied_pinned_key_without_member_proof_is_refused_at_both_handshake_verifiers() {
-    let f=Fixture::new().await;
+pub async fn copied_pinned_key_without_member_proof_is_refused_at_both_handshake_verifiers(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await;
     for invalid in [false,true] {
         let mut request=f.request(&f.seat_auth,&f.selected.host);
         request.headers_mut().remove("x-st3-member-signature"); request.headers_mut().remove("x-fractal-member-signature");
@@ -308,15 +319,14 @@ async fn copied_pinned_key_without_member_proof_is_refused_at_both_handshake_ver
     f.stop().await;
 }
 
-#[tokio::test]
-async fn captured_upgrade_and_frame_cannot_authorize_a_new_socket_or_modified_payload() {
-    let f=Fixture::new().await; let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch=1");
+pub async fn captured_upgrade_and_frame_cannot_authorize_a_new_socket_or_modified_payload(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await; let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch=1");
     let request=f.request(&f.seat_auth,&f.selected.host); let captured=request.headers().clone();
     let digest=FleetAuth::body_digest(websocket_key(&captured).unwrap().as_bytes());
     let (socket,response)=tokio_tungstenite::connect_async(request).await.unwrap();
     let old_nonce=response.headers()[SESSION_NONCE_HEADER].clone();
     let channel=authenticate_response(f.seat_auth.clone(),&f.selected,&path,&digest,response.headers()).unwrap();
-    let mut first=AuthenticatedSocket {socket,channel};
+    let mut first=AuthenticatedSocket {socket,channel,observer:None};
     let hello=first.channel.encode(Frame::Hello {version:VERSION,selection:f.selected.clone(),capabilities:capabilities()}).unwrap();
     first.socket.send(ClientMessage::Text(hello.clone().into())).await.unwrap();
     assert!(matches!(next(&mut first).await,Frame::Resume {..}));
@@ -329,7 +339,7 @@ async fn captured_upgrade_and_frame_cannot_authorize_a_new_socket_or_modified_pa
     assert_raw_closed(&mut replay).await; drop(replay);
     let (socket,response)=replay_upgrade(&f,&captured).await;
     let channel=authenticate_response(f.seat_auth.clone(),&f.selected,&path,&digest,response.headers()).unwrap();
-    let mut tampered=AuthenticatedSocket {socket,channel};
+    let mut tampered=AuthenticatedSocket {socket,channel,observer:None};
     let signed=tampered.channel.encode(Frame::Hello {version:VERSION,selection:f.selected.clone(),capabilities:capabilities()}).unwrap();
     let mut modified:serde_json::Value=serde_json::from_str(&signed).unwrap(); modified["frame"]["version"]=serde_json::json!(VERSION+1);
     tampered.socket.send(ClientMessage::Text(serde_json::to_string(&modified).unwrap().into())).await.unwrap();
@@ -346,9 +356,8 @@ async fn captured_upgrade_and_frame_cannot_authorize_a_new_socket_or_modified_pa
     f.stop().await;
 }
 
-#[tokio::test]
-async fn live_channel_rejects_duplicate_signed_sequence_and_unsigned_authority() {
-    let f=Fixture::new().await;
+pub async fn live_channel_rejects_duplicate_signed_sequence_and_unsigned_authority(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await;
     let mut socket=f.connect().await; f.hello(&mut socket).await;
     let drained=socket.channel.encode(Frame::Drained {}).unwrap();
     socket.socket.send(ClientMessage::Text(drained.clone().into())).await.unwrap();
@@ -361,9 +370,8 @@ async fn live_channel_rejects_duplicate_signed_sequence_and_unsigned_authority()
     f.stop().await;
 }
 
-#[tokio::test]
-async fn channel_proofs_bind_direction_nonce_request_and_frame_payload() {
-    let f=Fixture::new().await; let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch=1");
+pub async fn channel_proofs_bind_direction_nonce_request_and_frame_payload(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await; let path=format!("{LIGHT_NODE_SESSION_PATH}?epoch=1");
     let digest=FleetAuth::body_digest(b"first-request");
     let nonce=uuid::Uuid::new_v4().simple().to_string();
     let mut seat=Channel::new(f.seat_auth.clone(),&f.selected,true,&path,&digest,&nonce).unwrap();
@@ -384,9 +392,8 @@ async fn channel_proofs_bind_direction_nonce_request_and_frame_payload() {
     f.stop().await;
 }
 
-#[tokio::test]
-async fn fleet_secret_and_copied_member_key_cannot_forge_a_live_authority_frame() {
-    let f=Fixture::new().await;
+pub async fn fleet_secret_and_copied_member_key_cannot_forge_a_live_authority_frame(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await;
     for invalid in [false,true] {
         let mut socket=f.connect().await; f.hello(&mut socket).await;
         let mut attacker=Channel {
@@ -405,9 +412,8 @@ async fn fleet_secret_and_copied_member_key_cannot_forge_a_live_authority_frame(
     f.stop().await;
 }
 
-#[tokio::test]
-async fn replayed_http_proof_without_fresh_channel_proof_cannot_reserve_the_seat() {
-    let f=Fixture::new().await;
+pub async fn replayed_http_proof_without_fresh_channel_proof_cannot_reserve_the_seat(effects: EffectsFactory) {
+    let f=Fixture::new(effects).await;
     let captured=f.request(&f.seat_auth,&f.selected.host);
     let (unproven,_)=tokio_tungstenite::connect_async(captured).await.unwrap();
     let mut legitimate=f.connect().await;
@@ -415,10 +421,9 @@ async fn replayed_http_proof_without_fresh_channel_proof_cannot_reserve_the_seat
     drop(unproven); f.stop().await;
 }
 
-#[tokio::test]
-async fn finalization_retry_requires_real_progress_and_never_retries_unknown_custody() {
+pub async fn finalization_retry_requires_real_progress_and_never_retries_unknown_custody(effects: EffectsFactory) {
     use futures_util::FutureExt;
-    let f=Fixture::new().await;
+    let f=Fixture::new(effects).await;
     let binding=f.binding(); f.seat_journal.offer_execution(&binding).unwrap();
     let command=f.home_journal.enqueue(CommandDraft {decision_id:"decision/live-finalization".into(),binding,operation:Operation::Stop}).unwrap();
     f.seat_journal.admit(&command).unwrap();

@@ -19,11 +19,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
-use crate::claim::{
-    ClaimInput, ClaimRecord, DocumentVersion, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,
-    ReplicaEnvelopePayload,
-};
-use crate::error::{Error as FractalError, internal};
+use crate::claim::{ ClaimRecord, DocumentVersion, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,
+    ReplicaEnvelopePayload};
+use fractal_wire::{ClaimInput, Error as FractalError};
+use crate::error::internal;
 use crate::hash::{
     batch_header_hash, canonical_hash, canonical_json_text, canonical_json_value, claim_hash,
     claim_id_is_content_hash, replica_envelope_hash, replica_record_ref,
@@ -967,7 +966,7 @@ pub struct Store {
     /// that changes later can decide envelopes the shard held. See `fleet_moved_since_admission`.
     admitted_fleet_generation: AtomicI64,
     /// This node's fleet member key. Set, it signs every envelope of this node's writer.
-    pub member_key: std::sync::RwLock<Option<Arc<crate::fleet::MemberKey>>>,
+    pub member_key: std::sync::RwLock<Option<Arc<fractal_auth::MemberKey>>>,
     /// The keys this node signs claims with. See `principals`.
     pub keyring: crate::principal::Keyring,
     /// Held while this node mints a key for a person or an agent.
@@ -2767,7 +2766,7 @@ pub struct FleetAdmissionResidue {
 impl Store {
     /// Set this node's member key. Every envelope of this node's writer gets its signature,
     /// including envelopes written before the key existed. Returns the number signed now.
-    pub fn set_member_key(&self, key: Option<Arc<crate::fleet::MemberKey>>) -> Result<usize> {
+    pub fn set_member_key(&self, key: Option<Arc<fractal_auth::MemberKey>>) -> Result<usize> {
         if key.is_none() {
             *self
                 .member_key
@@ -2796,7 +2795,7 @@ impl Store {
 
     /// Restore signing credentials before writes, without scanning retained history. Daemon
     /// startup completes history activation after its API listeners bind.
-    pub fn load_member_key(&self, key: Option<Arc<crate::fleet::MemberKey>>) -> Result<()> {
+    pub fn load_member_key(&self, key: Option<Arc<fractal_auth::MemberKey>>) -> Result<()> {
         if let Some(key) = &key {
             self.set_node_key(key.clone())?;
         }
@@ -2862,7 +2861,7 @@ impl Store {
                     (
                         *sequence,
                         hash,
-                        key.sign(&crate::fleet::envelope_signature_message_in(
+                        key.sign(&fractal_auth::envelope_signature_message_in(
                             shard.as_deref(),
                             &fleet_id,
                             &self.origin,
@@ -3172,7 +3171,7 @@ impl Store {
         let shard = fleet_meta(transaction, "shard_id")?;
         let now = now_ms().to_string();
         for (sequence, envelope_hash) in &unsigned {
-            let signature = key.sign(&crate::fleet::envelope_signature_message_in(
+            let signature = key.sign(&fractal_auth::envelope_signature_message_in(
                 shard.as_deref(),
                 &fleet_id,
                 &self.origin,
@@ -4026,14 +4025,14 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
         member_key: &'a str,
         signature: &'a str,
     ) -> Option<Self> {
-        let message = crate::fleet::envelope_signature_message_in(
+        let message = fractal_auth::envelope_signature_message_in(
             shard,
             fleet_id,
             writer,
             sequence,
             envelope_hash,
         );
-        crate::fleet::verify_signature(member_key, &message, signature).then_some(Self {
+        fractal_auth::verify_signature(member_key, &message, signature).then_some(Self {
             writer,
             sequence,
             envelope_hash,
@@ -4531,9 +4530,9 @@ impl Store {
     /// Decide one join request against the invites this node sponsors.
     pub fn redeem_fleet_invite(
         &self,
-        request: &crate::fleet::handshake::JoinRequest,
+        request: &fractal_auth::handshake::JoinRequest,
     ) -> Result<FleetRedemption> {
-        use crate::fleet::handshake::{RequestFault, verify_request};
+        use fractal_auth::{handshake::{RequestFault, verify_request}};
         if !self.has_open_fleet_invites()? {
             return Ok(FleetRedemption::Closed);
         }
@@ -4758,7 +4757,7 @@ impl Store {
 
     fn append_fleet_invite_redemption(
         &self,
-        request: &crate::fleet::handshake::JoinRequest,
+        request: &fractal_auth::handshake::JoinRequest,
     ) -> Result<()> {
         self.append_claim(&ClaimInput {
             subject: format!("fleet-invite/{}", request.invite),
@@ -4777,7 +4776,7 @@ impl Store {
 
     pub fn append_fleet_admission(
         &self,
-        request: &crate::fleet::handshake::JoinRequest,
+        request: &fractal_auth::handshake::JoinRequest,
         migrate: bool,
         writer_floor: Option<u64>,
         created_by: Option<&str>,

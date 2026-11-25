@@ -66,7 +66,7 @@ fn launch_input_change_evaluates_only_its_declaration() {
     });
     let mut intent = parse_intent(&source, "node").unwrap();
     for subject in intent.subjects.values_mut() {
-        subject.member.as_mut().unwrap().lifecycle = crate::model::MemberLifecycle::AdoptOnly;
+        subject.member.as_mut().unwrap().lifecycle = fractal_light_node_core::custody::MemberLifecycle::AdoptOnly;
     }
     store.apply_internal(&intent, "scoped-launch-inputs").unwrap();
     let global = Arc::new(Notify::new());
@@ -248,7 +248,7 @@ agent "selected" {{
 "#, workspace = root.path().display().to_string());
         let mut intent = parse_intent(&source, "node").unwrap();
         for subject in intent.subjects.values_mut() {
-            subject.member.as_mut().unwrap().lifecycle = crate::model::MemberLifecycle::AdoptOnly;
+            subject.member.as_mut().unwrap().lifecycle = fractal_light_node_core::custody::MemberLifecycle::AdoptOnly;
         }
         let stale = intent.subjects.values_mut()
             .find(|subject| subject.subject != "agent/node.selected").unwrap();

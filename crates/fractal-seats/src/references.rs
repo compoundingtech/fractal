@@ -3,9 +3,9 @@
 use crate::SeatsStoreCore;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::model::{
-    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, FractalError, UsedMissionSpec,
-    WorkSelector,
-};
+    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, UsedMissionSpec,
+    WorkSelector};
+use fractal_wire::{Error as FractalError};
 pub use fractal_missions::references::*;
 pub use fractal_missions::references::{Graph, Scope, graph, publication};
 

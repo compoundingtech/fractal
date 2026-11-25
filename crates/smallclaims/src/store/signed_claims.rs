@@ -423,10 +423,10 @@ fn verify(
         crate::fleet::Window::Legacy => return Err("its writer has no key for this sequence".into()),
         crate::fleet::Window::Fenced => return Err("no incarnation of its writer holds this sequence".into()),
     };
-    let message = crate::fleet::envelope_signature_message_in(
+    let message = fractal_auth::envelope_signature_message_in(
         shard, fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
     );
-    if !keys.contains(&envelope.member_key) || !crate::fleet::verify_signature(&envelope.member_key, &message, &envelope.signature) {
+    if !keys.contains(&envelope.member_key) || !fractal_auth::verify_signature(&envelope.member_key, &message, &envelope.signature) {
         return Err("its envelope signature is not by a key membership admits".into());
     }
     let header = &envelope.batch;
@@ -459,8 +459,8 @@ fn verify(
         if envelope_release::kept_kind(claim) {
             return Err(format!("claim `{}` is of a kind whose envelope is never released", claim.id));
         }
-        let message = crate::fleet::keys::claim_signature_message(fleet_id, &envelope.writer, envelope.sequence, &claim.id);
-        if !keys.contains(&signed.member_key) || !crate::fleet::verify_signature(&signed.member_key, &message, &signed.signature) {
+        let message = fractal_auth::claim_signature_message(fleet_id, &envelope.writer, envelope.sequence, &claim.id);
+        if !keys.contains(&signed.member_key) || !fractal_auth::verify_signature(&signed.member_key, &message, &signed.signature) {
             return Err(format!("claim `{}` has no writer signature by a key membership admits", claim.id));
         }
         if !positions.insert(signed.position) {

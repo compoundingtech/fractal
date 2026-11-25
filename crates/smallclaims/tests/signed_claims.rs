@@ -1,12 +1,9 @@
 //! The claims of released envelopes travel as signed claims (`store::signed_claims`): a peer
 //! that takes them catches up to the same claims and digests, an older peer gets every envelope
 //! still held and is counted, and nothing forged is admitted.
-use smallclaims::{
-    claim::ClaimInput,
-    fleet::{MemberKey, envelope_signature_message_in, keys::claim_signature_message},
-    replication::{ReplicationInventory, SignedEnvelope, replication_capabilities},
-    store::{Store, full_compact_replication_inventory, record_bytes::admitted_claim_sql, runtime::Plain},
-};
+use fractal_auth::{MemberKey, envelope_signature_message_in, claim_signature_message};
+use smallclaims::{ replication::{ReplicationInventory, SignedEnvelope, replication_capabilities}, store::{Store, full_compact_replication_inventory, record_bytes::admitted_claim_sql, runtime::Plain}};
+use fractal_wire::{ClaimInput};
 use std::{collections::BTreeMap, sync::Arc};
 
 const FLEET: &str = "sample-fleet";

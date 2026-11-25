@@ -53,6 +53,7 @@
           "command": [
             "linux-gate",
             "aggregate",
+            "isolation-vm",
             "linux-clippy",
             "linux-fleet-compat",
             "linux-gate",
@@ -89,7 +90,8 @@
                 "scripts/ci-local",
                 "tests",
                 "clippy",
-                "fleet-compat"
+                "fleet-compat",
+                "isolation-vm"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
@@ -117,7 +119,8 @@
                 "scripts/ci-local",
                 "tests",
                 "clippy",
-                "fleet-compat"
+                "fleet-compat",
+                "isolation-vm"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
@@ -145,7 +148,8 @@
                 "scripts/ci-local",
                 "tests",
                 "clippy",
-                "fleet-compat"
+                "fleet-compat",
+                "isolation-vm"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
@@ -399,6 +403,7 @@
         "crates/fractal-api-core",
         "crates/fractal-api-mailbox",
         "crates/fractal-attention",
+        "crates/fractal-auth",
         "crates/fractal-build-stamp",
         "crates/fractal-chatgpt",
         "crates/fractal-client",
@@ -415,6 +420,8 @@
         "crates/fractal-github",
         "crates/fractal-github-base",
         "crates/fractal-kernel",
+        "crates/fractal-light-node-agent/Cargo.toml",
+        "crates/fractal-light-node-core",
         "crates/fractal-mac-custody",
         "crates/fractal-migrate/Cargo.toml",
         "crates/fractal-mission-ui",

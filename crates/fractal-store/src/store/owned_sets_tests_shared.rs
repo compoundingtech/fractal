@@ -40,7 +40,7 @@ pub fn share(from: &Store, to: &Store) {
 pub fn signed_fleet() -> Vec<Store> {
     let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     let keys = (0..3)
-        .map(|_| Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
+        .map(|_| Arc::new(fractal_auth::MemberKey::generate().unwrap().0))
         .collect::<Vec<_>>();
     let stores = ["amber", "cobalt", "ivory"]
         .iter()

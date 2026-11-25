@@ -7,9 +7,11 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = ["fractal-telemetry/test-support", "smallclaims/test-support"]
+test-support = ["fractal-auth/test-support", "fractal-telemetry/test-support", "smallclaims/test-support"]
 
 [dependencies]
+fractal-auth = { path = "../fractal-auth" }
+fractal-wire = { path = "../fractal-wire" }
 fractal-kernel = { path = "../fractal-kernel" }
 fractal-schema = { path = "../fractal-schema" }
 fractal-telemetry = { path = "../fractal-telemetry" }
@@ -42,6 +44,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 fractal_secrets_self = { package = "fractal-secrets", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }

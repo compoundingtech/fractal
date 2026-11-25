@@ -43,8 +43,8 @@ evidence, not an installed-build or runtime test receipt.
   ancestry binding in its server and clears seat environment in fixture subprocess helpers.
   That mechanism is for repository tests. Its existence does not certify an isolated fleet,
   restrict a copied production store or provide a supported agent bootstrap command.
-* [handshake.rs](../../crates/smallclaims/src/fleet/handshake.rs) signs the current join
-  transcript; [code.rs](../../crates/smallclaims/src/fleet/code.rs) defines `stj1-` codes.
+* [handshake.rs](../../crates/fractal-auth/src/handshake.rs) signs the current join
+  transcript; [code.rs](../../crates/fractal-auth/src/code.rs) defines `stj1-` codes.
   Neither inspected format contains the scratch domain and lifetime described here.
 
 Keep normal actor binding, free-mode behavior within normal fleets and person workflow

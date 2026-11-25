@@ -6,7 +6,8 @@
 //! is placed. An operator, a person or an agent with a reason, can let the member go on without
 //! peers it cannot reach, for its current daemon start only.
 use super::*;
-use crate::model::{ClaimRecord, FractalError};
+use crate::model::{ClaimRecord};
+use fractal_wire::{Error as FractalError};
 use serde_json::json;
 use tokio::time::Instant;
 

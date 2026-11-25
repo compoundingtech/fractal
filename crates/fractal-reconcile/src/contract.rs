@@ -282,7 +282,7 @@ mod tests {
             "properties": {"incarnation": binding.incarnation, "id": binding.id}, "children": [],
         }));
         let member = desired.member.as_mut().unwrap();
-        member.lifecycle = crate::model::MemberLifecycle::TerminalBound;
+        member.lifecycle = fractal_light_node_core::custody::MemberLifecycle::TerminalBound;
         member.terminal_binding = Some(binding);
         member.environment.remove("AGENT_RUNTIME_PROFILE");
         member.environment.insert("HOME".into(), root.path().join("no-profile").display().to_string());

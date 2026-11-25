@@ -3,9 +3,9 @@
 //! so a test can write any history, including one a trim has deleted from.
 use proptest::prelude::*;
 use rusqlite::{Connection, params};
+use fractal_wire::ClaimInput;
 use smallclaims::{
     answers::*,
-    claim::ClaimInput,
     replication::ReplicationInventory,
     store::{Store, canonical, runtime::Plain},
 };

@@ -465,7 +465,7 @@ fn gate_on_demand_dependency_predicate_blocks_seat_admission() {
     assert_eq!(fixture.gate_starts(), 0);
     fixture
         .store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "resource/garden-ready".into(),
             kind: "resource.observed".into(),
             actor: None,
@@ -548,7 +548,7 @@ fn gate_on_demand_other_kdl_recipients_still_require_delivery() {
         .unwrap();
     fixture
         .store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: handoff.subject,
             kind: "message.delivered".into(),
             actor: Some(helper),
@@ -625,7 +625,7 @@ fn gate_on_demand_baseline_predicate_blocks_seat_admission() {
     assert_eq!(fixture.gate_starts(), 0);
     fixture
         .store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "resource/garden-ready".into(),
             kind: "resource.observed".into(),
             actor: None,

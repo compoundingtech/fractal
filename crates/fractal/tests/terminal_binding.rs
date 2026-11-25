@@ -1,7 +1,8 @@
 #![cfg(unix)]
 //! Borrowed PTYs are tested through the runtime backend: every physical action is recorded.
 use serde_json::{Value, json};
-use fractal_daemon::model::{ClaimInput, IntentInput, MemberSpec, MessageSendRequest, MessageView};
+use fractal_daemon::model::{ IntentInput, MemberSpec, MessageSendRequest, MessageView};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::Store;
 use std::sync::{Arc, Mutex};
@@ -77,7 +78,7 @@ impl RuntimeControl for Runtime {
         self.actions.lock().unwrap().push("leftovers".into());
     }
 }
-fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), fractal_daemon::FractalError> {
+fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), fractal_wire::Error> {
     let intent = fractal_daemon::parse_intent(source, "orchid")?;
     let preview = store.mission(
         &intent,
@@ -239,7 +240,7 @@ fn binding_forbids_managed_side_effects_and_requires_an_invocation_fence() {
     assert!(fractal_daemon::parse_intent(&source("not-a-uuid"), "orchid").is_err());
     let intent = fractal_daemon::parse_intent(&source(INVOCATION), "orchid").unwrap();
     let member = intent.subjects[SEAT].member.as_ref().unwrap();
-    assert_eq!(member.lifecycle, fractal_daemon::model::MemberLifecycle::TerminalBound);
+    assert_eq!(member.lifecycle, fractal_light_node_core::custody::MemberLifecycle::TerminalBound);
     assert_eq!(member.restart, fractal_daemon::model::RestartType::Never);
 }
 

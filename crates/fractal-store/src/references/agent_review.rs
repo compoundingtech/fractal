@@ -1,5 +1,6 @@
 //! Resolve declared reviewer identities in one caller-owned snapshot, without public gate dispatch.
-use super::{Scope, FractalError};
+use super::{Scope};
+use fractal_wire::{Error as FractalError};
 use crate::store::{ReferenceGraph, identities, retirements};
 use rusqlite::Connection;
 use std::collections::BTreeSet;
@@ -55,7 +56,8 @@ pub(crate) fn independent_reviewer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClaimInput, NormalizedIntent};
+    use crate::model::{ NormalizedIntent};
+    use fractal_wire::{ClaimInput};
     use crate::store::identities::{IdentityKind, IdentityStore, RenameRequest};
     use crate::store::{ClaimCommitContext, Store, append_claim_with_commit_context};
     use serde_json::json;

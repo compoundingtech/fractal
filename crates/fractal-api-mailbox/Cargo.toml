@@ -10,6 +10,7 @@ license = "MIT"
 test-support = ["fractal-api-core/test-support"]
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
 fractal-api-core = { path = "../fractal-api-core" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }

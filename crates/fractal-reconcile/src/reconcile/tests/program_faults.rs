@@ -38,7 +38,7 @@ mission "program-faults" state="ready" {{
 
 fn entry(store: &Store, step: &str, key: &str, status: &str) {
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: step.to_owned(),
             kind: JOURNAL_KIND.into(),
             actor: None,

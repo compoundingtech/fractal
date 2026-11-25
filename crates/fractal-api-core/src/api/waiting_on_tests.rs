@@ -290,7 +290,7 @@ mission "garden/program" state="ready" {{
             fields.insert("child".to_owned(), json!(child));
         }
         store
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: land.clone(),
                 kind: "program.step".into(),
                 actor: None,

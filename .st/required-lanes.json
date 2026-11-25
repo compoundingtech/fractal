@@ -197,7 +197,8 @@
         "scripts/ci-local",
         "tests",
         "clippy",
-        "fleet-compat"
+        "fleet-compat",
+        "isolation-vm"
       ],
       "definition_paths": [
         ".cargo/config.toml",
@@ -209,7 +210,12 @@
         ".github/messaging-compat-baseline.json",
         "flake.lock",
         "flake.nix",
+        "nix/fractal-runtime-input-tests.nix",
         "nix/hm-module.nix",
+        "nix/light-node-agent-module.nix",
+        "nix/light-node-agent-tests.nix",
+        "nix/sekrets-vm.nix",
+        "nix/transport-isolation-vm.nix",
         "scripts/build-stamp-watch-test",
         "scripts/check-fractal-boundary",
         "scripts/check-fractal-boundary-test",
@@ -295,7 +301,9 @@
         ".github/workflows/fleet.yml::jobs.linux-gate",
         ".st/evidence-skip-policy.json::checks.linux-gate",
         ".st/required-lanes.json::lanes.linux-gate",
-        ".github/workflows/fleet.yml::jobs.hm-module-eval"
+        ".github/workflows/fleet.yml::jobs.hm-module-eval",
+        ".github/workflows/fleet.yml::jobs.isolation-vm",
+        ".github/workflows/fleet.yml::jobs.bundled-sqlite-packages"
       ]
     },
     "rust-tests": {
@@ -748,6 +756,7 @@
         "crates/fractal-api-core",
         "crates/fractal-api-mailbox",
         "crates/fractal-attention",
+        "crates/fractal-auth",
         "crates/fractal-build-stamp",
         "crates/fractal-chatgpt",
         "crates/fractal-client",
@@ -764,6 +773,8 @@
         "crates/fractal-github",
         "crates/fractal-github-base",
         "crates/fractal-kernel",
+        "crates/fractal-light-node-agent/Cargo.toml",
+        "crates/fractal-light-node-core",
         "crates/fractal-mac-custody",
         "crates/fractal-migrate/Cargo.toml",
         "crates/fractal-mission-ui",

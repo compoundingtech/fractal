@@ -1993,7 +1993,7 @@ async fn doctor_fails_and_machines_say_diverged_for_a_diverged_peer() {
 /// way without a warning. The fleet test freezes a real daemon; here the last exchange is aged.
 #[tokio::test]
 async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
-    use smallclaims::fleet::MemberKey;
+    use fractal_auth::{MemberKey};
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
     let fleet = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
@@ -2012,7 +2012,7 @@ async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
             Some(name), Duration::from_secs(60), &["loopback".into()],
             "person/example", false,
         ).unwrap();
-        let code = smallclaims::fleet::code::JoinCode {
+        let code = fractal_auth::code::JoinCode {
             fleet_id: fleet.parse().unwrap(),
             invite: hex::decode(&invite.invite).unwrap().try_into().unwrap(),
             token: invite.token,
@@ -2023,7 +2023,7 @@ async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
             endpoints: Vec::new(),
             pairing: None,
         };
-        let joiner = smallclaims::fleet::handshake::Joiner::start(
+        let joiner = fractal_auth::handshake::Joiner::start(
             &code, &key, name, mode, None, "test-build",
         ).unwrap();
         assert!(matches!(

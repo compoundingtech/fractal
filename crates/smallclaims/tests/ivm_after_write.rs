@@ -1,16 +1,14 @@
 use anyhow::Result;
 use serde_json::json;
-use smallclaims::{
-    ClaimInput, ClaimRecord, Store,
+use smallclaims::{ ClaimRecord, Store,
     ivm::{
         self, Contribution, Definition, View, Views,
         after_write::{self as after, After, Gap, Target, WaitOptions, WaitOutcome, WriteOutcome},
         events::{self, Publisher},
-        runtime::ViewRuntime,
-    },
+        runtime::ViewRuntime},
     replication::ReplicationInventory,
-    store::canonical,
-};
+    store::canonical};
+use fractal_wire::{ClaimInput};
 use std::sync::Arc;
 use tokio::{
     sync::watch,

@@ -129,7 +129,7 @@ pub fn check_url(url: &str, base: &str) -> Result<reqwest::Url, String> {
 
 /// This node's name and the key it signs with: the fleet member key, or the standalone node
 /// key, as the daemon loads them. Never creates one.
-fn node_identity(config: &Config) -> Result<(String, smallclaims::fleet::MemberKey), String> {
+fn node_identity(config: &Config) -> Result<(String, fractal_auth::MemberKey), String> {
     let mut config = config.clone();
     if config.fleet.is_none() {
         config
@@ -140,7 +140,7 @@ fn node_identity(config: &Config) -> Result<(String, smallclaims::fleet::MemberK
         Some(file) => file.node_key_path(&config.state_dir),
         None => crate::fleet::join::key_directory(&config.state_dir).join("node.key"),
     };
-    let key = smallclaims::fleet::MemberKey::load(&path)
+    let key = fractal_auth::MemberKey::load(&path)
         .map_err(|error| format!("this node has no key at {}: {error:#}", path.display()))?;
     Ok((config.node.clone(), key))
 }

@@ -128,7 +128,8 @@ mod tests {
     #[test]
     fn unresolved_effect_card_folds_under_its_run_creation_owner() {
         use crate::{AttentionSnapshotStore as _, MissionsStore as _};
-        use crate::model::{AttentionRequest, ClaimInput, EffectOwner, MissionRunRequest, WorkRequest};
+        use crate::model::{AttentionRequest, EffectOwner, MissionRunRequest, WorkRequest};
+        use fractal_wire::{ClaimInput};
         use crate::store::effects::EffectAdmission;
         use std::collections::BTreeMap;
 

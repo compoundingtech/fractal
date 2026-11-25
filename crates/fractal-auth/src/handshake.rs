@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::code::{JoinCode, fingerprint};
-use super::keys::{MemberKey, verify_signature};
+use crate::{MemberKey, verify_signature};
 
 pub const PROTOCOL: &str = "st3-join-v1";
 const SEAL_INFO: &[u8] = b"st3-join-v1 seal";
@@ -357,7 +357,7 @@ pub fn seal_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet::code::CodeEndpoint;
+    use crate::code::CodeEndpoint;
 
     fn fixture() -> (JoinCode, MemberKey, MemberKey, SealedJoin) {
         let sponsor = MemberKey::generate().unwrap().0;
@@ -410,8 +410,11 @@ mod tests {
         let (code, sponsor, joiner, payload) = fixture();
         let session = Joiner::start(&code, &joiner, "laptop", "dial-out", None, "test").unwrap();
         verify_request(session.request(), &code.token).unwrap();
-        let response =
-            seal_response(session.request(), &code.token, "studio", &sponsor, &payload).unwrap();
+        let auth = crate::FleetAuth::test(&payload.fleet_id, &[0xab; 32]);
+        assert!(auth.seal_join_response(session.request(), &code.token, "studio", &payload).is_err());
+        let auth = auth.with_member_key(Some(std::sync::Arc::new(sponsor)));
+        assert_eq!(auth.member_key(), Some(payload.anchor_key.as_str()));
+        let response = auth.seal_join_response(session.request(), &code.token, "studio", &payload).unwrap();
         // The answer never carries the secret in the clear.
         let wire = serde_json::to_string(&response).unwrap();
         assert!(!wire.contains(payload.secret.as_deref().unwrap()));

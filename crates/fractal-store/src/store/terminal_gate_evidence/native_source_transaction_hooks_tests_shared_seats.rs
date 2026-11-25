@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 use crate::store::terminal_gate_evidence::native_source_transaction_hooks_shared_seats::*;
-use crate::store::{ClaimInput, append_claim_record_tx};
+use crate::store::{ append_claim_record_tx};
+use fractal_wire::{ClaimInput};
 use serde_json::json;
 use smallclaims::ivm::install::Root;
 use smallclaims::sqlite::WriterJob;

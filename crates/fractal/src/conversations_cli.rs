@@ -972,7 +972,7 @@ mod tests {
             if let Some(parent) = in_reply_to {
                 fields["in_reply_to"] = json!(parent);
             }
-            smallclaims::claim::ClaimInput {
+            fractal_wire::ClaimInput {
                 subject: subject.into(),
                 kind: "message.sent".into(),
                 actor: Some("agent/birch".into()),

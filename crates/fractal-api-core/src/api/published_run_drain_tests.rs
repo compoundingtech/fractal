@@ -20,7 +20,7 @@ fn backlog() -> (tempfile::TempDir, Arc<Store>, String, String) {
     assert!(reader.work(None, false).unwrap().iter()
         .any(|view| view.subject == step && view.status == "ready"));
     reader.set_write_clock_at(now_ms() + 1_000_000).unwrap();
-    reader.append_claim(&crate::model::ClaimInput {
+    reader.append_claim(&fractal_wire::ClaimInput {
         subject: "custom/drain/order".into(), kind: "custom.drain.order".into(), actor: None,
         fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();

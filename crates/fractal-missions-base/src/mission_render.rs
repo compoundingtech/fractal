@@ -3,7 +3,8 @@ use kdl::{KdlDocument, KdlNode};
 use crate::declaration_render::{annotations, common_body, protection};
 use crate::gate_render::{block, duration, node, property, text};
 use crate::loop_render::{comment, dependencies, has_legacy_loop_shapes, render_loop_node};
-use crate::model::{CompletionSpec, MissionInputKind, MissionSpec, MissionState, ResourceReferenceKind, RevisionCutover, FractalError, StepSpec, UsedMissionSpec};
+use crate::model::{CompletionSpec, MissionInputKind, MissionSpec, MissionState, ResourceReferenceKind, RevisionCutover, StepSpec, UsedMissionSpec};
+use fractal_wire::{Error as FractalError};
 
 pub struct MissionDeclarationText {
     pub text: String,

@@ -1,8 +1,8 @@
 //! A valid replica record keeps no bytes of its own (`store::record_bytes`): new records are
 //! stored without them, older ones are emptied in pages, and nothing a reader, a peer or a
 //! digest sees changes.
+use fractal_wire::ClaimInput;
 use smallclaims::{
-    claim::ClaimInput,
     store::{Store, runtime::Plain},
 };
 use std::{collections::BTreeMap, sync::Arc};

@@ -24,12 +24,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 use smallclaims::replication::ReceiveOptions;
-use smallclaims::sync::{ Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, WorkerConfig, };
+use fractal_auth::{FleetAuth};
+use smallclaims::sync::{Backend, Local, MAX_EXCHANGE_BYTES, WorkerConfig};
 use smallclaims::sync::{dial_targets, signed_error_response_for, signed_response_for};
 use crate::client::Client;
 use crate::config::{Config, PeerConfig};
 use crate::fleet::transport::{Fabric, LocalTransports, Route, local_addresses, parse_route, resolve_tool};
-use crate::fleet::{FleetView, MemberKey};
+use fractal_auth::{MemberKey};
+use crate::fleet::{FleetView};
 use crate::model::{ ApiResponse, ReplicaEnvelopeId, ReplicationExchange, ReplicationExportRequest, ReplicationExportResponse, ReplicationInventory, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse, };
 use crate::store::Store;
 use crate::relay_trace::{self, Outcome, Phase};
@@ -37,7 +39,7 @@ use crate::client::CLIENT_READ_FORWARD_PATH;
 use crate::model::*;
 use std::os::unix::fs::PermissionsExt as _;
 use fractal_peer::peer::*;
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
 use std::net::SocketAddr;
@@ -1913,7 +1915,7 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
     // Sync carries the claim to the gateway; the bytes are not part of it.
     for claim in owner_store.claims_for(&message.subject, Some("message.sent")).unwrap() {
         gateway_store
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: message.subject.clone(),
                 kind: "message.sent".into(),
                 actor: Some("person/avery".into()),
@@ -1990,7 +1992,7 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
             .clone();
         fields["attachments"][0]["origin"] = "host/offline-node".into();
         gateway_store
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: "message/offline".into(),
                 kind: "message.sent".into(),
                 actor: Some("person/avery".into()),
@@ -2107,7 +2109,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     let carried = serde_json::to_string(&claim.body).unwrap();
     assert!(carried.len() < 2048, "{} bytes in the claim", carried.len());
     gateway_store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: message.subject.clone(),
             kind: "message.sent".into(),
             actor: Some("person/avery".into()),
@@ -2161,7 +2163,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     if sent.body_ref.is_some() {
         let claim = owner_store.claims_for(&sent.subject, Some("message.sent")).unwrap().remove(0);
         gateway_store
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: sent.subject.clone(),
                 kind: "message.sent".into(),
                 actor: Some("person/avery".into()),
@@ -2225,7 +2227,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     let mut fields = claim.body["fields"].clone();
     fields["attachments"][0]["origin"] = "host/offline-node".into();
     gateway_store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "message/offline-notes".into(),
             kind: "message.sent".into(),
             actor: Some("person/avery".into()),

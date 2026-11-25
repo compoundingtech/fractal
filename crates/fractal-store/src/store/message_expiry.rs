@@ -103,7 +103,7 @@ mod tests {
             ("content".into(), json!("Expiry contract fixture"))]);
         if storage == "shard" {
             store.bind_fleet("expiry-fixture").unwrap();
-            store.load_member_key(Some(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0))).unwrap();
+            store.load_member_key(Some(Arc::new(fractal_auth::MemberKey::generate().unwrap().0))).unwrap();
             store.use_key_directory(&directory.path().join("keys")).unwrap();
             messages_shard::open(&store, directory.path()).unwrap().append_claim(&sent).unwrap();
             stream_mirror::mirror(&store).unwrap();

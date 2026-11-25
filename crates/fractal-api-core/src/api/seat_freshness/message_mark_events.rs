@@ -145,7 +145,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "owner").unwrap());
         let shard = messages_shard::open(&store, root.path()).unwrap();
-        shard.append_claim(&crate::model::ClaimInput {
+        shard.append_claim(&fractal_wire::ClaimInput {
             subject: "message/stream-event".into(),
             kind: "message.sent".into(),
             actor: Some("agent/sender".into()),
