@@ -2,10 +2,10 @@
   "version": 1,
   "summary": "Reserve executor custody before native launch, reclaim settled session history, release local authority on natural exit, and preserve authorized run cancellation.",
   "replay": {"status": "none", "detail": "Existing claims replay unchanged; local runtime-start retirement receipts remain usable for custody recovery."},
-  "schema": {"status": "none", "detail": "No schema changes. Dispatched runtime-start operations reserve existing custody capacity until binding or verified producer closure."},
+  "schema": {"status": "none", "detail": "No schema changes. A custody_bound marker in local runtime-start bodies permanently records reservation transfer into custody, surviving settlement and reclamation. Retained older bindings acquire the marker before reclamation."},
   "rules": {"status": "changed", "detail": "Only unsettled custody and unresolved launch reservations consume capacity. Retired settled generations can be reclaimed while a subject remains live. Exact natural exit observations settle custody, and run credential liveness is checked at writer admission rather than after cancellation changes its own steps."},
   "compatibility": {"status": "none", "detail": "Existing local custody and runtime-start records retain their formats."},
   "downtime": {"status": "none", "detail": "No downtime required."},
   "manual": {"status": "none", "detail": "No manual action required."},
-  "recovery": {"status": "changed", "detail": "Executor-local runtime-start retirement receipts without source_host can settle their exact retired generation."}
+  "recovery": {"status": "changed", "detail": "Executor-local runtime-start retirement receipts without source_host can settle their exact retired generation. Exact explicit-stop retirement proof remains recordable after a concurrent natural-exit settlement."}
 }
