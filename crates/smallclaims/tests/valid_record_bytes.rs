@@ -32,7 +32,7 @@ fn sync(source: &Store, peer: &Store) {
         if exchange.envelopes.is_empty() {
             break;
         }
-        peer.receive_replication_exchange("alder", FLEET, &exchange)
+        peer.receive_replication_exchange(source.origin(), FLEET, &exchange)
             .unwrap();
         peer.validate_replication_backlog().unwrap();
         peer.project_replication_backlog().unwrap();

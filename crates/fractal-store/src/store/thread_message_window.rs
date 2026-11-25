@@ -103,7 +103,7 @@ fn thread_message_activity<T>(
     let sql = canonical_sql(&format!(
         "WITH explicit AS (
             SELECT claims.subject, claims.actor, claims.body
-            FROM claims INDEXED BY claims_thread_message_accepted_index
+            FROM claims
             WHERE claims.kind='message.sent' AND json_extract(claims.body, '$.fields.thread_id')=?1
               AND json_extract(claims.body, '$.fields.thread_id') IS NOT NULL
               AND {ACTIVE_MESSAGE} AND {UNREPAIRED_CLAIM}
@@ -600,7 +600,7 @@ fn query_window_headers(
     };
     let active = "JOIN operations active_operation ON active_operation.canonical_claim_id=claims.id AND active_operation.state='active'";
     let explicit = slices(
-        &format!("claims INDEXED BY claims_thread_message_accepted_index {active}"),
+        &format!("claims {active}"),
         "claims.kind='message.sent' AND json_extract(claims.body,'$.fields.thread_id')=?1 AND json_extract(claims.body,'$.fields.thread_id') IS NOT NULL",
         "'active'",
     );

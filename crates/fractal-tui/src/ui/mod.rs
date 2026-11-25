@@ -10848,9 +10848,9 @@ mod tests {
         select_row(&mut ui, item);
         let pane = ui.main_pane();
         let id = ui.threads.rows(&pane, &ui.conversation_state.drafts)[0].clone();
-        ui.conversation_state.drafts.insert(format!("thread-reply:{id}"), "Saved thread draft".into());
         ui.click(Hit::Thread(pane.key(), thread::Tap::Compose(id.clone())));
         assert!(ui.threads.editing_in(&pane));
+        ui.paste("Saved thread draft".into());
         ui.effects.clear();
         (ui, id)
     }

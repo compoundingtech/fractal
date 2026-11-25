@@ -219,7 +219,7 @@ mod tests {
         drop(crate::store::Store::open(&path, "diagnostic-test").unwrap());
         {
             let connection = rusqlite::Connection::open(&path).unwrap();
-            assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), smallclaims::store::CURRENT_SCHEMA_VERSION);
+            assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), fractal_schema::STORAGE_VERSION);
             connection.execute_batch(
                 "DROP TABLE client_diagnostic_receipts;
                  INSERT INTO meta(key, value) VALUES ('diagnostic-migration-marker', 'preserved');",
@@ -228,7 +228,7 @@ mod tests {
         drop(crate::store::Store::open(&path, "diagnostic-test").unwrap());
         {
             let connection = rusqlite::Connection::open(&path).unwrap();
-            assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), smallclaims::store::CURRENT_SCHEMA_VERSION);
+            assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), fractal_schema::STORAGE_VERSION);
             assert_eq!(connection.query_row("SELECT value FROM meta WHERE key='diagnostic-migration-marker'", [], |row| row.get::<_, String>(0)).unwrap(), "preserved");
             assert_eq!(connection.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('client_diagnostic_receipts_time_index', 'client_diagnostic_receipts_device_time_index')",

@@ -7176,7 +7176,7 @@ fn schema_version_twelve_adds_durable_planner_configuration() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, smallclaims::store::CURRENT_SCHEMA_VERSION);
+    assert_eq!(version, fractal_schema::STORAGE_VERSION);
     assert_eq!(planner_column, 1);
 }
 
