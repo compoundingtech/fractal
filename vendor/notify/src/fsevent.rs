@@ -127,8 +127,12 @@ fn translate_flags(flags: &StreamFlags, precise: bool) -> Vec<Event> {
             e.set_info("rescan: user dropped")
         } else if flags.contains(StreamFlags::KERNEL_DROPPED) {
             e.set_info("rescan: kernel dropped")
+        } else if flags.contains(StreamFlags::IDS_WRAPPED) {
+            e.set_info("rescan: event ids wrapped")
         } else {
-            e
+            // MustScanSubDirs identifies a coalesced subtree, unlike stream-wide
+            // dropped events. Retain this distinction for declared-input routing.
+            e.set_info("rescan: subtree")
         });
     }
 
@@ -565,8 +569,14 @@ unsafe fn callback_impl(
         let events = translate_flags(&flag, true);
         // Loss flags are stream-wide even when their sentinel path is outside
         // the watched namespace. HistoryDone alone is only a replay barrier.
-        let mut handle_event = events.iter().any(Event::need_rescan);
+        let mut handle_event = events.iter().any(|event| event.need_rescan()
+            && event.attrs.info() != Some("rescan: subtree"));
         for (p, r) in &(*info).recursive_info {
+            if events.iter().any(|event| event.attrs.info() == Some("rescan: subtree"))
+                && (p.starts_with(&path) || path.starts_with(p)) {
+                handle_event = true;
+                break;
+            }
             if path.starts_with(p) {
                 if *r || &path == p {
                     handle_event = true;

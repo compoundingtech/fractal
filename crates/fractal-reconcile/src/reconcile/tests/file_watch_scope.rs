@@ -33,6 +33,27 @@ fn external_inputs_notify_only_their_readers() {
 }
 
 #[test]
+fn subtree_rescans_keep_gate_and_launch_readers_scoped() {
+    use super::super::file_subscriptions;
+    let incremental = Incremental::default();
+    let changes = FileChanges::default();
+    let global = Notify::new();
+    incremental.evaluated("mission-run/gate", BTreeSet::from(["file/input".into()]), None);
+    incremental.evaluated("launch-inputs:agent/tool", BTreeSet::from(["launch-input/tool".into()]), None);
+    let event = Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan)
+        .set_info("rescan: subtree").add_path("/workspace/input".into());
+    for key in ["file/input", "launch-input/tool"] {
+        changes.invalidate(&incremental, key, file_subscriptions::global_rescan(&event), &global);
+    }
+    assert!(global.notified().now_or_never().is_none());
+    assert_eq!(*changes.runs.lock().unwrap(), BTreeSet::from(["mission-run/gate".into()]));
+    assert_eq!(*changes.launches.lock().unwrap(), BTreeSet::from(["agent/tool".into()]));
+    let loss = event.set_info("rescan: kernel dropped");
+    changes.invalidate(&incremental, "file/input", file_subscriptions::global_rescan(&loss), &global);
+    assert!(global.notified().now_or_never().is_some(), "genuine loss must wake the full pass");
+}
+
+#[test]
 fn relevance_preserves_any_path_referents_and_ancestor_replacements() {
     let target = Path::new("/example/inputs/tool");
     let directory = target.parent().unwrap();

@@ -114,7 +114,7 @@ impl HostObservations {
     }
 }
 fn registry_event_relevant(event: &notify::Event, root: &Path) -> bool {
-    if event.need_rescan() { return true; }
+    if event.need_rescan() { return FileWatch::relevant(event, root, root, None); }
     if !FileWatch::relevant(event, root, root, None) { return false; }
     if event.paths.is_empty() { return true; }
     event.paths.iter().any(|path| {
@@ -269,7 +269,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .remove(&watched_subject);
                     // A file change is not a claim: mark what read the file.
                     file_changes.invalidate(&incremental, &watched_subject,
-                        event.need_rescan() && !notification.coverage_changed, &notify);
+                        file_subscriptions::global_rescan(event) && !notification.coverage_changed, &notify);
             }))?;
         watchers.insert(subject.into(), FileWatch {
             _subscription: subscription, target, directory, referent, recursive, dirty,
