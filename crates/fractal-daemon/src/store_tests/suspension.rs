@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::Connection;
+use fractal_wire::ClaimInput;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
