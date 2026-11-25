@@ -80,44 +80,72 @@ impl RuntimeEvidence {
     /// Audit the operation itself, even when no wake-demand episode was recorded.
     /// Historical suspension receipts, bounded by each phase's store index, preserve
     /// manual conversions without consulting today's selected seat state.
-    fn resume_audit(&mut self, store: &Store, seat: &str, request: &ClaimRecord,
-        requests: &[ClaimRecord], terminal: Option<&ClaimRecord>,
-    ) -> Result<()> {
+    fn resume_audit(&mut self, store: &Store, request: &ClaimRecord,
+        terminal: Option<&ClaimRecord>,
+    ) -> Result<String> {
         let host = store.origin();
         let suspension_id = fields(request)["suspend_operation_id"].as_str()
             .or_else(|| fields(request)["idle_wake_lineage"].as_str())
             .context("automatic resume has no suspension identity")?;
-        let suspension = requests.iter().find(|claim| claim.id == suspension_id
-            && fields(claim)["action"] == "suspend");
+        let suspension = store.claim_by_id(suspension_id)?
+            .filter(|claim| fields(claim)["action"] == "suspend");
         let cause_at = |index| -> Result<&'static str> {
-            let Some(suspension) = suspension.filter(|claim| claim.store_index <= index) else {
+            let Some(suspension) = suspension.as_ref().filter(|claim| claim.store_index <= index) else {
                 return Ok("unknown");
             };
             let state = crate::suspension::suspend_state(store, suspension, Some(index))?;
             Ok(match state.cause() { "idle" => "idle", "manual" => "manual", _ => "unknown" })
         };
         let admission_cause = cause_at(request.store_index)?;
-        let values = |phase| common(host, seat, json!({
+        let phase = if terminal.is_some() { "completed" } else { "admitted" };
+        let mut values = common(host, &request.subject, json!({
             "resume_operation_id":request.id,"suspension_id":suspension_id,
             "suspension_cause_at_admission":admission_cause,
             "admitted_at":request.accepted_at_unix_ms,"phase":phase,
         }));
-        let key = format!("runtime-residency:resume-audit:{}:admitted", request.id);
-        receipt(store, &episode(host, "resume-audit", &key), "residency.resume-audit",
-            values("admitted"), vec![request.id.clone(), suspension_id.into()], key)?;
+        let mut evidence = vec![request.id.clone(), suspension_id.into()];
         if let Some(terminal) = terminal {
-            let mut values = values("completed");
+            evidence.push(terminal.id.clone());
             values.insert("suspension_cause_at_completion".into(), json!(cause_at(terminal.store_index)?));
             if terminal.kind == "runtime.action.failed" {
                 values.insert("failure".into(), json!(fields(terminal)["code"].as_str().unwrap_or("other")));
             } else {
                 values.insert("resumed_at".into(), json!(terminal.accepted_at_unix_ms));
             }
-            let key = format!("runtime-residency:resume-audit:{}:completed", request.id);
-            receipt(store, &episode(host, "resume-audit", &key), "residency.resume-audit",
-                values, vec![request.id.clone(), suspension_id.into(), terminal.id.clone()], key)?;
         }
-        Ok(())
+        let key = format!("runtime-residency:resume-audit:{}:{phase}", request.id);
+        receipt(store, &episode(host, "resume-audit", &key), "residency.resume-audit",
+            values, evidence, key.clone())?;
+        Ok(key)
+    }
+
+    /// Consume at most 64 durable action events across the entire host. A crash
+    /// between receipt insertion and cursor acknowledgement safely replays it.
+    fn drain_resume_audits(&mut self, store: &Store, now: u128) -> Result<bool> {
+        let page = store.residency_resume_audit_page()?;
+        for event in page.iter().take(64) {
+            let terminal = event.kind != "runtime.action.requested";
+            let requested = if terminal {
+                let id = fields(event)["operation_id"].as_str()
+                    .or_else(|| event.body["evidence"][0].as_str());
+                match id { Some(id) => store.claim_by_id(id)?, None => None }
+            } else { None };
+            let request = requested.as_ref().unwrap_or(event);
+            let automatic = (!terminal || requested.is_some())
+                && request.kind == "runtime.action.requested" && request.origin == store.origin()
+                && fields(request)["action"] == "resume" && fields(request)["cause"] == "idle";
+            let terminal_phase = event.kind == "runtime.action.failed"
+                || fields(event)["operation_status"] == "resumed";
+            let key = if automatic && (!terminal || terminal_phase) {
+                Some(self.resume_audit(store, request, terminal.then_some(event))?)
+            } else { None };
+            if !store.acknowledge_residency_resume_audit(event.store_index, key.as_deref())? {
+                return Ok(false);
+            }
+        }
+        let drained = page.len() <= 64;
+        if !drained { smallclaims::touched::note_due(now); }
+        Ok(drained)
     }
 
     /// Invoke after phase receipts and from the seat's normal reactive item. Replays are safe.
@@ -160,9 +188,6 @@ impl RuntimeEvidence {
             if request_fields["action"] != "resume" { continue; }
             let failure = failed.iter().find(|claim| cites(claim, &request.id));
             let resumed = succeeded.iter().find(|claim| cites(claim, &request.id) && fields(claim)["operation_status"] == "resumed");
-            if request.origin == host {
-                self.resume_audit(store, seat, request, &requests, failure.or(resumed))?;
-            }
             let Some(lineage) = request_fields["idle_wake_lineage"].as_str() else { continue; };
             let wake = crate::store::idle_residency::wake_evidence_subject(host, seat, lineage, 0);
             let Some(demand) = store.latest_claim(&wake, Some("residency.wake-demand"))? else { continue; };
@@ -296,6 +321,7 @@ impl RuntimeEvidence {
         // before its wake or resume audit is durably emitted.
         let coverage_cut = store.residency_audit_coverage_cut()?;
         let wake_audits_drained = store.drain_wake_audits()?;
+        let resume_audits_drained = self.drain_resume_audits(store, now)?;
         let host = store.origin();
         let seats = store.residency_episode_seats()?;
         let mut idle = 0;
@@ -307,14 +333,11 @@ impl RuntimeEvidence {
                 if state.cause() == "idle" { idle += 1; } else { manual += 1; }
             }
         }
-        let mut audit_seats = seats;
-        audit_seats.extend(store.residency_resume_audit_seats()?);
-        audit_seats.sort_unstable();
-        audit_seats.dedup();
-        for seat in audit_seats {
+        for seat in seats {
             self.evaluate_subject(store, &seat, now)?;
         }
-        store.publish_residency_audit_coverage(&coverage_cut, wake_audits_drained, now)?;
+        store.publish_residency_audit_coverage(&coverage_cut,
+            wake_audits_drained && resume_audits_drained, now)?;
         if !enabled {
             if let Some(instruments) = &self.instruments { instruments.publish(Summary::default()); }
             return Ok(());
@@ -368,8 +391,11 @@ mod tests {
     }
 
     fn signed(path: &std::path::Path) -> Store {
+        signed_with_key(path, std::sync::Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
+    }
+
+    fn signed_with_key(path: &std::path::Path, key: std::sync::Arc<crate::fleet::MemberKey>) -> Store {
         let store = Store::open(path, "amber").unwrap();
-        let key = std::sync::Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
         const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
         store.bind_fleet(FLEET).unwrap();
         store.pin_fleet_anchor(key.public()).unwrap();
@@ -442,7 +468,7 @@ mod tests {
                 json!({"action":"resume","cause":"idle","suspend_operation_id":suspended.id,
                     "idle_wake_lineage":suspended.id}), vec![suspended.id.clone()]);
             let mut evidence = RuntimeEvidence::default();
-            evidence.evaluate_subject(&store, &resume.subject, resume.accepted_at_unix_ms).unwrap();
+            evidence.drain_resume_audits(&store, resume.accepted_at_unix_ms).unwrap();
             let admission = resume_audit_claim(&store, &resume, "admitted");
             assert_eq!(fields(&admission)["suspension_cause_at_admission"], "idle");
             assert_eq!(fields(&admission)["resume_operation_id"], resume.id);
@@ -453,7 +479,7 @@ mod tests {
                 if failure { json!({"action":"resume","code":"resume-refused","reason":"refused"}) }
                 else { json!({"action":"resume","operation_status":"resumed"}) },
                 vec![resume.id.clone()]);
-            evidence.evaluate_subject(&store, &resume.subject, terminal.accepted_at_unix_ms).unwrap();
+            evidence.drain_resume_audits(&store, terminal.accepted_at_unix_ms).unwrap();
             let completion = resume_audit_claim(&store, &resume, "completed");
             assert_ne!(admission.id, completion.id);
             assert_eq!(fields(&completion)["suspension_cause_at_completion"], "idle");
@@ -466,11 +492,54 @@ mod tests {
             }
             drop(store);
             let reopened = Store::open(&path, "amber").unwrap();
-            RuntimeEvidence::default().evaluate_subject(&reopened, &resume.subject,
+            RuntimeEvidence::default().drain_resume_audits(&reopened,
                 terminal.accepted_at_unix_ms + 1000).unwrap();
             assert_eq!(resume_audit_claim(&reopened, &resume, "admitted").id, admission.id);
             assert_eq!(resume_audit_claim(&reopened, &resume, "completed").id, completion.id);
         }
+    }
+
+    #[test]
+    fn accepted_idle_wake_and_later_resume_share_one_audited_suspension() {
+        let root = tempfile::tempdir().unwrap();
+        let store = signed(&root.path().join("graph.db"));
+        let intent = crate::parse_intent(
+            "version 2\nagent \"amber.worker\" { host \"amber\"; workspace \".\"; command \"true\"; }",
+            "amber").unwrap();
+        let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
+        store.apply(&intent, &expected, "audit-wake-seat").unwrap();
+        let suspended = action_claim(&store, "runtime.action.requested",
+            json!({"action":"suspend","cause":"idle"}), vec![]);
+        action_claim(&store, "runtime.action.succeeded",
+            json!({"action":"suspend","operation_status":"suspended","suspended_at_unix_ms":1}),
+            vec![suspended.id.clone()]);
+        let message = store.append_claim(&ClaimInput {
+            subject:"message/audit-wake".into(), kind:"message.sent".into(),
+            actor:Some("person/test".into()),
+            fields:serde_json::from_value(json!({"from":"person/test","to":"agent/amber.worker",
+                "content":"Continue.","status":"sent","tags":[]})).unwrap(),
+            evidence:Vec::new(),expected_subject:None,idempotency_key:Some("audit-wake-message".into()),
+        }).unwrap();
+        // A graph-only source can publish its captured wake, but cannot claim host coverage.
+        assert!(!store.drain_wake_audits().unwrap());
+        assert!(!store.drain_wake_audits().unwrap());
+        let wake_subject = episode("amber", "wake-audit",
+            "residency-evidence:wake-audit:amber:message/audit-wake");
+        let wakes = store.claims_for(&wake_subject, Some("residency.wake-audit")).unwrap();
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(fields(&wakes[0])["message_id"], message.subject);
+        assert_eq!(fields(&wakes[0])["suspension_id"], suspended.id);
+        let resume = action_claim(&store, "runtime.action.requested",
+            json!({"action":"resume","cause":"idle","suspend_operation_id":suspended.id}),
+            vec![suspended.id.clone()]);
+        let completed = action_claim(&store, "runtime.action.succeeded",
+            json!({"action":"resume","operation_status":"resumed"}), vec![resume.id.clone()]);
+        RuntimeEvidence::default().drain_resume_audits(&store, completed.accepted_at_unix_ms).unwrap();
+        let audit = resume_audit_claim(&store, &resume, "completed");
+        assert_eq!(fields(&audit)["suspension_id"], fields(&wakes[0])["suspension_id"]);
+        assert_eq!(fields(&audit)["suspension_cause_at_admission"], "idle");
+        assert_eq!(fields(&audit)["suspension_cause_at_completion"], "idle");
+        assert_eq!(fields(&audit)["resumed_at"], json!(completed.accepted_at_unix_ms));
     }
 
     #[test]
@@ -493,7 +562,7 @@ mod tests {
                 vec![resume.id.clone()]);
             if conversion == "after-completion" { convert_manual(&store, &suspended); }
             // Delay both audit phases until every conversion is visible.
-            RuntimeEvidence::default().evaluate_subject(&store, &resume.subject,
+            RuntimeEvidence::default().drain_resume_audits(&store,
                 terminal.accepted_at_unix_ms + 1000).unwrap();
             let admission = resume_audit_claim(&store, &resume, "admitted");
             let completion = resume_audit_claim(&store, &resume, "completed");
@@ -621,6 +690,24 @@ mod tests {
                 "suspension_cause_at_admission":"idle","admitted_at":100,"phase":"admitted",
             })), vec![], key.into()).unwrap());
         assert!(store.claims_for(&subject, Some("residency.resume-audit")).unwrap().is_empty());
+        let suspended = action_claim(&store, "runtime.action.requested",
+            json!({"action":"suspend","cause":"idle"}), vec![]);
+        let resume = action_claim(&store, "runtime.action.requested",
+            json!({"action":"resume","cause":"idle","suspend_operation_id":suspended.id}),
+            vec![suspended.id.clone()]);
+        let mut runtime = RuntimeEvidence::default();
+        assert!(!runtime.drain_resume_audits(&store, resume.accepted_at_unix_ms).unwrap());
+        assert_eq!(store.residency_resume_audit_page().unwrap()[0].id, resume.id,
+            "feature refusal must retain the unaudited admission");
+        store.append_claim(&ClaimInput {
+            subject: "daemon/amber".into(), kind: "daemon.started".into(), actor: None,
+            fields: BTreeMap::from([("status".into(), json!("running")),
+                ("features".into(), json!({"idle_residency":1,"residency_audit":1}))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.replication_snapshot().unwrap();
+        assert!(runtime.drain_resume_audits(&store, resume.accepted_at_unix_ms + 1).unwrap());
+        resume_audit_claim(&store, &resume, "admitted");
     }
 
     #[test]
@@ -654,12 +741,66 @@ mod tests {
                 _ => {}
             }
             assert!(store.residency_episode_seats().unwrap().is_empty());
-            assert_eq!(store.residency_resume_audit_seats().unwrap(), [resume.subject.clone()]);
+            assert!(!store.residency_resume_audit_page().unwrap().is_empty());
             RuntimeEvidence::default().evaluate_host(&store, false,
                 terminal.accepted_at_unix_ms + 1000).unwrap();
             assert_eq!(fields(&resume_audit_claim(&store, &resume, "admitted"))["suspension_cause_at_admission"], "idle");
             assert_eq!(fields(&resume_audit_claim(&store, &resume, "completed"))["resumed_at"],
                 json!(terminal.accepted_at_unix_ms));
+        }
+    }
+
+    #[test]
+    fn resume_audit_backlog_is_host_bounded_and_recovers_exactly_once_after_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        let key = std::sync::Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let store = signed_with_key(&path, key.clone());
+        let mut requests = Vec::new();
+        for index in 0..40 {
+            let seat = format!("agent/amber.audit-{index}");
+            let append = |kind: &str, values: Value, evidence| store.append_claim(&ClaimInput {
+                subject: seat.clone(), kind: kind.into(), actor: Some("person/test".into()),
+                fields: serde_json::from_value(values).unwrap(), evidence,
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let suspended = append("runtime.action.requested",
+                json!({"action":"suspend","cause":"idle"}), vec![]);
+            let resume = append("runtime.action.requested",
+                json!({"action":"resume","cause":"idle","suspend_operation_id":suspended.id}),
+                vec![suspended.id.clone()]);
+            append("runtime.action.succeeded",
+                json!({"action":"resume","operation_status":"resumed"}), vec![resume.id.clone()]);
+            requests.push(resume);
+        }
+        let audits = |store: &Store| store.claims_for_kind_at(
+            "residency.resume-audit", None, false, 100).unwrap().claims;
+        let now = requests.last().unwrap().accepted_at_unix_ms + 1000;
+        let mut runtime = RuntimeEvidence::default();
+        for request in &requests {
+            runtime.evaluate_subject(&store, &request.subject, now).unwrap();
+        }
+        assert!(audits(&store).is_empty(), "hot seat items must not drain audit history");
+        runtime.evaluate_host(&store, false, now).unwrap();
+        let first = audits(&store);
+        assert!(!first.is_empty() && first.len() <= 64);
+        assert!(store.claims_for_kind_at("residency.audit-coverage", None, false, 1)
+            .unwrap().claims.is_empty(), "a partial drain cannot certify coverage");
+        assert!(!store.residency_resume_audit_page().unwrap().is_empty());
+        drop(store);
+        let store = Store::open(&path, "amber").unwrap();
+        store.set_member_key(Some(key)).unwrap();
+        let mut runtime = RuntimeEvidence::default();
+        runtime.evaluate_host(&store, false, now + 1).unwrap();
+        let complete = audits(&store);
+        assert_eq!(complete.len(), 80);
+        assert!(complete.len() - first.len() <= 64);
+        assert!(store.residency_resume_audit_page().unwrap().is_empty());
+        runtime.evaluate_host(&store, false, now + 2).unwrap();
+        assert_eq!(audits(&store).len(), 80);
+        for request in &requests {
+            resume_audit_claim(&store, request, "admitted");
+            resume_audit_claim(&store, request, "completed");
         }
     }
 

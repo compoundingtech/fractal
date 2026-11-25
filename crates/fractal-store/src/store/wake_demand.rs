@@ -1,6 +1,7 @@
 //! Disposable wake projection and durable acceptance-time wake audit outbox.
 //! Audit capture is independent of pending/delivery state and survives projection rebuilds.
 use super::*;
+use crate::model::MemberSpec;
 
 const TABLE: &str = "local_wake_demand_v1";
 const QUEUE: &str = "local_wake_demand_pending_v1";
@@ -214,7 +215,7 @@ impl Store {
 /// This ledger is not a projection: never rebuild it from old claims. Missing history is
 /// unknown, and a restart must not manufacture acceptance-time suspension observations.
 pub(super) fn create_audit_capture(connection: &Connection, graph_cut: &str) -> Result<()> {
-    connection.execute_batch(&format!("
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h21a2a41a2d4e owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ &format!("
         CREATE TABLE IF NOT EXISTS local_residency_wake_capture (
             message TEXT PRIMARY KEY, seat TEXT NOT NULL, accepted_at INTEGER NOT NULL,
             received_at INTEGER NOT NULL, graph_cut INTEGER NOT NULL, metadata TEXT NOT NULL,
@@ -248,7 +249,7 @@ fn audit_captures(source: &Connection) -> Result<Vec<AuditCapture>> {
 
 fn acknowledge_audits(source: &Connection, rows: &[AuditCapture]) -> Result<bool> {
     for row in rows {
-        source.execute("UPDATE local_residency_wake_capture SET processed=1 WHERE message=?1", [&row.0])?;
+        source.execute(/* sqlite-large-value: allow-for-now lv-hd4f758d189b4 owner=fractal_store::store::wake_demand TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_residency_wake_capture SET processed=1 WHERE message=?1", [&row.0])?;
     }
     Ok(!source.query_row("SELECT EXISTS(SELECT 1 FROM local_residency_wake_capture WHERE processed=0)",
         [], |row| row.get::<_, bool>(0))?)

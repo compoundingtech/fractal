@@ -156,15 +156,52 @@ impl Store {
         )?.query_map([&self.origin], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Automatic operations remain auditable after their desired seat disappears
-    /// or moves to another owner. Only this host's durable admissions participate.
-    pub fn residency_resume_audit_seats(&self) -> Result<Vec<String>> {
-        smallclaims::touched::note_read(|| "kind:runtime.action.requested".to_owned());
-        Ok(self.readers.get().prepare_cached(
-            "SELECT DISTINCT subject FROM claims INDEXED BY claims_idle_action_index
-             WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle'
-               AND json_extract(body,'$.fields.action')='resume' AND origin=?1"
-        )?.query_map([&self.origin], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    /// Page the durable runtime action log, not the current desired roster. The
+    /// cursor advances only after each event's required audit has been persisted.
+    pub fn residency_resume_audit_page(&self) -> Result<Vec<ClaimRecord>> {
+        for kind in ["runtime.action.requested", "runtime.action.succeeded", "runtime.action.failed"] {
+            smallclaims::touched::note_read(|| format!("kind:{kind}"));
+        }
+        let connection = self.readers.get();
+        let cursor: u64 = connection.query_row(
+            "SELECT value FROM meta WHERE key='residency-resume-audit-cursor-v1'", [],
+            |row| row.get::<_, String>(0),
+        ).optional()?.map(|value| value.parse()).transpose()?.unwrap_or(0);
+        Ok(connection.prepare_cached(
+            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM claims WHERE store_index IN (
+                SELECT store_index FROM (
+                    SELECT store_index FROM claims WHERE kind='runtime.action.requested' AND store_index>?1
+                    UNION ALL
+                    SELECT store_index FROM claims WHERE kind='runtime.action.succeeded' AND store_index>?1
+                    UNION ALL
+                    SELECT store_index FROM claims WHERE kind='runtime.action.failed' AND store_index>?1
+                ) ORDER BY store_index LIMIT 65
+             ) ORDER BY store_index"
+        )?.query_map([cursor], claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A feature withdrawal must not consume an event whose audit was refused.
+    /// Permanent checkpoint receipts satisfy the same acknowledgement contract.
+    pub fn acknowledge_residency_resume_audit(&self, index: u64, audit_key: Option<&str>) -> Result<bool> {
+        self.connection.batched(|tx| -> Result<bool> {
+            if let Some(key) = audit_key {
+                let id = operation_id_for_key(key);
+                let persisted: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND state='active')
+                        OR EXISTS(SELECT 1 FROM checkpoint_claims WHERE operation_id=?1)",
+                    [&id], |row| row.get(0),
+                )?;
+                if !persisted { return Ok(false); }
+            }
+            tx.execute(
+                /* sqlite-large-value: allow-for-now lv-h96c4807df18b owner=fractal_store::store::idle_residency TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('residency-resume-audit-cursor-v1',?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                 WHERE CAST(meta.value AS INTEGER)<CAST(excluded.value AS INTEGER)",
+                [index.to_string()],
+            )?;
+            Ok(true)
+        }).map_err(anyhow::Error::msg)?
     }
 
     /// Indexed owner-local idle episodes, not a scan of the seat roster.
