@@ -70,6 +70,86 @@ fn desired_inputs_rebuild_only_changed_keys_and_track_raw_removals() {
 }
 
 #[test]
+fn unrelated_schema_boundaries_do_not_rebuild_desired_inputs() {
+    let store = fixture();
+    let mut inputs = DesiredInputs::default();
+    inputs.refresh(&store).unwrap();
+    let initial = store.reconcile_input_work();
+    let generation = inputs.generation.unwrap();
+    for sql in [
+        /* sqlite-large-value: allow-for-now lv-h82308a22d31e owner=fractal_store::store::observer_reconcile_inputs_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE unrelated_desired_journal_test(value TEXT)",
+        /* sqlite-large-value: allow-for-now lv-hbe64b763d908 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE unrelated_desired_journal_test",
+        // Unlike the unrelated table, this changes a watched table's schema and
+        // emits an exact-table unobserved hint, but desired is still unchanged.
+        /* sqlite-large-value: allow-for-now lv-he971a48b6066 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=chunk-or-reference-variable-columns */ "CREATE INDEX unrelated_desired_journal_test ON claims(subject)",
+        /* sqlite-large-value: allow-for-now lv-hbd2b3651de8d owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX unrelated_desired_journal_test",
+    ] {
+        store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hf9f34cf518c0 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
+        assert_eq!(store.desired_changes_since(Some(generation)), (generation, Some(Vec::new())), "{sql}");
+        assert!(!inputs.refresh(&store).unwrap(), "{sql}");
+        assert!(inputs.changed_subjects.is_empty(), "{sql}");
+        assert_eq!(store.reconcile_input_work(), initial, "{sql}");
+    }
+}
+
+#[test]
+fn missed_hooks_and_opaque_schema_boundaries_rebuild_desired_inputs() {
+    let store = fixture();
+    let mut inputs = DesiredInputs::default();
+    inputs.refresh(&store).unwrap();
+    let initial = store.reconcile_input_work();
+    {
+        let writer = store.connection.write();
+        writer.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+        writer.execute(/* sqlite-large-value: allow-for-now lv-hab0cd697de5c owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='resource/first'", []).unwrap();
+    }
+    assert!(store.desired_changes_since(inputs.generation).1.is_none(),
+        "reinstalled row hooks cannot certify mutations they missed");
+    assert!(inputs.refresh(&store).unwrap());
+    assert_eq!(inputs.desired.len(), 1);
+    assert_eq!(inputs.desired[0].subject, "resource/second");
+    assert_eq!(store.reconcile_input_work()["full_rebuilds"].as_u64(),
+        initial["full_rebuilds"].as_u64().map(|count| count + 1));
+
+    store.connection.write().execute_batch("PRAGMA writable_schema=ON; PRAGMA writable_schema=OFF;").unwrap();
+    assert!(store.desired_changes_since(inputs.generation).1.is_none(),
+        "opaque schema boundaries must still fence every watched table");
+    assert!(inputs.refresh(&store).unwrap());
+    assert_eq!(store.reconcile_input_work()["full_rebuilds"].as_u64(),
+        initial["full_rebuilds"].as_u64().map(|count| count + 2));
+}
+
+#[test]
+fn desired_table_replacement_and_unsupported_coverage_require_full_refresh() {
+    let store = fixture();
+    let mut inputs = DesiredInputs::default();
+    inputs.refresh(&store).unwrap();
+    let original: String = store.readers.get().query_row(
+        "SELECT sql FROM sqlite_schema WHERE name='desired'", [], |row| row.get(0),
+    ).unwrap();
+    store.connection.write().execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hc713cde9e5c2 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE desired; {original};")).unwrap();
+    assert!(store.desired_changes_since(inputs.generation).1.is_none(),
+        "identical replacement SQL does not preserve the old roster");
+    assert!(inputs.refresh(&store).unwrap());
+    assert!(inputs.desired.is_empty());
+    let generation = inputs.generation;
+
+    store.connection.write().execute_batch(&format!(
+        /* sqlite-large-value: allow-for-now lv-hb258592aa0b3 owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE desired; {original} WITHOUT ROWID;"
+    )).unwrap();
+    assert!(store.desired_changes_since(generation).1.is_none(),
+        "unsupported physical tables cannot publish selective answers");
+    drop(store.connection.write());
+    assert!(store.desired_changes_since(generation).1.is_none(),
+        "ordinary resolutions cannot restore missing coverage");
+    store.connection.write().execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h3150e174ff8f owner=fractal_store::store::observer_reconcile_inputs_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE desired; {original};")).unwrap();
+    assert!(store.desired_changes_since(generation).1.is_none(),
+        "verified recovery still requires a full refresh");
+    assert!(inputs.refresh(&store).unwrap());
+    assert!(!inputs.refresh(&store).unwrap());
+}
+
+#[test]
 fn desired_journal_rollover_bounds_deleted_keys_and_rebuilds_stale_rosters() {
     let store = fixture();
     let mut inputs = DesiredInputs::default();
