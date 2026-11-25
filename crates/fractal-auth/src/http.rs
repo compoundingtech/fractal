@@ -448,7 +448,6 @@ mod secret_tests {
 #[cfg(test)]
 mod signature_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn signed_messages_detect_tampering_and_wrong_fleets() {

@@ -473,7 +473,7 @@ fn load_pairing_recovery(state_dir: &Path, code: &JoinCode, name: &str, key: &Me
             && recovery.resume.sponsor_key == recovery.resume.response.sponsor_key,
         "authenticated pairing recovery belongs to another code, name, or member key"
     );
-    super::handshake::verify_request(&recovery.resume.request, &code.token)
+    fractal_auth::handshake::verify_request(&recovery.resume.request, &code.token)
         .map_err(|_| anyhow::anyhow!("authenticated pairing recovery request is invalid"))?;
     verify_response(code, &recovery.resume.request, &recovery.resume.response)?;
     Ok(Some(recovery))

@@ -21,8 +21,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::claim::{ ClaimRecord, DocumentVersion, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,
     ReplicaEnvelopePayload};
-use fractal_wire::{ClaimInput};
-use crate::error::{Error as FractalError, internal};
+use fractal_wire::{ClaimInput, Error as FractalError};
+use crate::error::internal;
 use crate::hash::{
     batch_header_hash, canonical_hash, canonical_json_text, canonical_json_value, claim_hash,
     claim_id_is_content_hash, replica_envelope_hash, replica_record_ref,
