@@ -100,6 +100,58 @@ jobs:
             ${{ runner.temp }}/fractal-native-closure.json
           if-no-files-found: error
           retention-days: 30
+  publish-ghostty-cache:
+    name: Publish Ghostty dependency cache
+    needs: [publish-x86_64-linux]
+    if: github.repository == 'compoundingtech/fractal' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Realize and publish the two PTY contract outputs
+        env:
+          CACHE_NAME: overeng-effect-utils
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::warning::Ghostty cache publishing skipped: repository secret CACHIX_AUTH_TOKEN is absent. See the publish-ghostty-cache job in .github/workflows/nix.yml."
+            exit 0
+          fi
+          # Use Fractal's locked PTY input, including Fractal's nixpkgs follows.
+          lib_drv=$(nix eval --impure --raw --expr 'let f = builtins.getFlake ("git+file://" + builtins.getEnv "GITHUB_WORKSPACE"); in f.inputs.pty.packages.x86_64-linux.libghostty-vt.drvPath')
+          # PTY keeps the contract-hashed fixed-output derivation private. Select its direct input,
+          # rather than copying the fetch recipe or pinning a store path outside the contract.
+          deps_drv=$(nix derivation show "$lib_drv" | jq -er '[.derivations[] | (.inputDrvs // .inputs.drvs) | keys[] | select(test("-ghostty-[^-]+-zig-deps\\.drv$"))] | if length == 1 then .[0] | if startswith("/nix/store/") then . else "/nix/store/" + . end else error("expected exactly one Ghostty Zig dependency input") end')
+          nix build --no-link --print-out-paths "$deps_drv^out" "$lib_drv^out" > "$RUNNER_TEMP/ghostty-cache.paths"
+          cachix=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#cachix)
+          "$cachix/bin/cachix" push "$CACHE_NAME" < "$RUNNER_TEMP/ghostty-cache.paths"
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push')
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Publishes the two PTY contract outputs to the public Cachix cache; no separate Actions build archive.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   nix-release-x86_64-linux:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (false) }}
     runs-on: ci1
