@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use fractal_wire::Error as FractalError;
 use fractal_light_node_core::custody::MemberLifecycle;
 pub use smallclaims::claim::{ ClaimRecord, ClaimsPage, DocumentVersion, ReplicaBatch, ReplicaEnvelope,
     ReplicaEnvelopeId, ReplicaEnvelopeSignature};
