@@ -84,6 +84,10 @@ read-job upsert. Host/message identifiers remain variable TEXT keys under
 `bound-or-reference-values-and-reclamation`; the change removes per-candidate
 poll rewrites rather than claiming a representation-size bound. Existing table
 declarations, manual flows and `reviewed_base` provenance are unchanged.
+The corresponding relay fixture reviews its temporary assertion-trigger setup
+and teardown under the fixture module owner. Updating the local selector
+documentation string also refreshes its existing catalog fingerprint, without
+changing any schema declaration or representation contract.
 
 TODO codes mean the following concrete work:
 

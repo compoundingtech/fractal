@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Poll legacy relay-close candidates without rebuilding unchanged mappings or per-message read jobs.",
+  "replay": {"status": "none", "detail": "Existing candidate mappings and queued legacy-host cursors are reused without replay or backfill."},
+  "schema": {"status": "none", "detail": "No tables, columns, wire operations or published schema shapes change."},
+  "rules": {"status": "changed", "detail": "Legacy compatibility polls read retained candidate pages directly. Their durable cursor advances only after terminal evidence and failed-answer retry jobs commit. Successful open answers create no per-message jobs; real selector and ownership changes still use changed-key discovery."},
+  "compatibility": {"status": "none", "detail": "Peers without message-mark events retain the existing network polling schedule. Event-capable peers retain event subscriptions and discard any queued compatibility cursor without deleting failed-read retry jobs."},
+  "downtime": {"status": "none", "detail": "Ordinary rolling deployment; no conversion or extra startup scan."},
+  "manual": {"status": "none", "detail": "No configuration or operator action is required."},
+  "recovery": {"status": "none", "detail": "Cancellation replays an unacknowledged page. Failed network reads retain durable deadlines. Binary rollback can consume the same legacy-host cursor and retained candidate tables."}
+}

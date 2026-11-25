@@ -1339,7 +1339,7 @@ async fn legacy_close_polls_do_not_rewrite_open_candidates_and_upgrades_cancel_t
         crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
     }
     close_writer_idle(&viewer).await;
-    viewer.connection.write_background().execute_batch("
+    viewer.connection.write_background().execute_batch(/* sqlite-large-value: allow-for-now lv-h0fec3f295cd5 owner=fractal_daemon::peer_tests::seat_freshness_reads TODO=bound-or-reference-values-and-reclamation */ "
         CREATE TEMP TRIGGER reject_poll_candidate_delete BEFORE DELETE ON local_relayed_close_candidates
             BEGIN SELECT RAISE(ABORT,'poll rewrote candidates'); END;
         CREATE TEMP TRIGGER reject_poll_candidate_insert BEFORE INSERT ON local_relayed_close_candidates
@@ -1353,7 +1353,7 @@ async fn legacy_close_polls_do_not_rewrite_open_candidates_and_upgrades_cancel_t
             crate::api::relayed_close_maintenance::turn(&state).await.unwrap();
         }
     }
-    viewer.connection.write_background().execute_batch("
+    viewer.connection.write_background().execute_batch(/* sqlite-large-value: allow-for-now lv-hdcf62ce8ee8d owner=fractal_daemon::peer_tests::seat_freshness_reads TODO=bound-or-reference-values-and-reclamation */ "
         DROP TRIGGER reject_poll_candidate_delete;
         DROP TRIGGER reject_poll_candidate_insert;
         DROP TRIGGER reject_poll_read_insert;
