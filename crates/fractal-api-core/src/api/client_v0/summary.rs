@@ -334,14 +334,17 @@ pub fn published_machines(
     let index = snapshot.store_index;
     let conflicts = store.conflicting_operations()?;
     let fleet = store.fleet_view_for_client()?;
+    let mut configured = configured_machine_hosts(state, &fleet);
+    configured.remove(&client_host_id(&state.node));
     let (peers, valid_until) = store.summary_peer_inputs(now)?;
+    // Peer receipts change transport evidence, not runtime membership. Updating that
+    // evidence must not reconstruct every runtime and host on every exchange.
     let held = store.summary_machines().filter(|held| {
-        held.peers == peers && held.conflicts == conflicts && held.fleet == fleet
-            && held.valid_until.is_none_or(|until| now < until)
+        held.conflicts == conflicts && held.fleet == fleet && !peer_receipts_regressed(&held.peers, &peers)
     });
     let kept = match held {
         Some(held) => match store.summary_machines_hold(held.cut, index)? {
-            Some(changed) if changed.is_empty() => Some((held.machines, held.runtimes)),
+            Some(changed) if changed.is_empty() => Some((refresh_machine_transports(store, held.machines, &peers, &configured)?, held.runtimes)),
             Some(changed) => {
                 let status = store.status_for_subject_names_for_generic_reads_at(changed.clone(), index, false, crate::store::ClaimsReduction::Runtime)?;
                 let hosts = runtime_resources_from_status(state, snapshot, session, status)?
@@ -361,9 +364,12 @@ pub fn published_machines(
                     };
                 }
                 // The machines are the same hosts while the runtimes' hosts are.
-                (held.runtimes.values().collect::<BTreeSet<_>>()
-                    == runtimes.values().collect::<BTreeSet<_>>())
-                .then(|| (held.machines, Arc::new(runtimes)))
+                if held.runtimes.values().collect::<BTreeSet<_>>()
+                    == runtimes.values().collect::<BTreeSet<_>>() {
+                    Some((refresh_machine_transports(store, held.machines, &peers, &configured)?, Arc::new(runtimes)))
+                } else {
+                    None
+                }
             }
             None => None,
         },
@@ -372,6 +378,10 @@ pub fn published_machines(
     let (machines, runtimes) = match kept {
         Some(kept) => kept,
         None => {
+            store.with_summary_sources(|sources| {
+                sources.work.machine_membership_rebuilds += 1;
+                Ok(())
+            })?;
             let (machines, runtimes) = machine_summary_resources_and_hosts(state, snapshot, session)?;
             (Arc::new(machines), Arc::new(runtimes))
         }
@@ -381,6 +391,72 @@ pub fn published_machines(
         SummaryMachines { cut: index, peers, valid_until, conflicts, fleet, machines: machines.clone(), runtimes },
     );
     Ok(machines)
+}
+
+/// A receipt reset invalidates a retained claim/receipt maximum. Rebuild its source
+/// rather than carrying a receipt from an obsolete clock or removed peer row.
+fn peer_receipts_regressed(before: &Value, after: &Value) -> bool {
+    before.as_array().into_iter().flatten().any(|previous| {
+        let old = previous[1].as_str().and_then(|at| at.parse::<u128>().ok());
+        let next = after.as_array().into_iter().flatten()
+            .find(|next| next[0] == previous[0])
+            .and_then(|next| next[1].as_str()).and_then(|at| at.parse::<u128>().ok());
+        next < old
+    })
+}
+
+/// Refresh just the transport inputs consumed by summary counting. Membership and
+/// claim-derived host status are maintained by the claim delta above.
+fn refresh_machine_transports(store: &Store, machines: Arc<Vec<Value>>, peers: &Value, configured_hosts: &BTreeSet<String>) -> anyhow::Result<Arc<Vec<Value>>> {
+    let mut changed = None;
+    for (index, machine) in machines.iter().enumerate() {
+        let Some(name) = machine["host_id"].as_str().and_then(|host| host.strip_prefix("host/")) else {
+            continue;
+        };
+        let Some(peer) = peers.as_array().into_iter().flatten().find(|peer| peer[0].as_str() == Some(name)) else {
+            continue;
+        };
+        let mut last = peer[1].as_str().and_then(|at| at.parse::<u128>().ok()).map(client_timestamp);
+        let configured = configured_hosts.contains(machine["host_id"].as_str().unwrap_or_default());
+        let observed = machine["operational"]["reasons"].as_array().is_some_and(|reasons|
+            reasons.iter().any(|reason| reason == "replication-transport" || reason == "discovered-history"));
+        if !configured && !observed {
+            continue;
+        }
+        // Native configured-host projection uses the store clock, not the client
+        // count clock (which may be skewed independently).
+        let up = if configured {
+            let (up, at) = store.replication_peer_up(name)?;
+            last = at.map(client_timestamp);
+            up
+        } else {
+            false
+        };
+        let mut next = None;
+        if configured {
+            let state = if up { "reachable" } else { "last-seen" };
+            if machine["state"] != state {
+                next = Some(machine.clone());
+                next.as_mut().unwrap()["state"] = json!(state);
+            }
+        }
+        for (transport_index, transport) in machine["transports"].as_array().into_iter().flatten().enumerate() {
+            let previous = transport["last_success_at"].as_str();
+            let timestamp = if configured { last.as_deref() } else { last.as_deref().max(previous) };
+            let status = if configured { Some(if up { "up" } else { "last-seen" }) } else { None };
+            if previous != timestamp || status.is_some_and(|status| transport["status"] != status) {
+                let next = next.get_or_insert_with(|| machine.clone());
+                next["transports"][transport_index]["last_success_at"] = json!(timestamp);
+                if let Some(status) = status {
+                    next["transports"][transport_index]["status"] = json!(status);
+                }
+            }
+        }
+        if let Some(next) = next {
+            changed.get_or_insert_with(|| (*machines).clone())[index] = next;
+        }
+    }
+    Ok(changed.map_or(machines, Arc::new))
 }
 
 #[cfg(test)]

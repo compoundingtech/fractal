@@ -1451,6 +1451,30 @@ fn machine_resources_with_work(
     Ok(machine_resources_and_hosts(state, history, snapshot, session, include_work)?.0)
 }
 
+/// Current transport-authoritative hosts, shared by native and retained summary projections.
+fn configured_machine_hosts(state: &AppState, fleet: &smallclaims::fleet::FleetView) -> BTreeSet<String> {
+    let ended_hosts = fleet
+        .members
+        .iter()
+        .filter(|member| fleet.current(&member.name).is_empty())
+        .map(|member| client_host_id(&member.name))
+        .chain(fleet.legacy_removed.iter().map(|name| client_host_id(name)))
+        .collect::<BTreeSet<_>>();
+    state
+        .configured_peers
+        .iter()
+        .map(|peer| client_host_id(peer))
+        .chain(
+            fleet
+                .members
+                .iter()
+                .filter(|member| member.state != "ended")
+                .map(|member| client_host_id(&member.name)),
+        )
+        .filter(|host| !ended_hosts.contains(host))
+        .collect::<BTreeSet<_>>()
+}
+
 fn machine_resources_and_hosts(
     state: &AppState,
     history: bool,
@@ -1537,26 +1561,7 @@ fn machine_resources_and_hosts(
     // Fleet members count as configured hosts; ended members are history. A config peer that
     // ended as a member is history too, even while its [[peers]] entry remains.
     let fleet = state.store.fleet_view_for_client()?;
-    let ended_hosts = fleet
-        .members
-        .iter()
-        .filter(|member| fleet.current(&member.name).is_empty())
-        .map(|member| client_host_id(&member.name))
-        .chain(fleet.legacy_removed.iter().map(|name| client_host_id(name)))
-        .collect::<BTreeSet<_>>();
-    let configured_hosts = state
-        .configured_peers
-        .iter()
-        .map(|peer| client_host_id(peer))
-        .chain(
-            fleet
-                .members
-                .iter()
-                .filter(|member| member.state != "ended")
-                .map(|member| client_host_id(&member.name)),
-        )
-        .filter(|host| !ended_hosts.contains(host))
-        .collect::<BTreeSet<_>>();
+    let configured_hosts = configured_machine_hosts(state, &fleet);
     host_ids.extend(configured_hosts.iter().cloned());
     host_ids.extend(host_runtime_ids.keys().cloned());
     let status = state.store.status_for_subject_prefix_for_generic_reads_at(

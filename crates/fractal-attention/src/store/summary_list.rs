@@ -148,6 +148,7 @@ impl SummaryListStore for Store {
         json!({
             "mission_subject_rebuilds": work.mission_subject_rebuilds,
             "agent_subject_rebuilds": work.agent_subject_rebuilds,
+            "machine_membership_rebuilds": work.machine_membership_rebuilds,
             "machine_subject_rebuilds": work.machine_subject_rebuilds,
             "attention_subject_rebuilds": work.attention_subject_rebuilds,
         })

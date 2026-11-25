@@ -206,11 +206,11 @@ async fn agents_publication_queued_wake_cannot_refresh_without_demand() {
     let subscriber = store.subscribe_agents_publications();
     drop(subscriber);
     wake.notify_one();
-    let mut changed = app.event_notify.subscribe();
+    let mut inputs = observe_agent_roster_inputs(store).unwrap();
     let mut delivery = delivery_presence::subscribe_semantic();
     let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
     let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
-        store, &wake, &mut changed, &mut delivery, &mut relayed, client_now_ms()));
+        store, &wake, &mut inputs, &mut delivery, &mut relayed, client_now_ms()));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
     assert!(!store.agents_publication_demand());
@@ -585,17 +585,20 @@ async fn agents_publication_no_deadline_wait_has_no_periodic_refresh() {
     let _subscriber = store.subscribe_agents_publications();
     // Consume subscription registration: this wait represents a completed owner iteration.
     wake.notified().await;
-    let mut changed = app.event_notify.subscribe();
+    let mut inputs = observe_agent_roster_inputs(store).unwrap();
     let mut delivery = delivery_presence::subscribe_semantic();
     let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
     let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
-        store, &wake, &mut changed, &mut delivery, &mut relayed, client_now_ms()));
+        store, &wake, &mut inputs, &mut delivery, &mut relayed, client_now_ms()));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
     tokio::time::advance(Duration::from_secs(3600)).await;
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending(),
         "elapsed time alone is not an input when no evidence boundary exists");
     app.event_notify.send_modify(|revision| *revision += 1);
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_pending(),
+        "global transport activity is not a roster input");
+    store.request_fresh_agent_roster(false);
     assert!(Future::poll(waiting.as_mut(), &mut context).is_ready());
 }
 
@@ -617,17 +620,110 @@ async fn agents_publication_wait_wakes_at_its_exact_evidence_boundary() {
             },
             rows: Arc::new(vec![]), valid_until_ms: Some(now + 250),
         }, now, Some(now + 250), vec![]).unwrap();
-    let mut changed = app.event_notify.subscribe();
+    let mut inputs = observe_agent_roster_inputs(store).unwrap();
     let mut delivery = delivery_presence::subscribe_semantic();
     let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
     let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
-        store, &wake, &mut changed, &mut delivery, &mut relayed, u128::from(now)));
+        store, &wake, &mut inputs, &mut delivery, &mut relayed, u128::from(now)));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
     tokio::time::advance(Duration::from_millis(249)).await;
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
     tokio::time::advance(Duration::from_millis(1)).await;
     assert!(Future::poll(waiting.as_mut(), &mut context).is_ready());
+}
+
+#[tokio::test(start_paused = true)]
+async fn roster_metadata_and_unrelated_claims_do_zero_owner_work_but_runtime_still_wakes() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let wake = store.start_agent_roster_refresher().unwrap();
+    let _subscriber = store.subscribe_agents_publications();
+    roster_resilience_runtime(store, "agent/roster-input-runtime", "old");
+    store.answer_agent_roster_requests(|| refresh_agent_roster(store, false)).unwrap();
+    wake.notified().await;
+    let before = store.agent_roster_work();
+    let presentation = roster_presentation::work(store);
+    let mut inputs = observe_agent_roster_inputs(store).unwrap();
+    let mut delivery = delivery_presence::subscribe_semantic();
+    let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
+    let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
+        store, &wake, &mut inputs, &mut delivery, &mut relayed, client_now_ms()));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
+    for n in 0..64 {
+        store.connection.write().execute(
+            "INSERT INTO meta(key,value) VALUES('roster-unrelated-maintenance',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [n.to_string()],
+        ).unwrap();
+        app.event_notify.send_modify(|revision| *revision += 1);
+        assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
+    }
+    assert_eq!(agent_roster_wake_work(store)["metadata"], 64);
+    assert_eq!(agent_roster_wake_work(store)["metadata_unchanged"], 64);
+    store.append_claim(&ClaimInput {
+        subject:"resource/roster-unrelated-input".into(), kind:"resource.observed".into(),
+        actor:Some("person/example".into()),
+        fields:BTreeMap::from([("kind".into(), json!("custom.example.notification")), ("facts".into(), json!({}))]),
+        evidence:vec![], expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
+    assert_eq!(store.agent_roster_work(), before);
+    assert_eq!(roster_presentation::work(store), presentation);
+    assert_eq!(agent_roster_wake_work(store)["refreshes"], 0);
+    assert_eq!(agent_roster_wake_work(store)["claims"], 0);
+    roster_resilience_runtime(store, "agent/roster-input-runtime", "new");
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_ready());
+    assert!(agent_roster_wake_work(store)["claims"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn roster_local_append_feed_keeps_freshness_usage_timeline_and_subagent_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let mut inputs = observe_agent_roster_inputs(store).unwrap();
+    let append = |subject: &str, kind: &str| {
+        store.connection.write().execute(
+            "INSERT INTO local_observations(after_store_index,subject,kind,body,observed_at_unix_ms)
+             VALUES(0,?1,?2,'{}',1)",
+            rusqlite::params![subject, kind],
+        ).unwrap();
+    };
+    append("resource/roster-local-unrelated", "resource.observed");
+    assert!(!inputs.changed.has_changed().unwrap());
+    for kind in ["harness.observed", "harness.timeline", "harness.usage", "subagent.renewed"] {
+        append("agent/roster-local-input", kind);
+        assert!(inputs.changed.has_changed().unwrap(), "{kind}");
+        inputs.changed.borrow_and_update();
+    }
+    assert_eq!(agent_roster_wake_work(store)["local_observations"], 4);
+}
+
+#[tokio::test]
+async fn roster_metadata_after_projection_reset_cannot_reuse_the_forgotten_source() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let wake = store.start_agent_roster_refresher().unwrap();
+    let _subscriber = store.subscribe_agents_publications();
+    roster_resilience_runtime(store, "agent/roster-reset-input", "current");
+    store.answer_agent_roster_requests(|| refresh_agent_roster(store, false)).unwrap();
+    wake.notified().await;
+    let mut inputs = observe_agent_roster_inputs(store).unwrap();
+    store.forget_current_views();
+    store.connection.write().execute(
+        "INSERT INTO meta(key,value) VALUES('roster-reset-input','1')", [],
+    ).unwrap();
+    let mut delivery = delivery_presence::subscribe_semantic();
+    let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
+    let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
+        store, &wake, &mut inputs, &mut delivery, &mut relayed, client_now_ms()));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_ready());
+    assert_eq!(agent_roster_wake_work(store)["metadata_unchanged"], 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -661,4 +757,43 @@ async fn roster_expired_restart_retains_delivery_dependencies() {
     assert_eq!(roster_presentation::work(&app.store)["card_rebuilds"], 3,
         "changed delivery evidence rebuilds only the restored agent");
     delivery_presence::bind_recovered(&fence);
+}
+
+#[tokio::test(start_paused = true)]
+async fn irrelevant_metadata_cannot_push_back_the_presentation_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let wake = store.start_agent_roster_refresher().unwrap();
+    let _subscriber = store.subscribe_agents_publications();
+    roster_resilience_runtime(store, "agent/roster-metadata-deadline", "current");
+    store.answer_agent_roster_requests(|| refresh_agent_roster(store, false)).unwrap();
+    wake.notified().await;
+    let publication = publication_current(store);
+    let now = client_now_ms().min(u128::from(u64::MAX)) as u64;
+    let source = store.agents_publication_source(store.index().unwrap()).unwrap();
+    store.publish_presented_agents(store.agents_publication_build().unwrap(),
+        source, now, Some(now + 250), publication.rows().to_vec()).unwrap();
+    let mut inputs = observe_agent_roster_inputs(store).unwrap();
+    let mut delivery = delivery_presence::subscribe_semantic();
+    let mut relayed = store.extension::<crate::store::RelayedFreshness>().subscribe();
+    let mut waiting = std::pin::pin!(wait_for_agent_roster_change(
+        store, &wake, &mut inputs, &mut delivery, &mut relayed, u128::from(now)));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
+    for n in 0..4 {
+        tokio::time::advance(Duration::from_millis(50)).await;
+        store.connection.write().execute(
+            "INSERT INTO meta(key,value) VALUES('roster-deadline-unrelated',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [n.to_string()],
+        ).unwrap();
+        assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
+    }
+    assert_eq!(agent_roster_wake_work(store)["metadata_unchanged"], 4);
+    tokio::time::advance(Duration::from_millis(49)).await;
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_ready());
+    assert_eq!(agent_roster_wake_work(store)["deadlines"], 1);
 }
