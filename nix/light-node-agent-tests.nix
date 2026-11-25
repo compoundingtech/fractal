@@ -95,7 +95,10 @@ assert lib.hasInfix
   "lightNodeAgentConfig=${lib.escapeShellArg "/Users/example/private config/'quoted' $HOME.json"}"
   darwinEscaped.home.file.${receipt}.text;
 assert activation.before == [ "linkGeneration" ] && activation.after == [ "writeBoundary" ];
-assert lib.hasInfix ''desiredExecutable=${lib.escapeShellArg executable}'' activation.data;
+# Store-context-bearing paths cannot be regular expressions in builtins.match.
+# Exact substitution keeps the full executable assertion without discarding context.
+assert builtins.replaceStrings
+  [ "desiredExecutable=${lib.escapeShellArg executable}" ] [ "" ] activation.data != activation.data;
 assert lib.hasInfix ''source "$oldGenPath/home-files/${receipt}"'' activation.data;
 assert lib.hasInfix ''
   if [[ "$lightNodeAgentExecutable" == "$desiredExecutable" && "$lightNodeAgentConfig" == "$desiredConfig" ]]; then
