@@ -101,6 +101,10 @@ export interface HistoryBarView {
   /** The open day: still accumulating, drawn as partial. */
   readonly open: boolean
   readonly words: string
+  /** The table's value cell: the day's value in the chart's unit, `undefined` when it has none. */
+  readonly value: string | undefined
+  /** The table's state cell: `partial` for the open day, then `zero`, `unrated` or `unreported` when not plainly recorded. */
+  readonly status: string
 }
 
 const DAY_MS = 86_400_000
@@ -115,6 +119,8 @@ export type HistoryView =
       readonly _tag: 'chart'
       /** Names the unit: "Daily spend, USD · last 30 days" or "Daily tokens · last 30 days". */
       readonly caption: string
+      /** The table's unit column: `USD` or `tokens`. */
+      readonly unit: string
       readonly bars: readonly HistoryBarView[]
       readonly summary: string
       /** What the bars leave out: tokens below USD coverage, days the producer dropped, a failed refresh. */
@@ -162,10 +168,13 @@ export const historyView = ({ ledgerAccountId, history, preferred }: {
   return {
     _tag: 'chart',
     caption: `${unit === 'usd' ? 'Daily spend, USD' : 'Daily tokens'} · last ${HISTORY_DAYS} days`,
+    unit: unit === 'usd' ? 'USD' : 'tokens',
     bars: days.map(day => ({
       day: day.day, state: day.state, open: day.open,
       fill: day.value === undefined ? undefined : max === 0 ? 0 : day.value / max * 100,
       words: `${day.day}${day.open ? ' so far' : ''}: ${text(day)}`,
+      value: day.value === undefined ? undefined : formatUnitValue({ value: day.value, unit }),
+      status: [...(day.open ? ['partial'] : []), ...(day.state === 'recorded' ? [] : [day.state])].join(', ') || 'recorded',
     })),
     summary: [
       ...(full.length === 0 ? []

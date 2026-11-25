@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "The web Usage pane shows the selected quota account's daily usage for the last 30 days when the host configures the usage history relay (WF_USAGE_HISTORY_URL). It reads in USD where the producer's coverage admits dollars and in tokens otherwise, draws today as partial, and says when history is not configured, still loading, unreadable or failed.",
+  "summary": "The web Usage pane shows the selected quota account's daily usage for the last 30 days when the host configures the usage history relay (WF_USAGE_HISTORY_URL). It reads in USD where the producer's coverage admits dollars and in tokens otherwise, draws today as partial, gives screen readers each day's date, value, unit and state as a visually hidden table, and says when history is not configured, still loading, unreadable or failed.",
   "replay": { "status": "none", "detail": "No replay or rebuild of persisted state." },
   "schema": { "status": "none", "detail": "No database, wire or client-v0 schema changes; the pane reads the existing history relay." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },

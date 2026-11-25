@@ -220,6 +220,13 @@ export const QuotaEmpty: Story = {
   },
 }
 
+/** One day of the history chart as its accessible table reads it: date, value, unit, state. */
+const dayRow = (canvas: HTMLElement, index: number) => {
+  const table = within(canvas).getByRole('table', { name: 'Each day in the chart' })
+  const row = within(table).getAllByRole('row').slice(1).at(index)!
+  return [within(row).getByRole('rowheader'), ...within(row).getAllByRole('cell')].map(cell => cell.textContent)
+}
+
 /** Each history state under the selected account: tokens below USD coverage, none relayed, unreadable, failed, still reading. */
 export const QuotaHistory: Story = {
   args: { quota: 'history' },
@@ -243,8 +250,16 @@ export const QuotaHistory: Story = {
     expect(canvasElement.querySelectorAll('[data-state="zero"]')).toHaveLength(1)
     await userEvent.click(await accountRow(canvasElement, 'copilot/main'))
     await waitFor(() => expect(canvasElement.querySelectorAll('[data-state="unreported"]')).toHaveLength(27))
+    // Without hover: the chart's table names the oldest day as unreported, with no value.
+    const [oldest, oldestValue, , oldestState] = dayRow(canvasElement, 0)
+    expect(oldest).toBe(canvasElement.querySelector('[data-usage-day]')!.getAttribute('data-usage-day'))
+    expect([oldestValue, oldestState]).toEqual(['none', 'unreported'])
     await userEvent.click(await accountRow(canvasElement, 'claude/alpha'))
     await expect(await usage.findByText('USD coverage is below the producer’s gate, so this shows tokens')).toBeVisible()
+    // ...and yesterday's value, in the unit the chart draws, matching the bar's hover title.
+    const [yesterday, value, unit, state] = dayRow(canvasElement, -2)
+    expect([unit, state]).toEqual(['tokens', 'recorded'])
+    expect(canvasElement.querySelector(`[data-usage-day="${yesterday}"]`)).toHaveAttribute('title', `${yesterday}: ${value}`)
     canvasElement.dataset.proof = 'passed'
   },
 }

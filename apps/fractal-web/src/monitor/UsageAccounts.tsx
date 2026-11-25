@@ -58,6 +58,14 @@ const History = ({ view }: { readonly view: HistoryView }) => {
         style={{ blockSize: bar.state === 'recorded' ? `${Math.max(bar.fill ?? 0, 1)}%` : undefined }}
         {...stylex.props(styles.bar, styles[bar.state], bar.open && styles.open)} />)}
     </div>
+    {/* Each bar's day as a table for screen readers, which never get a hover title; the bars stay out of the tab order. */}
+    <Aria.VisuallyHidden elementType="div">
+      <table data-usage-history-table="">
+        <caption>Each day in the chart</caption>
+        <thead><tr><th scope="col">Date</th><th scope="col">Value</th><th scope="col">Unit</th><th scope="col">State</th></tr></thead>
+        <tbody>{view.bars.map(bar => <tr key={bar.day}><th scope="row">{bar.day}</th><td>{bar.value ?? 'none'}</td><td>{view.unit}</td><td>{bar.status}</td></tr>)}</tbody>
+      </table>
+    </Aria.VisuallyHidden>
     <p aria-hidden="true" {...stylex.props(styles.axis)}><span>{view.bars[0]?.day}</span><span>today, so far</span></p>
     <p {...stylex.props(styles.meta)}>{view.summary}</p>
     {view.notes.map(note => <p key={note} {...stylex.props(styles.meta, styles.held)}>{note}</p>)}

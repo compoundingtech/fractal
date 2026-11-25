@@ -105,7 +105,9 @@ describe('usage account history', () => {
     if (view._tag !== 'chart') throw new Error('expected chart')
     expect(view.bars).toHaveLength(30)
     expect(view.bars.at(-1)!).toMatchObject({ day: '2026-10-01', open: true })
-    expect(view.bars[0]!).toMatchObject({ day: '2026-09-02', state: 'unreported', fill: undefined, words: '2026-09-02: not reported' })
+    expect(view.bars[0]!).toMatchObject({ day: '2026-09-02', state: 'unreported', fill: undefined, words: '2026-09-02: not reported', value: undefined, status: 'unreported' })
+    expect(view.bars.at(-1)!).toMatchObject({ value: expect.stringMatching(/^\$\d+\.\d\d$/), status: 'partial' })
+    expect(view.unit).toBe('USD')
     expect(view.bars.map(bar => bar.state === 'unreported')).toEqual([...Array(27).fill(true), false, false, false])
     expect(view.summary).toMatch(/^\$\d+\.\d\d over 2 full days · 27 days not reported · peak /)
   })
@@ -119,7 +121,8 @@ describe('usage account history', () => {
     const view = history({ last: unrated([10, undefined, 5, 2]), attempt: { _tag: 'ok' } })
     if (view._tag !== 'chart') throw new Error('expected chart')
     expect(view.summary).toBe('$15.00 rated subtotal over 2 full days · 1 without a rate · 26 days not reported · peak $10.00 on 2026-09-01 · today so far $2.00')
-    expect(view.bars.at(-3)!).toMatchObject({ state: 'unrated', fill: undefined, words: '2026-09-02: no rate' })
+    expect(view.bars.at(-3)!).toMatchObject({ state: 'unrated', fill: undefined, words: '2026-09-02: no rate', value: undefined, status: 'unrated' })
+    expect(view.bars.at(-2)!).toMatchObject({ value: '$5.00', status: 'recorded' })
   })
 
   it('shows no USD total when no day is rated', () => {
