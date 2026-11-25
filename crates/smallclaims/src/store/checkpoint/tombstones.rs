@@ -73,6 +73,47 @@ pub fn invalid_manifest(message: impl Into<String>) -> FractalError {
     FractalError::new("checkpoint-manifest-invalid", message)
 }
 
+/// Check a manifest read from a backup before anything from it is stored: every tombstone is
+/// before the cut and listed once. A local cut may drop a claim and keep its envelope, so a
+/// claim need not name an envelope the manifest lists. Returns the manifest's drop digest.
+pub fn check_checkpoint_manifest(manifest: &CheckpointManifest) -> Result<String, FractalError> {
+    let mut envelopes = BTreeSet::new();
+    for envelope in &manifest.envelopes {
+        if envelope.accepted_at_unix_ms >= manifest.cut_unix_ms {
+            return Err(invalid_manifest(format!(
+                "envelope {}/{} is not before the cut",
+                envelope.writer, envelope.sequence
+            )));
+        }
+        if !envelopes.insert((
+            envelope.writer.as_str(),
+            envelope.sequence,
+            envelope.envelope_hash.as_str(),
+        )) {
+            return Err(invalid_manifest(format!(
+                "envelope {}/{} is listed twice",
+                envelope.writer, envelope.sequence
+            )));
+        }
+    }
+    let mut claims = BTreeSet::new();
+    for claim in &manifest.claims {
+        if claim.accepted_at_unix_ms >= manifest.cut_unix_ms {
+            return Err(invalid_manifest(format!(
+                "claim `{}` is not before the cut",
+                claim.id
+            )));
+        }
+        if !claims.insert(claim.id.as_str()) {
+            return Err(invalid_manifest(format!(
+                "claim `{}` is listed twice",
+                claim.id
+            )));
+        }
+    }
+    Ok(drop_digest(&manifest.envelopes, &manifest.claims))
+}
+
 /// Check a manifest against the `drop_digest` that a stable checkpoint's participants verified,
 /// before anything from it is stored. The digest covers every field of every tombstone, so a
 /// changed field, or a tombstone added or left out, is rejected here.
