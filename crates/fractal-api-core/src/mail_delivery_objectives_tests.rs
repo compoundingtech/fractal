@@ -88,11 +88,29 @@ fn terminal_undelivered_is_bad_but_generic_delivery_is_unknown() {
 }
 
 #[test]
-fn explicit_hold_and_unknown_owner_never_become_good_delivery() {
+fn undeclared_recipient_is_excluded_and_coverage_is_known() {
     let store = Store::open_memory("example-host").unwrap();
-    let sent = send(&store, "message/example-held", json!(["st3-silent"]));
-    assert_eq!(publish(&store, sent + DEADLINE + 1)["status"], "no-data");
+    let sent = send(&store, "message/example-undeclared", json!([]));
+    let at = sent + DEADLINE + 1;
+    let publication = store.extension::<Publication>();
+    let snapshot = Incremental::default().capture(&store, at).unwrap();
+    let (_sender, receiver) = tokio::sync::watch::channel(snapshot.generation);
+    *publication.changed.lock().unwrap() = Some(receiver);
+    *publication.snapshot.lock().unwrap() = Some(snapshot);
+    let row = rows(&store, at).unwrap().remove(0);
+    assert_eq!(row["source"]["coverage_known"], true);
+    assert_eq!(row["source"]["unknown"], 0);
+    assert_eq!(row["evidence"]["excluded"], 1);
+    assert_eq!(row["diagnostics"]["excluded_undeclared_recipient"], 1);
+    assert_eq!(row["evidence"]["total"], 0.0);
+    assert!(row["current"].as_str().unwrap().contains("1 excluded"));
+}
+
+#[test]
+fn explicit_hold_never_becomes_good_delivery() {
+    let store = Store::open_memory("example-host").unwrap();
     declared(&store);
+    let sent = send(&store, "message/example-held", json!(["st3-silent"]));
     let row = publish(&store, sent + DEADLINE + 2);
     assert_eq!(row["source"]["held"], 1);
     assert_eq!(row["evidence"]["total"], 0.0);
@@ -229,6 +247,15 @@ fn missing_driver_frontier_cannot_manufacture_an_overdue_failure() {
     let snapshot = capture(&store, sent + DEADLINE + 1).unwrap();
     assert_eq!(snapshot.unknown, 1);
     assert!(snapshot.samples.is_empty());
+    let publication = store.extension::<Publication>();
+    let (_sender, receiver) = tokio::sync::watch::channel(0);
+    *publication.changed.lock().unwrap() = Some(receiver);
+    *publication.snapshot.lock().unwrap() = Some(snapshot);
+    let row = rows(&store, sent + DEADLINE + 1).unwrap().remove(0);
+    assert_eq!(row["source"]["coverage_known"], false);
+    assert_eq!(row["status"], "no-data");
+    assert_eq!(row["evidence"]["excluded"], 0);
+    assert_eq!(row["diagnostics"]["excluded_undeclared_recipient"], 0);
     frontier(&store, sent - 1);
     let lagging = capture(&store, sent + DEADLINE + 1).unwrap();
     assert!(lagging.unknown > 0);
