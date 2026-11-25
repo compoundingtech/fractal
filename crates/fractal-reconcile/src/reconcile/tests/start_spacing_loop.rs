@@ -164,6 +164,8 @@ enum QuiescenceTraffic {
     Deduplication,
     StartCompletion,
     OwnEffects,
+    Bookkeeping,
+    OwnDesired,
 }
 
 async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
@@ -239,6 +241,23 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
                 reconciler.upgrade().unwrap()
                     .record_once("exec/unrelated", "runtime.action.succeeded", local_fields.clone()).unwrap();
                 assert_eq!(smallclaims::touched::writes(), before);
+            }
+            if traffic == QuiescenceTraffic::Bookkeeping && pass < 64 {
+                let before = smallclaims::touched::writes();
+                store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-h54ace7c4784e owner=fractal_reconcile::reconcile::tests::start_spacing_loop TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('quiescence-bookkeeping',?1)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [pass.to_string()],
+                ).unwrap();
+                assert!(smallclaims::touched::writes() > before, "physical writes must be exercised");
+            }
+            if traffic == QuiescenceTraffic::OwnDesired && pass < 2 {
+                // A projection removal has no appended claim. Its native desired
+                // change still requires another pass to converge the member roster.
+                store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-hacb81ac424e3 owner=fractal_reconcile::reconcile::tests::start_spacing_loop TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1",
+                    [format!("exec/quiet-{pass}")],
+                ).unwrap();
             }
             if traffic == QuiescenceTraffic::OwnEffects && pass < 64 {
                 let mut fields = local_fields.clone();
@@ -342,4 +361,14 @@ async fn background_start_completion_on_a_helper_thread_wakes_a_quiet_pass() {
 #[tokio::test]
 async fn background_own_local_effects_keep_the_64_pass_cap_and_self_notify() {
     assert_eq!(quiescence_pass_counts(QuiescenceTraffic::OwnEffects).await, vec![64, 1]);
+}
+
+#[tokio::test]
+async fn background_quiesces_after_physical_bookkeeping_writes() {
+    assert_eq!(quiescence_pass_counts(QuiescenceTraffic::Bookkeeping).await, vec![1]);
+}
+
+#[tokio::test]
+async fn background_native_desired_removals_continue_without_appended_claims() {
+    assert_eq!(quiescence_pass_counts(QuiescenceTraffic::OwnDesired).await, vec![3]);
 }

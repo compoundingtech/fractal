@@ -2691,11 +2691,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         if !admitted { return None; }
                         let started = now_ms();
-                        // Continue for this pass's own effects: a completed step can release
-                        // its successor or cleanup work. Other writers notify independently;
-                        // unrelated replication traffic must not keep this wake alive.
-                        let before = smallclaims::touched::writes();
-                        let failed = match crate::profile::task("task reconcile-pass", || {
+                        // Only input changes can release a successor or cleanup work.
+                        // Local queue/projection bookkeeping is not a convergence signal.
+                        // Other writers notify independently; their claims must not keep
+                        // this wake alive.
+                        let desired_before = this.store.desired_changes_since(None).0;
+                        let (failed, wrote) = smallclaims::touched::record_wrote(|| match crate::profile::task("task reconcile-pass", || {
                             let _trigger_span = crate::profile::span_with_io(pass_trigger);
                             this.reconcile_once_with_cause(cause)
                         }) {
@@ -2721,8 +2722,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 }
                                 false
                             }
-                        };
-                        Some((before != smallclaims::touched::writes(), failed, started))
+                        });
+                        let changed = !wrote.is_empty()
+                            || desired_before != this.store.desired_changes_since(None).0;
+                        Some((changed, failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
                 };
