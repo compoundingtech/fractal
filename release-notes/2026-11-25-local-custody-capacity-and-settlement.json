@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reserve executor custody before native launch, reclaim settled session history, release local authority on natural exit, and preserve authorized run cancellation.",
+  "replay": {"status": "none", "detail": "Existing claims replay unchanged; local runtime-start retirement receipts remain usable for custody recovery."},
+  "schema": {"status": "changed", "detail": "No replicated schema changes. A local checkpoint subject/kind lookup index bounds legacy retirement evidence probes. A custody_bound marker in local runtime-start bodies permanently records reservation transfer into custody, surviving settlement and reclamation. Retained older bindings acquire the marker before reclamation."},
+  "rules": {"status": "changed", "detail": "Only unsettled custody and unresolved launch reservations consume capacity. Retired settled generations can be reclaimed while a subject remains live. Exact natural exit observations settle custody, and run credential liveness is checked at writer admission rather than after cancellation changes its own steps."},
+  "compatibility": {"status": "none", "detail": "New dispatches opt into custody reservations with custody_reserved. Legacy successful starts without bindings remain counted unless positive admitted retirement/removal, retained retirement checkpoint evidence, an exact durable stopped/exited/absent runtime observation, operation-ended/operation-retired verification, a terminal owning exec step, or later verified supersession proves them historical. Runtime observations and supersession preserve runtime ID, incarnation and terminal kind. Missing desired projections are never removal evidence, including on light nodes. These legacy exemptions never release unsettled live custody or new-protocol reservations. Recovery verification alone does not release a live generation's reservation."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "changed", "detail": "Executor-local runtime-start retirement receipts without source_host can settle their exact retired generation. Exact explicit-stop retirement proof remains recordable after a concurrent natural-exit settlement."}
+}

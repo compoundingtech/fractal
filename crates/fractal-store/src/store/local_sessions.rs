@@ -27,7 +27,8 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         detached_by TEXT, detach_receipted INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(subject,incarnation)
     ) WITHOUT ROWID;
-    CREATE UNIQUE INDEX IF NOT EXISTS local_session_current ON local_session_custody(subject) WHERE active=1;")?;
+    CREATE UNIQUE INDEX IF NOT EXISTS local_session_current ON local_session_custody(subject) WHERE active=1;
+    CREATE INDEX IF NOT EXISTS local_session_checkpoint_subject_kind ON checkpoint_claims(subject,kind);")?;
     let has_retirement_proof: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_session_custody') WHERE name='native_retirement_verified')",
         [], |row| row.get(0))?;
@@ -43,12 +44,120 @@ pub fn forget_subject(connection: &Connection, subject: &str) -> Result<()> {
     let installed: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='local_session_custody')", [], |row| row.get(0))?;
     if installed {
+        retain_bound_start_reservations(connection)?;
         connection.execute(/* sqlite-large-value: allow-for-now lv-h0de5666a03e4 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_session_custody WHERE subject=?1 AND custody_settled=1
             AND (detached_by IS NULL OR detach_receipted=1)
             AND NOT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND
                 (finished=0 OR applied=0 OR receipted=0 OR (revoked_by IS NOT NULL AND cleanup_verified=0)))",
             [subject])?;
     }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct SessionCustodyCapacityReached;
+
+impl std::fmt::Display for SessionCustodyCapacityReached {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("executor session custody capacity reached")
+    }
+}
+impl std::error::Error for SessionCustodyCapacityReached {}
+
+/// A bound producer has transferred its reservation into custody permanently,
+/// even after that generation is settled and its custody history is reclaimed.
+fn retain_bound_start_reservations(connection: &Connection) -> Result<()> {
+    connection.execute("UPDATE local_runtime_starts
+        SET body=json_set(body,'$.custody_bound',json('true'))
+        WHERE id IN (SELECT json_extract(body,'$.start_operation') FROM local_session_custody)
+          AND json_extract(body,'$.custody_bound') IS NOT 1
+          AND EXISTS(SELECT 1 FROM local_session_custody AS custody
+            WHERE custody.subject=local_runtime_starts.subject
+              AND json_extract(custody.body,'$.start_operation')=local_runtime_starts.id)", [])?;
+    Ok(())
+}
+
+/// Admit one unsettled custody slot under the exclusive writer, before native entry.
+/// Every start-operation kind must count its unsettled reservations here. Local
+/// dispatched producers reserve capacity until binding or proven producer closure.
+/// Unmarked legacy producers remain reserved unless positively closed or replaced
+/// by a later verified incarnation of the same subject and native runtime.
+pub fn admit_capacity(connection: &Connection, operation: Option<&str>) -> Result<()> {
+    // Backfill retained bindings before reclamation, including pre-marker starts.
+    retain_bound_start_reservations(connection)?;
+    connection.execute("DELETE FROM local_session_custody
+        WHERE active=0 AND custody_settled=1
+          AND (detached_by IS NULL OR detach_receipted=1)
+          AND NOT EXISTS(SELECT 1 FROM local_runtime_starts AS starts
+            WHERE starts.subject=local_session_custody.subject
+              AND (?1 IS NULL OR starts.id<>?1) AND
+              (finished=0 OR applied=0 OR receipted=0
+               OR (revoked_by IS NOT NULL AND cleanup_verified=0)))", [operation])?;
+    // Only positive retained evidence closes an unbound legacy reservation.
+    // In particular, an empty desired projection is normal on a light node.
+    // Custody itself is counted independently, even for retired subjects.
+    let retired_admitted = smallclaims::store::record_bytes::admitted_claim_sql("retired");
+    let observed_admitted = smallclaims::store::record_bytes::admitted_claim_sql("observed");
+    let removed_admitted = smallclaims::store::record_bytes::admitted_claim_sql("removed");
+    let count: u64 = connection.query_row(
+        &format!("SELECT (SELECT count(*) FROM local_session_custody WHERE custody_settled=0)
+          + (SELECT count(*) FROM local_runtime_starts AS starts
+             WHERE dispatched=1 AND (?1 IS NULL OR id<>?1)
+               AND json_extract(body,'$.custody_bound') IS NOT 1
+               AND (json_extract(body,'$.custody_reserved')=1 OR finished=0
+                    OR NOT COALESCE((
+                      EXISTS(SELECT 1 FROM claims AS retired
+                        WHERE retired.subject=starts.subject AND retired.kind='agent.retired'
+                          AND {retired_admitted})
+                      OR EXISTS(SELECT 1 FROM desired AS removed_subject
+                        JOIN claims AS removed ON removed.id=removed_subject.claim_id
+                        WHERE removed_subject.subject=starts.subject AND removed_subject.kind='stop'
+                          AND removed.kind='intent.desired' AND {removed_admitted})
+                      OR EXISTS(SELECT 1 FROM checkpoint_claims AS retired
+                        WHERE retired.subject=starts.subject AND retired.kind='agent.retired'
+                          AND NOT EXISTS(SELECT 1 FROM replica_records
+                            WHERE claim_id=retired.id AND state<>'valid'))
+                      OR (json_type(starts.result,'$.incarnation')='text'
+                        AND json_extract(starts.result,'$.incarnation')<>''
+                        AND json_type(starts.body,'$.member.runtime_id')='text'
+                        AND json_type(starts.body,'$.member.terminal') IN ('true','false')
+                        AND (
+                          json_extract(starts.result,'$.verification') IN ('operation-ended','operation-retired')
+                          OR EXISTS(SELECT 1 FROM local_observations AS observed
+                            WHERE observed.subject=starts.subject AND observed.kind='runtime.observed'
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.status') IN ('stopped','exited','absent')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.runtime_id')=json_extract(starts.body,'$.member.runtime_id')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.terminal')=json_extract(starts.body,'$.member.terminal')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.incarnation_id')=json_extract(starts.result,'$.incarnation'))
+                          OR EXISTS(SELECT 1 FROM claims AS observed
+                            WHERE observed.subject=starts.subject AND observed.kind='runtime.observed'
+                              AND {observed_admitted}
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.status') IN ('stopped','exited','absent')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.runtime_id')=json_extract(starts.body,'$.member.runtime_id')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.terminal')=json_extract(starts.body,'$.member.terminal')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.incarnation_id')=json_extract(starts.result,'$.incarnation'))))
+                      OR (json_extract(starts.body,'$.subject.kind')='exec'
+                        AND EXISTS(SELECT 1 FROM step_runs AS step
+                          WHERE step.subject=json_extract(starts.body,'$.subject.owner_step')
+                            AND step.status IN ('completed','failed','cancelled')))
+                      OR (json_extract(starts.result,'$.verification')='operation-incarnation'
+                        AND EXISTS(SELECT 1 FROM local_runtime_starts AS newer
+                          WHERE newer.subject=starts.subject AND newer.dispatched=1
+                            AND json_extract(newer.body,'$.member.runtime_id')
+                                =json_extract(starts.body,'$.member.runtime_id')
+                            AND json_extract(newer.body,'$.member.terminal')
+                                =json_extract(starts.body,'$.member.terminal')
+                            AND CAST(json_extract(newer.body,'$.start_request_position') AS INTEGER)
+                                >CAST(json_extract(starts.body,'$.start_request_position') AS INTEGER)
+                            AND json_extract(newer.result,'$.verification')='operation-incarnation'
+                            AND json_extract(newer.result,'$.incarnation')
+                                <>json_extract(starts.result,'$.incarnation')))),0))
+               AND (finished=0 OR (cleanup_verified=0
+                    AND json_extract(result,'$.producer_closed') IS NOT 1))
+               AND NOT EXISTS(SELECT 1 FROM local_session_custody AS custody
+                 WHERE json_extract(custody.body,'$.start_operation')=starts.id))"),
+        [operation], |row| row.get(0))?;
+    if count >= 4096 { return Err(SessionCustodyCapacityReached.into()); }
     Ok(())
 }
 
@@ -81,8 +190,7 @@ impl Store {
             params![binding.subject, binding.incarnation], |row| row.get(0)).optional()?;
         if matches!(prior, Some(Some(_))) { return Ok(()); }
         if prior.is_none() {
-            let count: u64 = tx.query_row("SELECT count(*) FROM local_session_custody", [], |row| row.get(0))?;
-            anyhow::ensure!(count < 4096, "executor session custody capacity reached");
+            admit_capacity(&tx, binding.start_operation.as_deref())?;
         }
         tx.execute(/* sqlite-large-value: allow-for-now lv-hdce8a783bfb6 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET active=0 WHERE subject=?1 AND incarnation<>?2 AND active=1",
             params![binding.subject, binding.incarnation])?;
@@ -91,18 +199,24 @@ impl Store {
             WHERE local_session_custody.detached_by IS NULL
               AND (local_session_custody.body<>excluded.body OR local_session_custody.active<>1)",
             params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
+        if let Some(operation) = binding.start_operation.as_deref() {
+            tx.execute("UPDATE local_runtime_starts
+                SET body=json_set(body,'$.custody_bound',json('true'))
+                WHERE id=?1 AND subject=?2", params![operation, binding.subject])?;
+        }
         tx.commit()?;
         Ok(())
     }
 
     /// Persist only a positively verified whole-scope stop, before reporting native success.
     /// This is not the command completion receipt and does not settle custody.
+    /// Exact proof recording converges with a concurrent natural-exit settlement.
     pub fn verify_local_session_retirement(&self, binding: &LocalSession) -> Result<()> {
         anyhow::ensure!(binding.custody == SessionCustody::Owned, "borrowed custody cannot retire its native runtime");
         let changed = self.connection.write().execute(
             /* sqlite-large-value: allow-for-now lv-h31a948e882b8 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET native_retirement_verified=1
              WHERE subject=?1 AND incarnation=?2 AND body=?3 AND active=1
-               AND custody_settled=0 AND detached_by IS NULL",
+               AND detached_by IS NULL",
             params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
         anyhow::ensure!(changed == 1, "native retirement custody changed before its proof was recorded");
         Ok(())
@@ -177,5 +291,94 @@ impl Store {
             WHERE subject=?1 AND json_extract(body,'$.native_incarnation')=?2",
             params![subject, native_incarnation])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_inflight_and_unverified_producers_still_reserve_capacity() {
+        for finished in [0, 1] {
+            let store = Store::open_memory("executor").unwrap();
+            store.connection.write().execute(
+                "WITH RECURSIVE starts(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM starts WHERE n<4096)
+                 INSERT INTO local_runtime_starts(id,subject,owner,body,finished,result,dispatched)
+                 SELECT 'inflight-'||n,'agent/inflight/'||n,'old-owner','{}',?1,
+                    '{\"verification\":\"launch-accepted-unverified\"}',1 FROM starts",
+                [finished]).unwrap();
+            let error = admit_capacity(&store.connection.write(), None).unwrap_err();
+            assert!(error.downcast_ref::<SessionCustodyCapacityReached>().is_some(),
+                "legacy unresolved producers must not lose their reservation on upgrade");
+        }
+    }
+
+    #[test]
+    fn natural_exit_settlement_racing_stop_preserves_exact_retirement_proof() {
+        let store = Store::open_memory("executor").unwrap();
+        let binding = LocalSession {
+            subject: "agent/example/exit-stop".into(), runtime_id: "exit-stop".into(),
+            incarnation: "generation".into(), native_incarnation: "generation".into(),
+            terminal: true, driver: None,
+            lifecycle: crate::model::MemberLifecycle::Service,
+            custody: SessionCustody::Owned, start_operation: None, invocation: None,
+        };
+        store.bind_local_session(&binding).unwrap();
+        // The explicit stop already resolved this exact live binding. Hold its
+        // native completion until the concurrent exit observer has settled it.
+        let resolved = store.local_session(&binding.subject).unwrap().unwrap();
+        let settled = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                store.settle_local_session_custody(&binding.subject, &binding.native_incarnation).unwrap();
+                settled.wait();
+            });
+            scope.spawn(|| {
+                settled.wait();
+                store.verify_local_session_retirement(&resolved).unwrap();
+            });
+        });
+        assert!(!store.has_current_local_session(&binding.subject).unwrap());
+        assert!(store.local_session_retirement_verified(&resolved).unwrap());
+        store.verify_local_session_retirement(&resolved).unwrap();
+        store.settle_local_session_custody(&binding.subject, &binding.native_incarnation).unwrap();
+        assert!(store.local_session_retirement_verified(&resolved).unwrap());
+        let mut stale = resolved.clone();
+        stale.runtime_id = "other-runtime".into();
+        assert!(store.verify_local_session_retirement(&stale).is_err());
+    }
+
+    #[test]
+    fn operation_backed_settled_generations_are_reclaimed_without_resurrecting_reservations() {
+        let store = Store::open_memory("executor").unwrap();
+        let mut binding = LocalSession {
+            subject: "agent/example/live".into(), runtime_id: "live".into(),
+            incarnation: "0".into(), native_incarnation: "0".into(),
+            terminal: true, driver: None,
+            lifecycle: crate::model::MemberLifecycle::Service,
+            custody: SessionCustody::Owned, start_operation: None, invocation: None,
+        };
+        for generation in 0..4100 {
+            binding.incarnation = generation.to_string();
+            binding.native_incarnation = binding.incarnation.clone();
+            let operation = format!("start-{generation}");
+            store.connection.write().execute(
+                "INSERT INTO local_runtime_starts
+                    (id,subject,owner,body,finished,result,applied,dispatched,receipted)
+                 VALUES(?1,?2,'owner','{\"custody_reserved\":true}',1,'{\"verification\":\"operation-incarnation\"}',1,1,1)",
+                params![operation, binding.subject]).unwrap();
+            binding.start_operation = Some(operation);
+            store.bind_local_session(&binding).unwrap();
+            store.settle_local_session_custody(&binding.subject, &binding.native_incarnation).unwrap();
+        }
+        let retained: u64 = store.readers.get().query_row(
+            "SELECT count(*) FROM local_session_custody WHERE subject=?1",
+            [&binding.subject], |row| row.get(0)).unwrap();
+        assert!(retained <= 2, "settled live-subject history must remain bounded");
+        binding.incarnation = "next".into();
+        binding.native_incarnation = binding.incarnation.clone();
+        store.bind_local_session(&binding).unwrap();
+        assert!(store.has_current_local_session(&binding.subject).unwrap());
     }
 }
