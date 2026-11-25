@@ -9,6 +9,7 @@ fn peer_receipts_update_machine_transport_without_membership_reconstruction() {
     let now = client_now_ms();
     let peer = |at: u128| {
         state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-ha3ee10fdb029 owner=fractal_api_core::api::client_v0::summary::tests TODO=chunk-or-reference-exact-wire-values */
             "INSERT INTO replication_peers(peer,status,last_success_at_unix_ms,updated_at_unix_ms)
              VALUES ('summary-peer','up',?1,?1) ON CONFLICT(peer) DO UPDATE SET
              last_success_at_unix_ms=excluded.last_success_at_unix_ms,updated_at_unix_ms=excluded.updated_at_unix_ms",
@@ -111,6 +112,7 @@ fn receipt_regression_reinitializes_claim_floors_instead_of_extending_recency() 
 
 fn set_transport_peer(store: &Store, at: u128) {
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h721945730ee8 owner=fractal_api_core::api::client_v0::summary::tests TODO=chunk-or-reference-exact-wire-values */
         "INSERT INTO replication_peers(peer,status,last_success_at_unix_ms,updated_at_unix_ms)
          VALUES ('peer','up',?1,?1) ON CONFLICT(peer) DO UPDATE SET
          last_success_at_unix_ms=excluded.last_success_at_unix_ms",

@@ -654,6 +654,7 @@ async fn roster_metadata_and_unrelated_claims_do_zero_owner_work_but_runtime_sti
     assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
     for n in 0..64 {
         store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h4c99315962a3 owner=fractal_api_core::api::agents_publication_tests TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO meta(key,value) VALUES('roster-unrelated-maintenance',?1)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [n.to_string()],
@@ -687,6 +688,7 @@ fn roster_local_append_feed_keeps_freshness_usage_timeline_and_subagent_inputs()
     let mut inputs = observe_agent_roster_inputs(store).unwrap();
     let append = |subject: &str, kind: &str| {
         store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hb9974e1d89a0 owner=fractal_api_core::api::agents_publication_tests TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO local_observations(after_store_index,subject,kind,body,observed_at_unix_ms)
              VALUES(0,?1,?2,'{}',1)",
             rusqlite::params![subject, kind],
@@ -715,6 +717,7 @@ async fn roster_metadata_after_projection_reset_cannot_reuse_the_forgotten_sourc
     let mut inputs = observe_agent_roster_inputs(store).unwrap();
     store.forget_current_views();
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h98f56f60048e owner=fractal_api_core::api::agents_publication_tests TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO meta(key,value) VALUES('roster-reset-input','1')", [],
     ).unwrap();
     let mut delivery = delivery_presence::subscribe_semantic();
@@ -784,6 +787,7 @@ async fn irrelevant_metadata_cannot_push_back_the_presentation_deadline() {
     for n in 0..4 {
         tokio::time::advance(Duration::from_millis(50)).await;
         store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hb815b48a81e0 owner=fractal_api_core::api::agents_publication_tests TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO meta(key,value) VALUES('roster-deadline-unrelated',?1)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [n.to_string()],
