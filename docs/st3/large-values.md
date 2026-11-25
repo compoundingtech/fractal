@@ -77,6 +77,14 @@ metadata. Run the guard afterward. The helper edits no file, cannot make a faili
 guard pass, and has no accept/write switch. Unchanged source records are not
 rewritten merely because line numbers moved.
 
+The relayed-close compatibility page change reviews five producer sites in
+`fractal_store::store::relayed_close_work`: host-cursor cancellation, conditional
+cursor advancement/completion, failed-answer retry insertion, and changed-key
+read-job upsert. Host/message identifiers remain variable TEXT keys under
+`bound-or-reference-values-and-reclamation`; the change removes per-candidate
+poll rewrites rather than claiming a representation-size bound. Existing table
+declarations, manual flows and `reviewed_base` provenance are unchanged.
+
 TODO codes mean the following concrete work:
 
 | TODO | Required follow-up |
