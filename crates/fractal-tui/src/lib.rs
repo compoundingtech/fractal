@@ -59,6 +59,22 @@ fn mission_label(mission: &fractal_client::Mission) -> String {
         .join(" ")
 }
 fn mission_display_label(mission: &fractal_client::Mission) -> String {
+    // Match the web's missionDisplayTitle policy against the raw title, before title-casing
+    // and adding the mission scope would turn a generated hash into apparent prose.
+    let tail = mission.title.rsplit('/').next().unwrap_or(&mission.title);
+    if tail.len() >= 16 && tail.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        let finished = |state: &str| matches!(state, "completed" | "failed" | "cancelled");
+        let has_open = mission.run_details.iter().any(|run| !finished(&run.status));
+        let mut steps = mission.run_details.iter().enumerate()
+            .filter(|(index, run)| if has_open { !finished(&run.status) } else {
+                *index + 1 == mission.run_details.len()
+            })
+            .flat_map(|(_, run)| run.steps.iter().flatten());
+        let step = steps.clone().find(|step| !finished(&step.state)).or_else(|| steps.next());
+        return step.and_then(|step| step.title.as_deref().filter(|title| !title.is_empty())
+            .or_else(|| step.goals.first().map(String::as_str).filter(|goal| !goal.is_empty())))
+            .unwrap_or("Untitled mission").to_owned();
+    }
     let path = mission
         .header
         .id

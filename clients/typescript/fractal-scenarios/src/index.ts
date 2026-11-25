@@ -3,6 +3,7 @@ import { nowMs } from './kit/time.ts'
 import { genericVariants } from './kit/variants.ts'
 import { buildWorld, type World, type WorldDefinition, type WorldOverrides } from './kit/world.ts'
 import { worldDefinitions } from './worlds/index.ts'
+import type { ThreadTimelineEvent } from '../../fractal-client/Models.generated.ts'
 
 export * from './kit/asciicast.ts'
 export type * from './kit/cast.ts'
@@ -82,3 +83,12 @@ export { foldSlice, syncStatusAt, absolute } from './kit/fold.ts'
 export { manualClock, realClock, type Clock, type ManualClock } from './clock.ts'
 
 export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture
+
+/** Fixture/preliminary: the later authoritative reopen has an earlier wall clock.
+ * Shared by web and native previews; callers keep summary state Open independently
+ * of timestamp presentation. This does not change production timeline ordering.
+ */
+export const threadClockSkewEvents = (now: number, actor: string): ThreadTimelineEvent[] => [
+  { kind: 'thread.reopened', id: 'event/skew-reopen', actor_id: actor, accepted_at_unix_ms: now - 120_000 },
+  { kind: 'thread.closed', id: 'event/skew-close', actor_id: actor, accepted_at_unix_ms: now - 60_000 },
+]

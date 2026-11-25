@@ -2,6 +2,7 @@
 //! fence older builds out, and come back on a restore.
 use super::*;
 use smallclaims::store::blob_file::{self, STORAGE_VERSION};
+use smallclaims::store::{Store as GraphStore, runtime::Plain};
 use std::time::Duration;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -11,12 +12,12 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
-fn document(store: &Store, name: &str, bytes: &[u8]) -> String {
+fn document(store: &GraphStore, name: &str, bytes: &[u8]) -> String {
     store.put_document(name, bytes, &None, &format!("key-{name}")).unwrap().hash
 }
 
 /// The `blobs` row of `hash`: its own byte count and its size.
-fn row(store: &Store, hash: &str) -> (i64, i64) {
+fn row(store: &GraphStore, hash: &str) -> (i64, i64) {
     store
         .readers
         .get()
@@ -24,18 +25,18 @@ fn row(store: &Store, hash: &str) -> (i64, i64) {
         .unwrap()
 }
 
-fn user_version(store: &Store) -> u32 {
+fn user_version(store: &GraphStore) -> u32 {
     store.readers.get().query_row("PRAGMA main.user_version", [], |row| row.get(0)).unwrap()
 }
 
 /// The first step records when this member first ran the build; the window counts from there.
-fn start_window(store: &Store) -> u64 {
+fn start_window(store: &GraphStore) -> u64 {
     let started = now_ms();
     assert!(store.move_blob_bytes_step(started, WINDOW_MS, Duration::from_secs(1)).unwrap().waiting);
     started
 }
 
-fn move_all(store: &Store, now: u64) -> (usize, u64) {
+fn move_all(store: &GraphStore, now: u64) -> (usize, u64) {
     let (mut rows, mut bytes) = (0, 0);
     loop {
         let step = store.move_blob_bytes_step(now, WINDOW_MS, Duration::from_secs(1)).unwrap();
@@ -47,7 +48,7 @@ fn move_all(store: &Store, now: u64) -> (usize, u64) {
     }
 }
 
-fn restore_all(store: &Store, now: u64) -> usize {
+fn restore_all(store: &GraphStore, now: u64) -> usize {
     let mut rows = 0;
     loop {
         let step = store.restore_blob_bytes_step(now).unwrap();
@@ -106,8 +107,8 @@ fn bytes_stay_through_the_window_then_move_and_read_the_same() {
     assert_eq!(store.blob_bytes(&hash).unwrap().as_deref(), Some(&body[..]));
     assert_eq!(store.get_blob(&hash).unwrap().as_deref(), Some(&body[..]));
     assert_eq!(store.get_document("doc/example/a", &hash).unwrap().as_deref(), Some(&body[..]));
-    // The first emptying fenced older builds out.
-    assert_eq!(user_version(&store), STORAGE_VERSION);
+    // Moving bytes never lowers the application's higher privacy fence.
+    assert_eq!(user_version(&store), before.max(STORAGE_VERSION));
     assert!(path.with_file_name("claims.blobs.sqlite3").exists());
 
     // A reopen reads the moved bytes through a fresh connection.
@@ -130,7 +131,7 @@ fn a_blob_of_zero_bytes_keeps_its_own() {
 }
 
 #[test]
-fn a_restore_puts_every_byte_back_and_lowers_the_fence() {
+fn a_restore_puts_every_byte_back_and_keeps_the_privacy_fence() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claims.sqlite3");
     let store = Store::open(&path, "node").unwrap();
@@ -141,7 +142,7 @@ fn a_restore_puts_every_byte_back_and_lowers_the_fence() {
     let before = user_version(&store);
     let later = start_window(&store) + WINDOW_MS;
     assert_eq!(move_all(&store, later).0, 2);
-    assert_eq!(user_version(&store), STORAGE_VERSION);
+    assert_eq!(user_version(&store), before.max(STORAGE_VERSION));
 
     assert_eq!(restore_all(&store, later), 2);
     assert_eq!(row(&store, &a), (first.len() as i64, first.len() as i64));
@@ -150,6 +151,24 @@ fn a_restore_puts_every_byte_back_and_lowers_the_fence() {
     // The window starts again: the pass waits before moving bytes anew.
     assert!(store.move_blob_bytes_step(later, WINDOW_MS, Duration::from_secs(1)).unwrap().waiting);
     assert_eq!(move_all(&store, later + WINDOW_MS).0, 2);
+}
+
+#[test]
+fn a_plain_graph_restore_lowers_only_its_own_blob_fence() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = GraphStore::open(&dir.path().join("claims.sqlite3"), "node", Arc::new(Plain)).unwrap();
+    let body = b"plain graph bytes".repeat(50);
+    let hash = document(&store, "doc/example/plain", &body);
+    let before = user_version(&store);
+    assert!(before < STORAGE_VERSION);
+    let later = start_window(&store) + WINDOW_MS;
+    assert_eq!(move_all(&store, later), (1, body.len() as u64));
+    assert_eq!(user_version(&store), STORAGE_VERSION);
+    assert_eq!(row(&store, &hash), (0, body.len() as i64));
+    assert_eq!(store.get_document("doc/example/plain", &hash).unwrap().as_deref(), Some(&body[..]));
+    assert_eq!(restore_all(&store, later), 1);
+    assert_eq!(row(&store, &hash), (body.len() as i64, body.len() as i64));
+    assert_eq!(user_version(&store), before);
 }
 
 #[test]
@@ -259,62 +278,66 @@ fn a_row_keeps_its_bytes_until_a_checkpoint_has_put_the_copy_on_disk() {
     assert_eq!(store.blob_bytes(&hash).unwrap().as_deref(), Some(&body[..]));
 }
 
-/// Version 26 (compacted signatures) carries 25's meaning: a store fenced at 26 after its blob
-/// bytes moved opens in this build and reads them, and neither a later move nor a restore
-/// touches the higher fence.
+/// A genuine plain graph below the privacy floor can hold version26 with moved bytes.
+/// This is format-version setup, not execution of the historical compaction writer.
+/// Opening it through the application raises it to the privacy floor.
 #[test]
 fn a_store_at_26_opens_and_reads_its_moved_blob_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claims.sqlite3");
-    let store = Store::open(&path, "node").unwrap();
+    let store = GraphStore::open(&path, "node", Arc::new(Plain)).unwrap();
     let body = b"bytes kept in the blob file".repeat(40);
     let hash = document(&store, "doc/example/fenced", &body);
     let later = start_window(&store) + WINDOW_MS;
     assert_eq!(move_all(&store, later).0, 1);
     assert_eq!(user_version(&store), STORAGE_VERSION);
-    // As the compaction writer fences it.
+    // Raise only the below-floor graph fixture; never lower an application store.
     store.connection.write().pragma_update(None, "user_version", 26).unwrap();
     drop(store);
     let store = Store::open(&path, "node").unwrap();
-    assert_eq!(user_version(&store), 26);
+    assert_eq!(user_version(&store), fractal_schema::STORAGE_VERSION);
     assert_eq!(store.get_document("doc/example/fenced", &hash).unwrap().as_deref(), Some(&body[..]));
     let more = b"a later document".repeat(40);
     let other = document(&store, "doc/example/later", &more);
     assert_eq!(move_all(&store, later + DAY_MS).0, 1);
-    assert_eq!(user_version(&store), 26, "a later move never lowers a higher fence");
+    assert_eq!(user_version(&store), fractal_schema::STORAGE_VERSION, "a later move never lowers a higher fence");
     assert_eq!(restore_all(&store, later + DAY_MS), 2);
-    assert_eq!(user_version(&store), 26, "a restore lowers only its own fence, 25");
+    assert_eq!(user_version(&store), fractal_schema::STORAGE_VERSION, "a restore lowers only its own fence, 25");
     assert_eq!(store.get_document("doc/example/later", &other).unwrap().as_deref(), Some(&more[..]));
     const { assert!(smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION >= 26, "this build reads a store at 26") };
 }
 
-/// Storage versions only rise: a store at the valid-record version (27, above the blob file's 25)
-/// keeps it through a blob move and a whole restore, whichever came first.
+/// Version27 format fixtures are prepared below the application floor, in both move orders.
+/// They do not impersonate the historical deletion writer; application reopen must raise28.
 #[test]
 fn a_store_past_the_blob_fence_keeps_its_version_through_a_move_and_a_restore() {
     let gone = smallclaims::store::record_bytes::VALID_RECORDS_GONE_VERSION;
     assert!(gone > STORAGE_VERSION);
-    let set = |store: &Store, version: u32| store.connection.write().pragma_update(None, "user_version", version).unwrap();
-    // At 27 before any blob moves.
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
-    document(&store, "doc/sample-a", b"bytes that move to the blob file");
-    set(&store, gone);
-    let started = start_window(&store);
-    assert!(move_all(&store, started + WINDOW_MS).0 > 0);
-    assert_eq!(user_version(&store), gone, "a move never lowers a store past its fence");
-    restore_all(&store, started + WINDOW_MS);
-    assert_eq!(user_version(&store), gone, "a restore never lowers a store past its fence");
-    // At 25 from a move, then 27 from the first valid-record deletion, then restored.
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
-    document(&store, "doc/sample-b", b"bytes that move to the blob file");
-    let started = start_window(&store);
-    move_all(&store, started + WINDOW_MS);
-    assert_eq!(user_version(&store), STORAGE_VERSION);
-    set(&store, gone);
-    restore_all(&store, started + WINDOW_MS);
-    assert_eq!(user_version(&store), gone);
+    for move_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claims.sqlite3");
+        let graph = GraphStore::open(&path, "node", Arc::new(Plain)).unwrap();
+        let body = b"bytes that move to the blob file";
+        let hash = document(&graph, "doc/sample", body);
+        let started = start_window(&graph);
+        if move_first {
+            assert_eq!(move_all(&graph, started + WINDOW_MS).0, 1);
+            assert_eq!(user_version(&graph), STORAGE_VERSION);
+        }
+        graph.connection.write().pragma_update(None, "user_version", gone).unwrap();
+        if !move_first {
+            assert_eq!(move_all(&graph, started + WINDOW_MS).0, 1);
+            assert_eq!(user_version(&graph), gone, "a move never lowers a store past its fence");
+        }
+        drop(graph);
+        let store = Store::open(&path, "node").unwrap();
+        assert_eq!(user_version(&store), fractal_schema::STORAGE_VERSION);
+        assert_eq!(store.get_document("doc/sample", &hash).unwrap().as_deref(), Some(body.as_slice()));
+        assert_eq!(restore_all(&store, started + WINDOW_MS), 1);
+        assert_eq!(user_version(&store), fractal_schema::STORAGE_VERSION, "a restore never lowers the privacy fence");
+        assert_eq!(row(&store, &hash), (body.len() as i64, body.len() as i64));
+        assert_eq!(store.get_document("doc/sample", &hash).unwrap().as_deref(), Some(body.as_slice()));
+    }
 }
 
 fn compact_all(store: &Store, batch: usize) -> usize {

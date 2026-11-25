@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Say why a thread Enter or Send queued nothing instead of silently doing nothing",
+  "replay": { "status": "none", "detail": "No durable data is replayed; a refused submit queues no thread action, as before." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes." },
+  "rules": { "status": "none", "detail": "Thread authority, fences and mutation rules are unchanged." },
+  "compatibility": { "status": "changed", "detail": "When a thread reply, rename or start cannot be queued, the TUI flashes the reason as a yellow warning and keeps the draft: an empty box (Write something first; nothing was sent), an action still being sent, or a thread whose context has not loaded yet." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required." },
+  "manual": { "status": "changed", "detail": "In fractal tui with thread write access, focus a thread reply box and press Enter with it empty, or press Enter again while a reply is still being sent: the footer says why in yellow and the draft stays." },
+  "recovery": { "status": "none", "detail": "Presentation only; no daemon state, pairings or drafts change." }
+}
