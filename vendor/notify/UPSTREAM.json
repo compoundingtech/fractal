@@ -21,7 +21,7 @@
     "src/windows.rs": "cf53732c805266977136622371a1273eaa0bf3148f734893f393fe752c37b168"
   },
   "localChanges": [
-    "src/fsevent.rs: retain delivered journal cursor across stream restarts, do not purge the journal, propagate genuine stream loss before path filtering, borrow flags during translation so callback logging retains access",
+    "src/fsevent.rs: retain delivered journal cursor across stream restarts, do not purge the journal, propagate genuine stream loss before path filtering, retain MustScanSubDirs subtree scope separately from stream-wide loss, borrow flags during translation so callback logging retains access",
     "src/fsevent_cursor.rs: atomic delivered-event cursor with cross-platform deterministic restart tests"
   ],
   "testIntegration": "fractal-reconcile includes the production cursor module under cfg(test); macOS watcher integration uses this patched crate through the root Cargo patch",

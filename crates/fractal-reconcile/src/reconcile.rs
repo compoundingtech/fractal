@@ -1968,8 +1968,12 @@ impl FileChanges {
 
 impl FileWatch {
     fn relevant(event: &notify::Event, target: &Path, directory: &Path, referent: Option<&Path>) -> bool {
-        // Overflow/rescan means paths may have been lost; every subscription must reread.
-        event.need_rescan()
+        // Dropped events are stream-wide; coalescing requires rereading only
+        // declared inputs intersecting the identified subtree.
+        file_subscriptions::global_rescan(event)
+            || (file_subscriptions::subtree_rescan(event) && event.paths.iter().any(|path|
+                path.starts_with(target) || target.starts_with(path)
+                    || referent.is_some_and(|referent| path.starts_with(referent) || referent.starts_with(path))))
             || (matches!(
                 event.kind,
                 notify::EventKind::Create(_)

@@ -114,7 +114,7 @@ impl HostObservations {
     }
 }
 fn registry_event_relevant(event: &notify::Event, root: &Path) -> bool {
-    if event.need_rescan() { return true; }
+    if file_subscriptions::global_rescan(event) { return true; }
     if !FileWatch::relevant(event, root, root, None) { return false; }
     if event.paths.is_empty() { return true; }
     event.paths.iter().any(|path| {
@@ -269,7 +269,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .remove(&watched_subject);
                     // A file change is not a claim: mark what read the file.
                     file_changes.invalidate(&incremental, &watched_subject,
-                        event.need_rescan() && !notification.coverage_changed, &notify);
+                        file_subscriptions::global_rescan(event) && !notification.coverage_changed, &notify);
             }))?;
         watchers.insert(subject.into(), FileWatch {
             _subscription: subscription, target, directory, referent, recursive, dirty,
@@ -443,6 +443,13 @@ mod tests {
         assert!(registry_event_relevant(
             &notify::Event::new(notify::EventKind::Other)
                 .set_flag(notify::event::Flag::Rescan), root));
+        let subtree = |path: &str| notify::Event::new(notify::EventKind::Other)
+            .set_flag(notify::event::Flag::Rescan).set_info("rescan: subtree")
+            .add_path(PathBuf::from(path));
+        assert!(!registry_event_relevant(&subtree("/example/physical-registry/.activity"), root));
+        assert!(!registry_event_relevant(&subtree("/example/unrelated"), root));
+        assert!(registry_event_relevant(&subtree("/example/physical-registry"), root));
+        assert!(registry_event_relevant(&subtree("/example"), root));
     }
 
     #[tokio::test]
