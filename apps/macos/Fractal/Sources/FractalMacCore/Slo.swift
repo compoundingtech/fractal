@@ -18,11 +18,14 @@ public struct SloEntry: Identifiable, Sendable, Equatable {
   public let measuredAt: Date?
   public let resetsAt: Date?
   public let runsOutAt: Date?
+  /// The declared aspiration beyond `target`, when the objective names one. Display-only: tone
+  /// and status stay the target's.
+  public let goal: Double?
 
   public init(
     id: String, kind: Kind, about: String, target: String, current: String, window: String,
     status: String, explain: String, serverTone: String?, remainingPercent: Double?,
-    measuredAt: Date?, resetsAt: Date?, runsOutAt: Date?
+    measuredAt: Date?, resetsAt: Date?, runsOutAt: Date?, goal: Double? = nil
   ) {
     self.id = id
     self.kind = kind
@@ -37,6 +40,7 @@ public struct SloEntry: Identifiable, Sendable, Equatable {
     self.measuredAt = measuredAt
     self.resetsAt = resetsAt
     self.runsOutAt = runsOutAt
+    self.goal = goal
   }
 }
 

@@ -28,11 +28,21 @@ const MB: f64 = 1e6;
 /// `limits`, objectives first. `stale_after_ms` is how old a limits reading may be before it is
 /// the last known one rather than the current one.
 pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_after_ms: u64) -> Vec<Value> {
+    rows_with_objectives(report, limits, now_unix_ms, stale_after_ms, crate::slo::shipped())
+}
+
+fn rows_with_objectives(
+    report: &Value,
+    limits: &[AccountLimit],
+    now_unix_ms: u64,
+    stale_after_ms: u64,
+    objectives: &[crate::objective::Objective],
+) -> Vec<Value> {
     let mut rows = Vec::new();
     for target in report["targets"].as_array().into_iter().flatten() {
         let Some(name) = target["name"].as_str() else { continue };
         let about = target["about"].as_str().unwrap_or_default();
-        if let Some(policy) = crate::slo::shipped().iter().find(|objective| objective.name == name).and_then(|objective| objective.budget.as_ref()) {
+        if let Some(policy) = objectives.iter().find(|objective| objective.name == name).and_then(|objective| objective.budget.as_ref()) {
             if name == "transaction" {
                 for (kind, label) in [("read", "read transactions"), ("write", "write transactions"), ("writer_hold", "holds of the store's writer")] {
                     let diagnostic = max_latency(&format!("{name}/{kind}"), about, label, target["max_ms"].as_f64(), &target[kind]);
@@ -91,6 +101,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
             }
         }
     }
+    add_native_goals(&mut rows, objectives);
     for limit in limits {
         let name = limit.account_ref.as_deref().unwrap_or(&limit.account);
         if !limit.windows.is_empty() {
@@ -125,6 +136,34 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
         }
     }
     rows
+}
+
+/// Attach aspirations only after evaluation, so they cannot affect verdicts or accounting.
+fn add_native_goals(rows: &mut [Value], objectives: &[crate::objective::Objective]) {
+    use crate::objective::Indicator;
+
+    for row in rows {
+        let goal = objectives.iter().find_map(|objective| {
+            let id = row["id"].as_str()?;
+            let suffix = id.strip_prefix(objective.name.as_str())?;
+            let (stat, remote) = match (&objective.indicator, suffix) {
+                (Indicator::Latency { .. }, "") => ("p99", false),
+                (Indicator::Latency { .. }, "/remote") => ("p99", true),
+                (Indicator::Share { .. }, "") => ("live-share", false),
+                (Indicator::Statement, "") => ("p99", false),
+                (Indicator::Transaction, "/read" | "/write" | "/writer_hold")
+                | (Indicator::WriterHold, "") => ("max", false),
+                (Indicator::Cpu { .. }, "") => ("cores", false),
+                (Indicator::Cpu { .. }, "/idle") => ("idle-cores", false),
+                (Indicator::Divergence, "") => ("open", false),
+                _ => return None,
+            };
+            objective.target(stat, remote)?.goal
+        });
+        if let Some(goal) = goal {
+            row["goal"] = json!(goal);
+        }
+    }
 }
 
 /// The diagnostic target remains visible, but only retained evidence spends the operational
@@ -460,7 +499,7 @@ pub fn divergence(open: u64) -> Value {
     let about = targets.divergence.about.as_str();
     let max_open = targets.divergence.max_open;
     let met = open <= max_open;
-    json!({
+    let mut row = json!({
         "id": "projection-divergence", "kind": "objective", "about": about,
         "target": format!("≤ {max_open} open"), "current": format!("{open} open"), "window": "now",
         "remaining_percent": if met { 100.0 } else { 0.0 }, "status": if met { "met" } else { "missed" },
@@ -475,7 +514,9 @@ pub fn divergence(open: u64) -> Value {
                 )
             }
         ),
-    })
+    });
+    add_native_goals(std::slice::from_mut(&mut row), crate::slo::shipped());
+    row
 }
 
 /// A duration in seconds under a minute and in minutes from a minute on: a declared interval's
@@ -959,6 +1000,67 @@ mod tests {
         assert_eq!(read["status"], "met");
         assert!(read["explain"].as_str().unwrap().contains("100.0% observed coverage"));
         assert_eq!(by_id(&rows, "person-read/remote")["status"], "no-data");
+    }
+
+    #[test]
+    fn native_target_goals_project_after_burning_budget_evaluation() {
+        let mut evidence = retained_budget(100, 100);
+        evidence["windows"]["30d"]["coverage"] = json!(0.01);
+        let report = json!({"targets": [{
+            "name": "person-read", "p99_ms": 300, "remote_p99_ms": 300,
+            "windows": windows(100, 900.0, 100), "remote_windows": windows(100, 900.0, 100),
+            "budget": evidence, "remote_budget": evidence,
+        }]});
+        let baseline = rows_with_objectives(&report, &[], 0, 0, crate::slo::shipped());
+        assert_eq!(by_id(&baseline, "person-read")["status"], "burning");
+        let mut objectives = crate::slo::shipped().to_vec();
+        let objective = objectives.iter_mut().find(|objective| objective.name == "person-read").unwrap();
+        for target in &mut objective.targets {
+            target.goal = Some(if target.remote { 200.0 } else { 100.0 });
+        }
+        let mut projected = rows_with_objectives(&report, &[], 0, 0, &objectives);
+        assert_eq!(by_id(&projected, "person-read")["goal"], 100.0);
+        assert_eq!(by_id(&projected, "person-read/remote")["goal"], 200.0);
+        for row in &mut projected {
+            row.as_object_mut().unwrap().remove("goal");
+        }
+        assert_eq!(projected, baseline, "every verdict, burn and budget field must remain exactly unchanged");
+    }
+
+    #[test]
+    fn native_target_goals_address_each_supported_row() {
+        let mut objectives = crate::slo::shipped().to_vec();
+        for objective in &mut objectives {
+            for target in &mut objective.targets {
+                if !matches!(objective.indicator, crate::objective::Indicator::Database)
+                    && !(matches!(objective.indicator, crate::objective::Indicator::Statement) && target.stat == "max")
+                {
+                    target.goal = Some(match target.bound {
+                        crate::objective::Bound::Within(ms) => ms as f64,
+                        crate::objective::Bound::Max(value)
+                        | crate::objective::Bound::Min(value)
+                        | crate::objective::Bound::MinPercent(value) => value,
+                    });
+                }
+            }
+        }
+        let targets: Vec<_> = objectives.iter().map(|objective| json!({
+            "name": objective.name, "remote_windows": {},
+            "min_percent": if matches!(objective.indicator, crate::objective::Indicator::Share { .. }) { Some(99) } else { None },
+        })).collect();
+        let mut projected = rows_with_objectives(&json!({"targets": targets}), &[], 0, 0, &objectives);
+        let mut divergence = divergence(1);
+        add_native_goals(std::slice::from_mut(&mut divergence), &objectives);
+        projected.push(divergence);
+        for (id, goal) in [
+            ("person-read", 300.0), ("person-read/remote", 300.0),
+            ("ios-live-share", 99.0), ("sql-statement", 10.0),
+            ("transaction/read", 300.0), ("transaction/write", 300.0), ("transaction/writer_hold", 300.0),
+            ("writer-hold", 300.0), ("cpu", 1.0), ("cpu/idle", 0.5), ("projection-divergence", 0.0),
+        ] {
+            assert_eq!(by_id(&projected, id)["goal"], goal, "{id}");
+        }
+        assert!(by_id(&projected, "database").get("goal").is_none());
     }
 
     #[test]

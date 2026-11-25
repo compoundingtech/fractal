@@ -38,6 +38,26 @@ objective "ops/change-rollout" {
   `max`, `cores`, `per-hour`, ...) and the bound is `within=DURATION`, `max=NUMBER`, `min=NUMBER`
   or `min-percent=NUMBER`. Each indicator names its rows (table below). A percentile over claims or
   CI is the row `NAME/pNN` (`ops/change-rollout/p95`), one per target.
+- A target may add numeric `goal=NUMBER`, a display-only aspiration in that target's unit
+  (milliseconds for `within`, percentage points for `min-percent`). It must be finite and
+  on the better side of the target: at least a `min` or `min-percent`, at most a `max` or
+  `within`; equality is allowed. In the TypeScript DSL, use
+  `targets: [{ stat: 'per-hour', min: 5, goal: 20 }]` in `Fractal.objective`.
+  KDL is `target "per-hour" min=5 goal=20`. Goals belong to individual targets, so
+  different statistics and units in one objective never share an ambiguous aspiration.
+  `fractal slo ls --json` and `/v1/slo` expose numeric `goal` only for rows whose target
+  declares one. Count label breakdowns have no target of their own and do not inherit it.
+  The Mac Signals tile adds compact target and goal details only when a goal is present;
+  millisecond duration goals are displayed in the target's duration unit, such as `15m` or `48h`.
+  Sub-unit goals fall back to smaller units, preserving fractional milliseconds when needed,
+  so a positive duration never rounds to a displayed zero.
+  Shipped native goals are supported for targets with independently addressable rows.
+  The database's combined size/growth row and SQL statement's unrepresented `max`
+  diagnostic cannot carry an unambiguous goal, so authoring a goal there is rejected.
+  SQL statement `p99`, latency (local/remote), live share, transaction, writer hold, CPU
+  (busy/idle) and divergence goals are projected after evaluation. Source-backed
+  `github-merged-count` per-hour goals remain supported, including `min=5 goal=20`.
+  A goal never changes verdicts, burn rates, budgets, alerts or attention.
 - `window` is the span an interval or count is measured over, and `min-samples` the samples an
   interval needs before it is met or missed; with fewer it is `no-data`.
 - `budget` declares the bad-event or bad-covered-time allowance, horizon, evidence gates and
@@ -48,6 +68,13 @@ objective "ops/change-rollout" {
 
 A missing, unknown, repeated or nonsensical child is refused, never defaulted. An objective is a root
 declaration; it cannot sit inside a mission.
+
+Goals extend the declaration grammar without changing claim kinds, the claim corpus or
+storage schemas. Existing generic declaration bodies retain `goal` on replay. As with other
+optional grammar extensions, N-1 evaluators that do not recognize `goal` reject that
+declaration as unsupported and show `no-data`; they do not silently reinterpret its target.
+Upgrade evaluators before publishing goal-bearing declarations. Older SLO readers ignore
+the optional row field, and newer readers accept rows without it.
 
 Fault owners can be declared without a harness or command. Their declared `host` selects the
 single member that appends the durable `message.sent`; delivery does not require a running
