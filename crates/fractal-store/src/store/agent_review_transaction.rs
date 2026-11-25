@@ -26,7 +26,7 @@ pub fn append_agent_review_answer_tx(
     ) -> std::result::Result<ReviewOwnerSnapshot, FractalError>,
 ) -> std::result::Result<ClaimRecord, FractalError> {
     let operation = identities::claim_operation(input)?;
-    if let Some(record) = claim_operation_outcome_tx(tx, operation.as_ref())? {
+    if let Some(record) = claim_operation_outcome_tx(tx, operation.as_ref().map(|(id, digest)| (id.as_str(), digest.as_str())))? {
         return Ok(record);
     }
     let answer = incoming_answer(input)?;

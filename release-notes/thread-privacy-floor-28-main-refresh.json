@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Compose causal thread privacy with main's storage readers through version 27",
+  "replay": {"status": "none", "detail": "Preserve authoritative thread, message, operation and pairing history; no replay or history rewrite is required."},
+  "schema": {"status": "changed", "detail": "After graph schema initialization, application stores advance supported versions 20, 21, 22, 25, 26 and 27 to privacy floor 28. Main's blob-file, compacted-signature and replica-record readers remain supported. Plain graph stores retain the version-20 default. The application explicitly activates the reference writer behind the new fence.", "transitions": [[20, 28], [21, 28], [22, 28], [25, 28], [26, 28], [27, 28]]},
+  "rules": {"status": "none", "detail": "Causal thread read privacy and separate fleet writer-readiness attestation remain unchanged."},
+  "compatibility": {"status": "changed", "detail": "Floor 28 fences every pre-privacy reader, including main's readers through version 27. Versions 23 and 24 remain unused and unsupported. Version-23 stores from unmerged preview builds are refused by the existing unsupported-schema path; there is no 23-to-28 migration."},
+  "downtime": {"status": "none", "detail": "Source integration does not deploy services or enable thread writers."},
+  "manual": {"status": "changed", "detail": "Before rollout, verify no store uses preview version 23 or 24 and retain the existing separate reader-readiness and writer-enable approvals."},
+  "recovery": {"status": "changed", "detail": "Do not lower an upgraded store's user_version. Older binaries refuse floor 28; use a compatible forward repair or an explicitly authorized stopped restore of a consistent pre-upgrade backup."}
+}

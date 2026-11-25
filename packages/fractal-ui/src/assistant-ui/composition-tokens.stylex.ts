@@ -220,9 +220,12 @@ export const colorVars = stylex.defineVars({
   glassBorder: 'rgba(255, 255, 255, 0.05)',
   rowHover: '#131313',
   rowActive: '#1a1b1b',
+  /** Accent fill behind `onPrimary` ink; too dark to be text on the canvas. */
   primary: '#346bf1',
   primaryHover: '#3061d9',
   onPrimary: '#ffffff',
+  /** Accent as text (links, owner actions) on canvas, raised and row surfaces: at least 4.5:1 on each. */
+  primaryFg: '#5b8af5',
   running: '#3b82f6',
   runningFg: '#60a5fa',
   done: textVars.fgSoft,

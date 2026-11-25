@@ -50,7 +50,9 @@ class FakeGateway {
   readonly fetch: typeof fetch = async (input, init) => {
     const url = String(input)
     const value =
-      url.includes('/runtimes/') && this.readRuntime !== undefined
+      url.endsWith('/capabilities')
+        ? { capabilities: [] }
+        : url.includes('/runtimes/') && this.readRuntime !== undefined
         ? await this.readRuntime()
         : init?.method === 'POST' && this.attach !== undefined
           ? await this.attach()

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Align compatibility coverage with the one-way causal-thread privacy floor",
+  "replay": {"status": "none", "detail": "No history replay or rewrite."},
+  "schema": {"status": "none", "detail": "Storage behavior is unchanged; compatibility tests derive the floor from the schema constant."},
+  "rules": {"status": "none", "detail": "No authorization or runtime behavior changes."},
+  "compatibility": {"status": "none", "detail": "The emptied-record-bytes probe now verifies that obsolete readers refuse the upgraded store without changing its file, version or records-gone marker, then verifies current-build recovery and replication."},
+  "downtime": {"status": "none", "detail": "No deployment."},
+  "manual": {"status": "none", "detail": "Rollback across the privacy floor still requires restoring a pre-upgrade backup."},
+  "recovery": {"status": "none", "detail": "No recovery procedure changes."}
+}

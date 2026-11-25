@@ -203,10 +203,38 @@ describe('AnswerAlert', () => {
 
   it('shows who asks, the step it holds and how long it waited, with its answers', () => {
     const html = renderToStaticMarkup(<AnswerAlert alert={item({ blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })} onAct={sent} now={now} />)
-    expect(html).toContain('example/atlas · Request · step build · waited 5m')
+    expect(html).toContain('>An agent · Request · step build · waited 5m')
     expect(html).toContain('The parser now accepts trailing commas.')
     expect(html).toContain('Yes')
     expect(html).toContain('>Nothing to do<')
+  })
+
+  it('names who asks from the served attribution, never by id or path, and Fractal for its own machinery', () => {
+    const raisedBy = (id: string, label: string) => ({ tier: 'stopped', kind: 'request', agent: null, raised_by: Option.some({ id, label }), waiting: null })
+    const card = (fields: Record<string, unknown>) => renderToStaticMarkup(<AnswerAlert alert={item(fields)} onAct={sent} now={now} />)
+    // A served name reads as declared, a slug included.
+    expect(card({ presentation: raisedBy(seat, 'Atlas') })).toContain('>Atlas · Request')
+    expect(card({ presentation: raisedBy(seat, 'atlas') })).toContain('aria-label="Your answer to atlas"')
+    // The id without agent/ is the label the daemon gives a seat without a name: it reads as An agent, mid-sentence an agent.
+    for (const id of ['agent/build-host-a/worker-tests', 'agent/example/d415892ea7a1dab11e6ba7ed22a8eb13']) {
+      const unnamedAgent = card({ requester_id: id, presentation: raisedBy(id, id.slice('agent/'.length)) })
+      expect(unnamedAgent).toContain('>An agent · Request')
+      expect(unnamedAgent).toContain('aria-label="Your answer to an agent"')
+      expect(unnamedAgent).not.toContain(id.slice('agent/'.length))
+    }
+    // Fractal's machinery, served as 'st' or unserved, reads as Fractal (attention.rs is_fractal).
+    for (const id of ['agent/st3/reconciler', 'daemon/runtime']) {
+      for (const html of [card({ requester_id: id, presentation: raisedBy(id, 'st') }), card({ requester_id: id })]) {
+        expect(html).toContain('>Fractal · Request')
+        expect(html).toContain('aria-label="Your answer to Fractal"')
+        expect(html).not.toMatch(/>(st|reconciler) · /)
+      }
+    }
+    // Nothing names a step source: the card's meta shows the step, never the source id as who asked.
+    const unnamed = card({ requester_id: undefined, blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })
+    expect(unnamed).toContain('>Request · step build')
+    expect(unnamed).toContain('aria-label="Your answer"')
+    expect(unnamed).not.toContain('>step-run/')
   })
 
   it('says how long is left before an ask resolves by itself and what then applies', () => {
@@ -259,7 +287,7 @@ describe('AnswerAlert', () => {
 
   it('shows what a launch would start, or why it has nothing to approve', () => {
     const html = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'launch-approval', title: 'Launch nightly', actions: ['launch.approve'], preview: Option.some(preview) })} onAct={sent} now={now} />)
-    expect(html).toContain('example/atlas · Launch approval')
+    expect(html).toContain('>An agent · Launch approval')
     expect(html).toContain('Launch nightly')
     expect(html).toContain('Review it<span> · after build</span>')
     expect(html).toContain('Agents: example/builder on example-host')
@@ -289,6 +317,13 @@ describe('AnswerAlert', () => {
     const fault = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'fault', actions: [], blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })} onAct={sent} now={now} />)
     expect(fault).toContain('fractal work retry build')
     expect(fault).not.toContain('in Fractal')
+  })
+
+  it('does not ask for an answer to an informational report without actions', () => {
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'custom.garden.report', title: 'Worker report ready', detail: 'Checks are complete.', actions: [] })} now={now} />)
+    expect(html).toContain('Checks are complete.')
+    expect(html).not.toContain('answer this kind of alert')
+    expect(html).not.toContain('This device is read-only')
   })
 
   it('shows one of several alerts with a pager', () => {

@@ -92,7 +92,7 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
       if (changelog === undefined) return
       if (manifest === undefined) throw new Error('The build never transformed virtual:build-identity; no changelog manifest was compiled for it')
       if (!privateBuild)
-        assertPublicChangelogBoundary({ manifest, privateEntries: changelog.privateEntries, privateDirectory: changelog.privateDirectory, modules, texts })
+        assertPublicChangelogBoundary({ manifest, privateEntries: changelog.privateEntries, privateDirectories: changelog.privateDirectories, modules, texts })
       this.emitFile({ type: 'asset', fileName: 'changelog.v1.json', source: `${JSON.stringify(manifest, null, 2)}\n` })
     },
   }

@@ -3075,7 +3075,7 @@ mission "launch-publication" state="ready" {
     }
 
     #[test]
-    fn signature_storage_19_to_20_upgrade_preserves_runtime_operation_and_format_boundary() {
+    fn signature_storage_upgrade_from_19_preserves_runtime_operation_and_format_boundary() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("claims.db");
         let store = Store::open(&path, "node").unwrap();
@@ -3142,7 +3142,7 @@ mission "launch-publication" state="ready" {
             reader
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            20
+            fractal_schema::STORAGE_VERSION,
         );
         assert_eq!(roots(&reader, true), before_roots);
         assert_eq!(generation(&reader), before_generation);
@@ -3323,7 +3323,6 @@ mission "launch-publication" state="ready" {
             .get()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, smallclaims::store::CURRENT_SCHEMA_VERSION);
         assert_eq!(version, fractal_schema::STORAGE_VERSION);
     }
 }

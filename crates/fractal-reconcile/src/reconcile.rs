@@ -23124,6 +23124,7 @@ pub fn append_work_wake_message(
         None => crate::store::messages_shard::STREAM_INDEX_BASE + sent.store_index,
     };
     Ok(MessageView {
+        delivery_thread: None,
         subject: message_subject,
         from: "daemon/runtime".into(),
         to: agent.into(),
