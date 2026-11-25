@@ -3046,7 +3046,6 @@ mission "launch-publication" state="ready" {
             .get()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, smallclaims::store::CURRENT_SCHEMA_VERSION);
         assert_eq!(version, fractal_schema::STORAGE_VERSION);
     }
 }

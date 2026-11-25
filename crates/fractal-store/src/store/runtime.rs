@@ -847,7 +847,6 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         let transaction = connection.unchecked_transaction()?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h31d1ed089c5e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
         desired_progress::initialize_write_witness(&transaction)?;
-        thread_metadata::install_indexes(&transaction)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcbab08c75150 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
@@ -859,7 +858,6 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
         desired_progress::initialize_write_witness(connection)?;
-        thread_metadata::install_indexes(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2eda34b01b09 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
@@ -1214,13 +1212,14 @@ mod schema_install_tests {
     }
 
     #[test]
-    fn thread_indexes_install_on_fresh_and_existing_schemas() {
+    fn thread_indexes_are_not_installed_on_fresh_or_existing_schemas() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
         let indexes = [
             "claims_thread_conversation_index", "claims_thread_message_accepted_index",
             "claims_thread_inbox_origin_index", "claims_thread_mission_index", "claims_thread_closed_owner_index",
             "claims_operational_episode_index",
+            "claims_thread_unread_owner_time_index", "claims_thread_history_link_index",
         ];
         let has_index = |name: &str| {
             connection.query_row(
@@ -1229,12 +1228,9 @@ mod schema_install_tests {
             ).unwrap()
         };
         install_initial_schema(&connection, true).unwrap();
-        assert!(indexes.iter().all(|name| has_index(name)));
-        for name in indexes {
-            connection.execute_batch(&format!("DROP INDEX {name}")).unwrap();
-        }
+        assert!(indexes.iter().all(|name| !has_index(name)));
         install_initial_schema(&connection, false).unwrap();
-        assert!(indexes.iter().all(|name| has_index(name)));
+        assert!(indexes.iter().all(|name| !has_index(name)));
 
     }
 

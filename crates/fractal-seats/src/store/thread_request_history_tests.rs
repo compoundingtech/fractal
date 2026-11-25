@@ -532,11 +532,13 @@ fn request_history_denied_heavy_keyset_pages_match_visible_only_metadata() {
         assert_eq!(traversed, unpaged.items.iter().map(|item| item.key.clone()).collect::<Vec<_>>());
     }
 
+    // The plan proof covers explicitly prepared indexes, not startup DDL.
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h4c4b7a7cf3be owner=fractal_seats::store::thread_request_history_tests TODO=trace-statement-and-value-representation */ fractal_store::owner_indexes::THREAD_INDEXES).unwrap();
     let connection = store.readers.get();
     let mut statement = connection.prepare(
         "EXPLAIN QUERY PLAN
          SELECT json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')
-         FROM claims INDEXED BY claims_thread_history_link_index
+         FROM claims
          WHERE kind='thread.ask-linked' AND json_extract(body, '$.fields.thread_id')=?1
            AND (json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'))>(?2,?3)
          ORDER BY json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')",

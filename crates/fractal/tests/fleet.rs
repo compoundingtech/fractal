@@ -10072,10 +10072,14 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
         })
         .await;
     }
+    assert!(rollback.st_json(&["replication", "status"]).get("stream_fallbacks").is_none());
     if restored.is_some() {
         o.binary = PathBuf::from(st3());
         o.start().await;
         assert_eq!(held(&o, upgraded["subject"].as_str().unwrap()).await, (0, 1));
+        let status = o.st_json(&["replication", "status"]);
+        assert_eq!(status["stream_fallbacks"], json!({}), "{}: {status}", o.name);
+        assert!(o.st_ok(&["replication", "status"]).contains("\nstream-fallbacks\tnone since start\n"));
     }
     for node in [&a, &b, &o] {
         let status = node.st_json(&["replication", "status"]);
@@ -10088,7 +10092,6 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
         assert_eq!(status["stream_fallbacks"], json!({}), "{}: {status}", node.name);
         assert!(node.st_ok(&["replication", "status"]).contains("\nstream-fallbacks\tnone since start\n"));
     }
-    assert!(o.st_json(&["replication", "status"]).get("stream_fallbacks").is_none());
 }
 
 /// The replication records `node` holds for a newer build: claims of a kind it does not know.

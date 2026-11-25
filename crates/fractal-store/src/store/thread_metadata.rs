@@ -6,37 +6,6 @@ use super::*;
 mod metadata_snapshot;
 use metadata_snapshot::MetadataSnapshot;
 
-pub(super) fn install_indexes(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch(
-         /* sqlite-large-value: allow-for-now lv-h6a3f9c9e7395 owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
-ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
-WHERE kind='thread.created';
-CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
-ON claims(json_extract(body, '$.fields.thread_id'), length(accepted_at_unix_ms), accepted_at_unix_ms)
-WHERE kind='message.sent' AND json_extract(body, '$.fields.thread_id') IS NOT NULL;
-CREATE INDEX IF NOT EXISTS claims_thread_inbox_origin_index
-ON claims(json_extract(body, '$.fields.person'),
-          coalesce(json_extract(body, '$.fields.origin_source'),json_extract(body, '$.fields.origin_ask')),
-          coalesce(json_extract(body, '$.fields.origin_episode'),json_extract(body, '$.fields.origin_ask_episode')), subject)
-WHERE kind='thread.created';
-CREATE INDEX IF NOT EXISTS claims_thread_mission_index
-ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.mission'), subject)
-WHERE kind='thread.created';
-CREATE INDEX IF NOT EXISTS claims_operational_episode_index
-ON claims(json_extract(body,'$.fields.episode'))
-WHERE kind IN ('operational.failure','operational.recovered');
-CREATE INDEX IF NOT EXISTS claims_thread_unread_owner_time_index
-ON claims(actor, length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, subject)
-WHERE kind='thread.unread-marked';
-CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
-ON claims(actor, store_index DESC)
-WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
-CREATE INDEX IF NOT EXISTS claims_thread_history_link_index
-ON claims(json_extract(body, '$.fields.thread_id'), json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'), subject)
-WHERE kind='thread.ask-linked';
-",
-    )
-}
 
 
 #[path = "thread_inbox_source.rs"]
@@ -693,7 +662,7 @@ pub fn list_context(
         }
         let sql = format!(
             "SELECT DISTINCT claims.subject
-             FROM claims INDEXED BY {index}
+             FROM claims
              JOIN operations ON operations.canonical_claim_id=claims.id AND operations.state='active'
              WHERE claims.kind='thread.created'
                AND json_extract(claims.body, '$.fields.person')=?1
@@ -777,13 +746,13 @@ pub fn unread_inbox_positions(
     }).collect::<Result<Vec<_>, FractalError>>()?;
     let keys = serde_json::to_string(&keys).map_err(internal)?;
     let mut query = conn.prepare_cached(
-         /* sqlite-large-value: allow-for-now lv-h10da3f869f76 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ "WITH inbox AS (
+         /* sqlite-large-value: allow-for-now lv-hb58c423eac9a owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ "WITH inbox AS (
             SELECT CAST(key AS INTEGER) AS position, json_extract(value,'$[0]') AS ask,
                    json_extract(value,'$[1]') AS episode, json_extract(value,'$[2]') AS link
             FROM json_each(?1)
          )
          SELECT inbox.position, claims.subject, false
-         FROM inbox CROSS JOIN claims INDEXED BY claims_thread_inbox_origin_index
+         FROM inbox CROSS JOIN claims
          WHERE claims.kind='thread.created' AND json_extract(claims.body,'$.fields.person')=?2
            AND coalesce(json_extract(claims.body,'$.fields.origin_source'),json_extract(claims.body,'$.fields.origin_ask'))=inbox.ask
            AND coalesce(json_extract(claims.body,'$.fields.origin_episode'),json_extract(claims.body,'$.fields.origin_ask_episode'))=inbox.episode
@@ -933,7 +902,7 @@ fn marked_candidate_sql(has_cursor: bool) -> String {
     let unrepaired = UNREPAIRED_CLAIM.replace("claims.", "earlier.");
     // JSON=JSON keeps the expression index's affinity, unlike JSON=TEXT-column.
     let base=format!("SELECT claims.subject,claims.accepted_at_unix_ms
-        FROM claims INDEXED BY claims_thread_unread_owner_time_index
+        FROM claims
         JOIN operations ON operations.id=json_extract(claims.body,'$._operation.id')
           AND operations.state='active' AND operations.request_digest=json_extract(claims.body,'$._operation.request_digest')
         WHERE claims.actor=?1 AND claims.kind='thread.unread-marked' AND {UNREPAIRED_CLAIM}
@@ -1067,7 +1036,7 @@ fn recently_closed(
     let mut statement = connection
         .prepare_cached(
             "SELECT claims.subject, claims.id, claims.store_index
-         FROM claims INDEXED BY claims_thread_closed_owner_index
+         FROM claims
          JOIN operations ON operations.canonical_claim_id=claims.id AND operations.state='active'
          WHERE claims.actor=?1 AND claims.store_index<?2 AND claims.kind='thread.state-set'
            AND json_extract(claims.body, '$.fields.state')='closed'
@@ -1424,8 +1393,56 @@ mod marked_read_helper_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn thread_and_operational_reads_match_before_and_after_offline_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("claims.sqlite3");
+        let store = Store::open(&path, "offline-indexes").unwrap();
+        store.configure_thread_write_rollout([]);
+        store.append_claim(&ClaimInput {
+            subject: "daemon/offline-indexes".into(), kind: "daemon.started".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"running","features":{
+                "thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION
+            }})).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let person = "person/example";
+        let agent = "agent/example";
+        apply(&store, person, "thread/offline-indexes", "create", Edit::Create {
+            agent, title: "Offline preparation",
+        }).unwrap();
+        thread_delivery::append_reply(&store, &ClaimInput {
+            subject: "message/offline-indexes".into(), kind: "message.sent".into(),
+            actor: Some(agent.into()),
+            fields: serde_json::from_value(json!({"from":agent,"to":person,"status":"sent",
+                "content":"Retained reply","thread_id":"thread/offline-indexes"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }, PersonAuthority::TrustedLocal, None).unwrap();
+        let failure = store.append_claim(&ClaimInput {
+            subject: "daemon/offline-indexes".into(), kind: "operational.failure".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(json!({"episode":"offline-indexes",
+                "condition":"example","reviewer":person,"title":"Retained failure",
+                "reason":"Compare indexed and unindexed reads","severity":"error"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let read = |store: &Store| {
+            let threads = list_conversation(store, person, agent, None, 100).unwrap();
+            assert!(!threads.items.is_empty());
+            let connection = store.readers.get();
+            let fault = attention_snapshot::operational_failure_at(&connection, &failure).unwrap();
+            assert!(fault.is_some());
+            json!({"threads":threads,"fault":fault})
+        };
+        let before = read(&store);
+        drop(store);
+        crate::owner_indexes::prepare(&path, &mut Vec::new()).unwrap();
+        let reopened = Store::open(&path, "offline-indexes").unwrap();
+        assert_eq!(read(&reopened), before);
+    }
+
+    #[test]
     fn read_helpers_marked_cursor_seeks_past_newer_owner_history() {
         let store = Store::open_memory("marked-range").unwrap();
+        store.connection.write().execute_batch(crate::owner_indexes::THREAD_INDEXES).unwrap();
         store.configure_thread_write_rollout([]);
         store.append_claim(&ClaimInput{subject:"daemon/marked-range".into(),kind:"daemon.started".into(),actor:None,
             fields:serde_json::from_value(json!({"status":"running","features":{"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION}})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();

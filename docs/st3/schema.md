@@ -4,7 +4,7 @@ This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
 Storage version: `28`
-Storage digest: `2ff9359bf57a5c31fa1ecd71e881d76828371529876191f16b3d6ce73fc24d1d`
+Storage digest: `524eaa3f83f4bba9a9bf4d6aa5171ca6a1d09173eecb2017d159cbed29a9acf2`
 
 ## Subject families
 

@@ -1,20 +1,56 @@
-//! Offline preparation of the mandatory conversation-owner query indexes.
+//! Offline preparation of conversation-owner and optional thread query indexes.
 use std::{io::Write, path::Path, time::Duration};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior};
 
-pub const INDEX_NAMES: [&str; 5] = [
+pub const INDEX_NAMES: [&str; 13] = [
     "claims_transport_pair_accepted_index",
     "claims_actual_accepted_index",
     "claims_runtime_origin_accepted_index",
     "claims_identity_runtime_id_accepted_index",
     "claims_identity_incarnation_id_accepted_index",
+    "claims_thread_conversation_index",
+    "claims_thread_message_accepted_index",
+    "claims_thread_inbox_origin_index",
+    "claims_thread_mission_index",
+    "claims_operational_episode_index",
+    "claims_thread_unread_owner_time_index",
+    "claims_thread_closed_owner_index",
+    "claims_thread_history_link_index",
 ];
+
+pub const THREAD_INDEXES: &str = /* sqlite-large-value: allow-for-now lv-h13ae1ea01435 owner=fractal_store::owner_indexes TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
+ON claims(json_extract(body, '$.fields.thread_id'), length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='message.sent' AND json_extract(body, '$.fields.thread_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS claims_thread_inbox_origin_index
+ON claims(json_extract(body, '$.fields.person'),
+          coalesce(json_extract(body, '$.fields.origin_source'),json_extract(body, '$.fields.origin_ask')),
+          coalesce(json_extract(body, '$.fields.origin_episode'),json_extract(body, '$.fields.origin_ask_episode')), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_mission_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.mission'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_operational_episode_index
+ON claims(json_extract(body,'$.fields.episode'))
+WHERE kind IN ('operational.failure','operational.recovered');
+CREATE INDEX IF NOT EXISTS claims_thread_unread_owner_time_index
+ON claims(actor, length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, subject)
+WHERE kind='thread.unread-marked';
+CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
+ON claims(actor, store_index DESC)
+WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
+CREATE INDEX IF NOT EXISTS claims_thread_history_link_index
+ON claims(json_extract(body, '$.fields.thread_id'), json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'), subject)
+WHERE kind='thread.ask-linked';";
 
 fn install(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h00d5d1e046d7 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ smallclaims::store::TRANSPORT_PAIR_INDEX)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc41ef8140f43 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ &crate::store::RUNTIME_ID_INDEX)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf9f402581c23 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ THREAD_INDEXES)?;
     Ok(())
 }
 
@@ -82,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_idempotently_with_startup_identical_definitions() {
+    fn prepares_idempotently_with_startup_and_offline_only_definitions() {
         let (_directory, path) = fixture();
         let mut output = Vec::new();
         prepare(&path, &mut output).unwrap();
@@ -94,7 +130,10 @@ mod tests {
         assert_eq!(before, after);
         assert_eq!(sql, definitions(&connection).unwrap());
         let startup = crate::store::Store::open_memory("owner-index-startup").unwrap();
-        assert_eq!(sql, definitions(&startup.connection.write()).unwrap());
+        let startup_sql = definitions(&startup.connection.write()).unwrap();
+        assert_eq!(&sql[..5], &startup_sql[..5]);
+        assert!(startup_sql[5..].iter().all(Option::is_none));
+        assert!(sql[5..].iter().all(Option::is_some));
         let output = String::from_utf8(output).unwrap();
         for name in INDEX_NAMES {
             assert!(output.contains(&format!("before: {name}: missing")));

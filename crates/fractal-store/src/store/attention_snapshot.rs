@@ -70,9 +70,9 @@ pub(super) fn operational_failure_at(
         return Ok(None);
     }
     let Some(episode) = opening.body["fields"]["episode"].as_str() else { return Ok(None) };
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h901f68d5f5cf owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb7fb588dd262 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
-         FROM claims INDEXED BY claims_operational_episode_index
+         FROM claims
          WHERE kind IN ('operational.failure','operational.recovered')
            AND json_extract(body,'$.fields.episode')=?1 ORDER BY CANONICAL_ASC(claims)",
     ))?;

@@ -241,7 +241,7 @@ fn read_conn(
     // entire thread. The ordered iterator stops once limit+1 visible keys are established.
     let mut statement = conn.prepare_cached(
         "SELECT json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')
-         FROM claims INDEXED BY claims_thread_history_link_index
+         FROM claims
          WHERE kind='thread.ask-linked' AND json_extract(body, '$.fields.thread_id')=?1
            AND (json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'))>(?2,?3)
          ORDER BY json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')"
