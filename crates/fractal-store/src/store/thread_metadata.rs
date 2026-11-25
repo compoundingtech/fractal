@@ -1416,6 +1416,28 @@ mod marked_read_helper_tests {
                 "content":"Retained reply","thread_id":"thread/offline-indexes"})).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }, PersonAuthority::TrustedLocal, None).unwrap();
+        for n in 0..4 {
+            let thread = format!("thread/offline-{n}");
+            let message = format!("message/offline-{n}");
+            apply(&store, person, &thread, &format!("create-{n}"), Edit::Create {
+                agent, title: "Pagination",
+            }).unwrap();
+            thread_delivery::append_reply(&store, &ClaimInput {
+                subject: message.clone(), kind: "message.sent".into(), actor: Some(agent.into()),
+                fields: serde_json::from_value(json!({"from":agent,"to":person,"status":"sent",
+                    "content":"Pagination reply","thread_id":thread})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }, PersonAuthority::TrustedLocal, None).unwrap();
+            thread_reading::apply_as(&store, PersonAuthority::TrustedLocal, person, &thread,
+                &format!("mark-{n}"), thread_reading::Edit::Mark {
+                    anchor_message: &message, observed_marks: &[],
+                }).unwrap();
+            if n >= 2 {
+                let revision = summary(&store, person, &thread).unwrap().revision;
+                apply(&store, person, &thread, &format!("close-{n}"),
+                    Edit::Close { revision: &revision }).unwrap();
+            }
+        }
         let failure = store.append_claim(&ClaimInput {
             subject: "daemon/offline-indexes".into(), kind: "operational.failure".into(),
             actor: Some("daemon/runtime".into()),
@@ -1425,12 +1447,46 @@ mod marked_read_helper_tests {
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
         let read = |store: &Store| {
-            let threads = list_conversation(store, person, agent, None, 100).unwrap();
-            assert!(!threads.items.is_empty());
+            let mut contexts = Vec::new();
+            for kind in 0..3 {
+                let mut cursor = None;
+                let mut pages = Vec::new();
+                loop {
+                    let context = match kind {
+                        0 => ThreadContext::Agent(agent),
+                        1 => ThreadContext::MarkedUnread,
+                        _ => ThreadContext::RecentlyClosed,
+                    };
+                    let page = list_context(store, person, context, cursor.as_deref(), 1).unwrap();
+                    cursor = page.next_cursor.clone();
+                    pages.push(serde_json::to_value(page).unwrap());
+                    assert!(pages.len() <= 6, "context cursor must advance");
+                    if cursor.is_none() { break; }
+                }
+                assert!(pages.len() >= 2, "exercise a real context cursor");
+                contexts.push(pages);
+            }
+            let mut windows = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = mixed_timeline(store, person, "thread/offline-2",
+                    cursor.as_deref(), None, 1).unwrap();
+                cursor = page.next_cursor.clone();
+                if let Some(previous) = page.previous_cursor.as_deref() {
+                    windows.push(serde_json::to_value(mixed_timeline(store, person,
+                        "thread/offline-2", Some(previous), None, 1).unwrap()).unwrap());
+                }
+                windows.push(serde_json::to_value(page).unwrap());
+                assert!(windows.len() <= 12, "message cursor must advance");
+                if cursor.is_none() { break; }
+            }
+            assert!(windows.len() >= 2, "exercise message-window pagination");
+            let around = mixed_timeline(store, person, "thread/offline-2",
+                None, Some("message/offline-2"), 1).unwrap();
             let connection = store.readers.get();
             let fault = attention_snapshot::operational_failure_at(&connection, &failure).unwrap();
             assert!(fault.is_some());
-            json!({"threads":threads,"fault":fault})
+            json!({"contexts":contexts,"windows":windows,"around":around,"fault":fault})
         };
         let before = read(&store);
         drop(store);

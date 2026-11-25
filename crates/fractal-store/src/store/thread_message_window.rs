@@ -775,6 +775,28 @@ mod read_progress_tests {
     use super::*;
 
     #[test]
+    fn first_page_message_join_seeks_prepared_index_without_hints() {
+        let store = Store::open_memory("message-index-plan").unwrap();
+        let connection = store.connection.write();
+        connection.execute_batch(crate::owner_indexes::THREAD_INDEXES).unwrap();
+        let table = "claims";
+        let order = canonical::order_sql("claims", true);
+        let sql = format!("EXPLAIN QUERY PLAN SELECT claims.id FROM {table}
+            JOIN operations active_operation ON active_operation.canonical_claim_id=claims.id
+                AND active_operation.state='active'
+            WHERE claims.kind='message.sent'
+                AND json_extract(claims.body,'$.fields.thread_id')=?1
+                AND json_extract(claims.body,'$.fields.thread_id') IS NOT NULL
+                AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
+            ORDER BY {order} LIMIT ?3");
+        let plan = connection.prepare(&sql).unwrap()
+            .query_map(params!["thread/example", i64::MAX, 2], |row| row.get::<_, String>(3))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
+        assert!(plan.contains("SEARCH claims USING INDEX claims_thread_message_accepted_index"), "{plan}");
+        assert!(!plan.contains("SCAN active_operation"), "{plan}");
+    }
+
+    #[test]
     fn exact_thread_reads_replicate_without_clearing_late_older_mail() {
         let left = Store::open_memory("thread-read-left").unwrap();
         let right = Store::open_memory("thread-read-right").unwrap();

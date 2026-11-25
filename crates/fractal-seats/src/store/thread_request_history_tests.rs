@@ -167,6 +167,77 @@ fn request_history_page_size_one_carries_predecessors_without_dangling_relations
 }
 
 #[test]
+fn inbox_mission_and_linked_history_pages_match_without_and_with_offline_indexes() {
+    use crate::store::thread_metadata::{ThreadContext, list_context, unread_inbox_positions};
+    let (store, _, input) = fixture();
+    store.configure_thread_write_rollout([]);
+    // Retain the real mission-step attachment for the mission-context reader.
+    let view = store.ask_person(&input).unwrap();
+    let opening = request(&store.readers.get(), &view.subject).unwrap().unwrap();
+    let a = SourceEpisode { source_id: view.subject, episode: opening.id };
+    for thread in [THREAD, "thread/offline-second", "thread/offline-third"] {
+        start(&store, &a, thread, AGENT);
+        fractal_store::store::thread_delivery::append_reply(&store, &ClaimInput {
+            subject: format!("message/offline-reply-{}", thread.strip_prefix("thread/").unwrap()),
+            kind: "message.sent".into(), actor: Some(AGENT.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(AGENT)), ("to".into(), json!(PERSON)),
+                ("content".into(), json!("Unread native reply")), ("status".into(), json!("sent")),
+                ("thread_id".into(), json!(thread)),
+            ]), evidence: vec![], expected_subject: None, idempotency_key: None,
+        }, crate::store::thread_metadata::PersonAuthority::TrustedLocal, None).unwrap();
+    }
+    let b = ask(&store, &input, "offline-linked-b");
+    let c = ask(&store, &input, "offline-linked-c");
+    attach(&store, &b, Some(&a), "offline-link-b");
+    attach(&store, &c, Some(&a), "offline-link-c");
+    let mission: String = store.readers.get().query_row(
+        "SELECT json_extract(body,'$.fields.mission') FROM claims WHERE subject=?1 AND kind='thread.created'",
+        [THREAD], |row| row.get(0),
+    ).unwrap();
+    let snapshot = || {
+        let mut contexts = Vec::new();
+        for inbox in [true, false] {
+            let mut cursor = None;
+            let mut pages = Vec::new();
+            loop {
+                let context = if inbox {
+                    ThreadContext::Inbox { source: &a.source_id, episode: &a.episode }
+                } else { ThreadContext::Mission(&mission) };
+                let page = list_context(&store, PERSON, context, cursor.as_deref(), 1).unwrap();
+                assert_eq!(page.items.len(), 1);
+                cursor = page.next_cursor.clone();
+                pages.push(serde_json::to_value(page).unwrap());
+                assert!(pages.len() <= 3);
+                if cursor.is_none() { break; }
+            }
+            assert_eq!(pages.len(), 3);
+            contexts.push(pages);
+        }
+        let unread = unread_inbox_positions(&store, PERSON,
+            &[(&a.source_id, &a.episode), (&b.source_id, &b.episode)]).unwrap();
+        assert_eq!(unread, BTreeSet::from([0, 1]));
+        let mut history_pages = Vec::new();
+        let mut cursor = None;
+        loop {
+            let history = thread_request_history(&store, PERSON, THREAD, cursor.as_deref(), 1).unwrap();
+            assert_eq!(history.items.len(), 1);
+            cursor = history.next_cursor.clone();
+            history_pages.push(serde_json::to_value(history).unwrap());
+            assert!(history_pages.len() <= 3);
+            if cursor.is_none() { break; }
+        }
+        assert_eq!(history_pages.len(), 3);
+        json!({"contexts":contexts,"unread":unread,"history":history_pages})
+    };
+    let before = snapshot();
+    // The file-backed Store test exercises prepare's lock/checkpoint boundary;
+    // this native seats fixture compares the exact same offline DDL in memory.
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h4c4b7a7cf3be owner=fractal_seats::store::thread_request_history_tests TODO=trace-statement-and-value-representation */ fractal_store::owner_indexes::THREAD_INDEXES).unwrap();
+    assert_eq!(snapshot(), before);
+}
+
+#[test]
 fn request_history_cursor_is_scoped_visible_keyset_with_fresh_status() {
     let (store, _, input) = fixture();
     store.configure_thread_write_rollout([]);
@@ -533,7 +604,7 @@ fn request_history_denied_heavy_keyset_pages_match_visible_only_metadata() {
     }
 
     // The plan proof covers explicitly prepared indexes, not startup DDL.
-    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h4c4b7a7cf3be owner=fractal_seats::store::thread_request_history_tests TODO=trace-statement-and-value-representation */ fractal_store::owner_indexes::THREAD_INDEXES).unwrap();
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-ha1bd494efa68 owner=fractal_seats::store::thread_request_history_tests TODO=trace-statement-and-value-representation */ fractal_store::owner_indexes::THREAD_INDEXES).unwrap();
     let connection = store.readers.get();
     let mut statement = connection.prepare(
         "EXPLAIN QUERY PLAN
