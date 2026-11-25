@@ -43,7 +43,7 @@ async fn replay_estimate_names_blocked_owned_sets_and_explains_projection_loss()
         "members":{"agent/garden/orchard":{"kind":"agent","claim":"missing-member","revision":"missing-revision"}},
         "retired":{}, "adoptions":{}
     })).unwrap();
-    state.store.append_claim(&crate::model::ClaimInput {
+    state.store.append_claim(&fractal_wire::ClaimInput {
         subject: "owned-set/garden".into(), kind: "owned-set.revised".into(),
         actor: None,
         fields: serde_json::from_value(json!({
@@ -68,7 +68,7 @@ async fn replay_clears_unhealthy_graph_and_durably_audits_operator() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     // A real claim makes this more than an empty-schema replay.
-    state.store.append_claim(&crate::model::ClaimInput {
+    state.store.append_claim(&fractal_wire::ClaimInput {
         subject: "custom/replay-fixture/item".into(), kind: "custom.replay.fixture".into(),
         actor: Some("person/operator".into()), fields: BTreeMap::new(), evidence: vec![],
         expected_subject: None, idempotency_key: None,

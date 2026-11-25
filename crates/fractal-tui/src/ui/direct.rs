@@ -329,7 +329,7 @@ fn state_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use fractal_daemon::model::ClaimInput;
+    use fractal_wire::{ClaimInput};
     use std::collections::BTreeMap;
     use std::io::{Read as _, Write as _};
     use std::sync::Arc;

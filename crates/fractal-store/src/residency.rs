@@ -333,7 +333,8 @@ fn claimed_work_at(connection: &Connection, subject: &str, cut: u64, steps: &[St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClaimInput, ClaimRecord};
+    use crate::model::{ ClaimRecord};
+    use fractal_wire::{ClaimInput};
     use serde_json::json;
     use std::collections::BTreeMap;
 

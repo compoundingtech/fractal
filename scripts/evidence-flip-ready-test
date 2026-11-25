@@ -485,7 +485,7 @@ class FlipReady(unittest.TestCase):
         # the checks whose wrapper command is an aggregate, and rust-tests, which has no job of its own
         self.assertEqual(sorted(members), ['fractal-web', 'linux-gate', 'rust-tests'])
         self.assertEqual(members['fractal-web'], ('fractal-web-execution',))
-        self.assertEqual(members['linux-gate'], ('linux-clippy', 'linux-fleet-compat', 'linux-test-build', 'linux-tests',
+        self.assertEqual(members['linux-gate'], ('isolation-vm', 'linux-clippy', 'linux-fleet-compat', 'linux-test-build', 'linux-tests',
                                                  'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4'))
         for always in ('upgrade-impact', 'fractal-web-changes'):  # members that always run: their red is never hidden
             self.assertNotIn(always, members['fractal-web'] + members['linux-gate'])

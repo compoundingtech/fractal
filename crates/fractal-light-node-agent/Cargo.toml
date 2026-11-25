@@ -1,0 +1,30 @@
+[package]
+name = "fractal-light-node-agent"
+version.workspace = true
+edition = "2024"
+description = "Graph-free light-node session and native custody agent"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["json"] }
+fractal-auth = { path = "../fractal-auth" }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
+fractal-runtime = { path = "../fractal-runtime" }
+fractal-wire = { path = "../fractal-wire" }
+hex = "0.4"
+libc.workspace = true
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
+rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+fractal-store = { path = "../fractal-store", features = ["test-support"] }
+notify = "8"

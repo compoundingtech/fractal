@@ -5,8 +5,9 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use smallclaims::claim::{ClaimInput, ClaimRecord};
-use smallclaims::fleet::MemberKey;
+use smallclaims::claim::{ ClaimRecord};
+use fractal_wire::{ClaimInput};
+use fractal_auth::{MemberKey};
 use smallclaims::principal::Verdict;
 use smallclaims::store::Store;
 use smallclaims::store::runtime::Plain;

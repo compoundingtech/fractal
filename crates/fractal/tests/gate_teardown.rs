@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fractal_daemon::model::{ClaimInput, MissionRunRequest};
+use fractal_daemon::model::{ MissionRunRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::reconcile::{NativeRuntime, Reconciler, RuntimeControl};
 use fractal_daemon::store::Store;
 use tokio::sync::Notify;

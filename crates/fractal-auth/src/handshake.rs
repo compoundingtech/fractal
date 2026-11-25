@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::code::{JoinCode, fingerprint};
-use super::keys::{MemberKey, verify_signature};
+use crate::{MemberKey, verify_signature};
 
 pub const PROTOCOL: &str = "st3-join-v1";
 const SEAL_INFO: &[u8] = b"st3-join-v1 seal";
@@ -357,7 +357,7 @@ pub fn seal_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet::code::CodeEndpoint;
+    use crate::code::CodeEndpoint;
 
     fn fixture() -> (JoinCode, MemberKey, MemberKey, SealedJoin) {
         let sponsor = MemberKey::generate().unwrap().0;

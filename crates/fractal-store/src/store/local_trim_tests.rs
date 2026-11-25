@@ -346,7 +346,7 @@ fn a_local_cut_trims_the_claims_of_released_envelopes() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
-    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     store.pin_fleet_anchor(key.public()).unwrap();
     store.set_member_key(Some(key.clone())).unwrap();
     store.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
@@ -388,7 +388,7 @@ fn a_local_cut_trims_the_claims_of_released_envelopes() {
 fn a_cut_trims_the_claims_a_member_received_as_signed_claims() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
-    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     let alder = declared(Store::open_memory("alder").unwrap(), false);
     alder.pin_fleet_anchor(key.public()).unwrap();
     alder.set_member_key(Some(key.clone())).unwrap();
@@ -2554,7 +2554,7 @@ fn a_local_cut_keeps_signed_claims_inside_the_forget_bound() {
     const DAY_MS: u128 = 24 * 60 * 60 * 1_000;
     let scratch = tempfile::tempdir().unwrap();
     let store = local_member("alder");
-    store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.set_node_key(std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
     store.set_write_clock_at(written).unwrap();
     for n in 0..20 {
@@ -2586,7 +2586,7 @@ fn a_peers_retirement_keeps_a_signed_claim_inside_the_forget_bound() {
     let scratch = tempfile::tempdir().unwrap();
     let alder = declared(Store::open_memory("alder").unwrap(), true);
     let birch = declared(Store::open_memory("birch").unwrap(), true);
-    alder.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    alder.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
     let at = |store: &Store, now: u128| {
         store.set_write_clock_at(now).unwrap();

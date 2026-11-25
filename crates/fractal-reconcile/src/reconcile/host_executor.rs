@@ -180,7 +180,7 @@ impl StartCommand {
         if result["verification"] == "operation-incarnation"
             && let Some(incarnation) = result["incarnation"].as_str()
         {
-            store.bind_local_session(&crate::store::local_sessions::LocalSession {
+            store.bind_local_session(&fractal_light_node_core::custody::LocalSession {
                 subject: subject.clone(),
                 runtime_id: result["runtime_id"].as_str().context("start runtime ID missing")?.into(),
                 incarnation: incarnation.into(),
@@ -188,7 +188,7 @@ impl StartCommand {
                 terminal: prepared.member.terminal,
                 driver: prepared.member.driver.clone(),
                 lifecycle: prepared.member.lifecycle.clone(),
-                custody: crate::store::local_sessions::SessionCustody::Owned,
+                custody: fractal_light_node_core::custody::SessionCustody::Owned,
                 start_operation: Some(id.clone()),
                 invocation: None,
             })?;

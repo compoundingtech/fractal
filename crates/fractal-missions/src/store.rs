@@ -27,8 +27,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 use crate::model::{
     ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest,
-    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability,
-    ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec,
+    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec,
     DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView,
     LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView,
     MissionInputKind, MissionOutputView, MissionResponse, MissionRevisionOperation,
@@ -39,10 +38,10 @@ use crate::model::{
     PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
     ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
     RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
+    RuntimeResetOperation, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
     SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
-    SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
-};
+    SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView};
+use fractal_wire::{ClaimInput, Error as FractalError};
 #[cfg(test)]
 use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicationInventory, ReplicationReceipt};
 #[cfg(any(test, feature = "test-support"))]

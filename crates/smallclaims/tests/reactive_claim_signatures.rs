@@ -1,8 +1,6 @@
-use smallclaims::{
-    claim::ClaimInput,
-    fleet::{MemberKey, keys::claim_signature_message},
-    store::{Store, member_signatures::{ClaimMemberSignature, work_counts}, runtime::Plain},
-};
+use fractal_auth::{MemberKey, claim_signature_message};
+use smallclaims::{ store::{Store, member_signatures::{ClaimMemberSignature, work_counts}, runtime::Plain}};
+use fractal_wire::{ClaimInput};
 use std::{collections::BTreeMap, sync::Arc};
 
 fn append(store: &Store, n: usize) {

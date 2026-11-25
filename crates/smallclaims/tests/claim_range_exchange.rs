@@ -1,7 +1,7 @@
 //! Peers compare the claims they retain by range digest, and only peers that speak the
 //! claim-range protocol are compared.
 use smallclaims::{
-    claim::ClaimInput,
+    fractal_wire::ClaimInput,
     replication::{CLAIM_RANGE_VERSION, ReplicationExchange, ReplicationInventory, ReplicationPeerSync},
     store::{Store, runtime::Plain},
 };

@@ -190,23 +190,23 @@ mod tests {
         let store = Store::open_memory("minute-fold").unwrap();
         let fleet = "11111111-1111-4111-8111-111111111112";
         store.bind_fleet(fleet).unwrap();
-        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         store.pin_fleet_anchor(key.public()).unwrap();
         store.set_member_key(Some(key.clone())).unwrap();
         store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
         let enroll = |origin: &str| {
-            let member = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+            let member = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
             let invite = store.create_fleet_invite(Some(origin), std::time::Duration::from_secs(600),
                 &["fabric".into()], "person/example", false).unwrap();
-            let code = smallclaims::fleet::code::JoinCode {
+            let code = fractal_auth::code::JoinCode {
                 fleet_id: uuid::Uuid::parse_str(fleet).unwrap(),
                 invite: hex::decode(invite.invite).unwrap().try_into().unwrap(),
                 token: invite.token,
-                fingerprint: smallclaims::fleet::code::fingerprint(key.public()),
+                fingerprint: fractal_auth::code::fingerprint(key.public()),
                 expires_at: invite.expires_at_unix_ms / 1000,
                 name: Some(origin.into()), migrate: false, endpoints: vec![], pairing: None,
             };
-            let joiner = smallclaims::fleet::handshake::Joiner::start(
+            let joiner = fractal_auth::handshake::Joiner::start(
                 &code, &member, origin, "dial-out", None, "test").unwrap();
             assert!(matches!(store.redeem_fleet_invite(joiner.request()).unwrap(),
                 smallclaims::store::FleetRedemption::Admitted { .. }));
@@ -231,7 +231,7 @@ mod tests {
         };
         let baseline = store.export_replication_exchange(fleet, &Default::default()).unwrap();
         assert!(store.accept_observation_minutes("person/example", std::slice::from_ref(&minute)).unwrap());
-        let append_independent = |origin: &str, member: Arc<smallclaims::fleet::MemberKey>, minute: &ObservationMinute| {
+        let append_independent = |origin: &str, member: Arc<fractal_auth::MemberKey>, minute: &ObservationMinute| {
             let independent = Store::open_memory(origin).unwrap();
             // Membership alone does not configure the local fleet used to sign exports.
             independent.bind_fleet(fleet).unwrap();
@@ -276,7 +276,7 @@ mod tests {
             let issuer = Store::open_memory("issuer").unwrap();
             let fleet = "observation-adversarial-fleet";
             issuer.bind_fleet(fleet).unwrap();
-            let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+            let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
             issuer.pin_fleet_anchor(key.public()).unwrap();
             issuer.set_member_key(Some(key.clone())).unwrap();
             issuer.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();

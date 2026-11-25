@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use std::collections::BTreeMap;
 
 struct Fixture {

@@ -12,7 +12,8 @@ use std::sync::Arc;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use fractal_daemon::api::AppState;
-use fractal_daemon::model::{AttentionRequest, ClaimInput, IntentInput, MissionRunRequest};
+use fractal_daemon::model::{AttentionRequest, IntentInput, MissionRunRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
@@ -171,7 +172,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     state
         .store
         .set_node_key(Arc::new(
-            smallclaims::fleet::MemberKey::generate().unwrap().0,
+            fractal_auth::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
     let socket = root.path().join("st3.sock");
@@ -4441,7 +4442,7 @@ async fn agents_start_asks_the_placement_host_to_name_a_new_agents_workspace() {
     let peer = smallclaims::sync::PeerState::new(
         fractal_daemon::peer::MainBackend::new(owner_socket),
         "distant".into(),
-        fractal_daemon::peer::FleetAuth::test("fleet-test", &[7; 32]),
+        fractal_auth::FleetAuth::test("fleet-test", &[7; 32]),
         smallclaims::sync::FleetContext::legacy(["client-v0-cli".to_owned()].into()),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5316,7 +5317,7 @@ async fn note_cli_round_trip_uses_configured_person_and_preserves_metadata() {
     ).unwrap();
     let state = test_state(root.path());
     let fleet = "3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69";
-    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     state.store.bind_fleet(fleet).unwrap();
     state.store.pin_fleet_anchor(key.public()).unwrap();
     state.store.set_member_key(Some(key.clone())).unwrap();

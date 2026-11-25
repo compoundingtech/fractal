@@ -134,16 +134,16 @@ pub fn mailbox_intake_index(connection: &rusqlite::Connection, subject: &str) ->
 
 /// Only staged/delivered receipts consume wake demand. Read receipts may settle work that
 /// crossed the channel before quiescing. The writer must validate this frontier atomically.
-pub fn mailbox_intake_frontier(store: &Store, subject: &str) -> Result<u64, crate::model::FractalError> {
+pub fn mailbox_intake_frontier(store: &Store, subject: &str) -> Result<u64, fractal_wire::Error> {
     store.read_snapshot(|_| {
         if current(store, subject)?.is_some_and(|hold| hold.holds_seat()) {
-            return Ok(Err(crate::model::FractalError::new(
+            return Ok(Err(fractal_wire::Error::new(
                 "seat-suspended",
                 "delivery waits for the seat's native resume and channel readiness",
             )));
         }
         mailbox_intake_index(&store.readers.get(), subject).map(Ok)
-    }).map_err(|error| crate::model::FractalError::new("internal", error.to_string()))?
+    }).map_err(|error| fractal_wire::Error::new("internal", error.to_string()))?
 }
 
 /// Describe a publication against its running launch, or its existing suspension lineage.
@@ -662,7 +662,7 @@ mod tests {
         let store = Store::open_memory("suspended-path").unwrap();
         let owner = "agent/suspended-path";
         let bind = |incarnation: &str, session: &str, path: &str| {
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
                 fields: std::collections::BTreeMap::from([
                     ("status".into(), Value::from("running")),
@@ -670,7 +670,7 @@ mod tests {
                 ]),
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
-            store.append_claim(&crate::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: owner.into(), kind: "harness.session-file".into(), actor: Some(owner.into()),
                 fields: std::collections::BTreeMap::from([
                     ("agent".into(), Value::from(owner)), ("harness".into(), Value::from("omp")),
@@ -695,7 +695,7 @@ mod tests {
     #[test]
     fn legacy_id_only_suspension_has_no_path_to_recover() {
         let store = Store::open_memory("legacy-path").unwrap();
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: "agent/example".into(),
             kind: "runtime.observed".into(),
             actor: Some("agent/example".into()),
@@ -705,7 +705,7 @@ mod tests {
             ]),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: "agent/example".into(),
             kind: "harness.session-file".into(),
             actor: Some("agent/example".into()),
@@ -740,7 +740,7 @@ mod background_job_tests {
                 fields.insert("background_jobs".into(), Value::from(0));
             }
             store
-                .append_claim(&crate::model::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: "agent/example".into(),
                     kind: "harness.observed".into(),
                     actor: Some("agent/example".into()),

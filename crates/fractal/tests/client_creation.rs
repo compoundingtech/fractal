@@ -410,7 +410,7 @@ async fn terminal_declaration_survives_replication_and_rejects_another_claim_act
         ("revision".into(), json!("forged")),
         ("desired".into(), claim.body["desired"].clone()),
     ]);
-    let forged = fractal_daemon::model::ClaimInput {
+    let forged = fractal_wire::ClaimInput {
         subject: desired.subject,
         kind: "intent.desired".into(),
         actor: Some("person/alex".into()),

@@ -1,7 +1,8 @@
 //! Render loop policy, including the last accepted syntax of published legacy loop shapes.
 use kdl::KdlNode;
 use crate::gate_render::{block, duration, node, property, render_gate_node, text};
-use crate::model::{DependencySpec, LoopCandidateSelector, LoopExhaustionSpec, LoopSpec, MetricSource, MissionSpec, FractalError};
+use crate::model::{DependencySpec, LoopCandidateSelector, LoopExhaustionSpec, LoopSpec, MetricSource, MissionSpec};
+use fractal_wire::{Error as FractalError};
 
 pub(crate) fn comment(node: &mut KdlNode, message: &str) {
     let mut format = node.format().cloned().unwrap_or_default();

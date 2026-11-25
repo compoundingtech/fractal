@@ -2091,7 +2091,7 @@ mission "launch-publication" state="ready" {
             store.use_key_directory(&keys).unwrap();
             store
                 .set_node_key(Arc::new(
-                    smallclaims::fleet::MemberKey::generate().unwrap().0,
+                    fractal_auth::MemberKey::generate().unwrap().0,
                 ))
                 .unwrap();
             let held = |connection: &Connection| {

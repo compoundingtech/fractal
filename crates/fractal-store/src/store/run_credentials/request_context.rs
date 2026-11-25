@@ -1,6 +1,7 @@
 //! Preserve authenticated run scope across async routing and blocking graph writer admission.
 //! This is an additional commit-time fence, not a replacement for the endpoint's ordinary gates.
-use super::{FractalError, RunBinding, internal};
+use super::{ RunBinding, internal};
+use fractal_wire::{Error as FractalError};
 use rusqlite::{Transaction, params};
 use std::cell::RefCell;
 

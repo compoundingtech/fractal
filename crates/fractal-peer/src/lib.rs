@@ -13,4 +13,3 @@ mod ci_test_paths;
 pub use fractal_github::*;
 
 pub mod peer;
-pub mod light_node;

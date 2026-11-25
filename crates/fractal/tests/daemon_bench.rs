@@ -43,9 +43,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value, json};
 use fractal_daemon::api::AppState;
 use fractal_daemon::client::Client;
-use fractal_daemon::model::{
-    ClaimInput, IntentInput, MissionRunRequest, PersonAskRequest, PersonStepResponse, WorkRequest,
-};
+use fractal_daemon::model::{ IntentInput, MissionRunRequest, PersonAskRequest, PersonStepResponse, WorkRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use fractal_schema::ValueType;
 use tokio::sync::{Notify, watch};

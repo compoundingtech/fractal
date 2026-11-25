@@ -2,9 +2,9 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::{BTreeMap, BTreeSet};
 use crate::model::{
-    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, FractalError, UsedMissionSpec,
-    WorkSelector,
-};
+    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, UsedMissionSpec,
+    WorkSelector};
+use fractal_wire::{Error as FractalError};
 pub use fractal_delivery::references::*;
 pub use fractal_delivery::references::{Graph, Scope, graph};
 #[cfg(any(test, feature = "test-support"))]

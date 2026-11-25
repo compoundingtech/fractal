@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub use crate::model::{AnswerInput, OptionNote};
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 
 pub const REQUEST_VERSION: u32 = 1;
 const MAX_ANSWERS: usize = 5;

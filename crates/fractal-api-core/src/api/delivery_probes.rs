@@ -250,7 +250,7 @@ mod tests {
             ),
         ] {
             store
-                .append_claim(&crate::model::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: subject.into(),
                     kind: kind.into(),
                     actor: Some(actor),

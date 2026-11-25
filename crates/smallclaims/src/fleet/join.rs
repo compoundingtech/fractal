@@ -14,15 +14,15 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use super::code::{CodeEndpoint, JoinCode, fingerprint};
+use fractal_auth::{code::{CodeEndpoint, JoinCode, fingerprint}};
 use super::file::{FleetFile, FleetMode};
-use super::handshake::{JoinRequest, JoinResponse, Joiner, SealedJoin, WriterHead, verify_response};
-use super::keys::MemberKey;
+use fractal_auth::{handshake::{JoinRequest, JoinResponse, Joiner, SealedJoin, WriterHead, verify_response}};
+use fractal_auth::{MemberKey};
 use super::transport::{
     Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_fabric_adapter,
     resolve_tool, tailscale_addresses,
 };
-use crate::error::Error;
+use fractal_wire::Error;
 use crate::store::{AdmittedStore, Runtime, Store, valid_fleet_node_name};
 
 pub const DEFAULT_PORT: u16 = 31313;
@@ -911,7 +911,7 @@ pub fn migrate_anchor(options: MigrateAnchorOptions<'_>) -> Result<Founded> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet::code::PairingData;
+    use fractal_auth::{code::PairingData};
     use crate::sync::Backend as _;
 
     #[test]

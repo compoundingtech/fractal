@@ -1,6 +1,6 @@
 //! Durable shared readiness cases and phase-specific notice delivery.
 use super::*;
-use crate::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 #[cfg(test)]
 use crate::model::IntentInput;
 use std::collections::BTreeMap;

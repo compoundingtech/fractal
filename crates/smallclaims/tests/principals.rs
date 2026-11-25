@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use rusqlite::OptionalExtension as _;
 use serde_json::{Value, json};
-use smallclaims::claim::{ClaimInput, ClaimRecord};
-use smallclaims::fleet::MemberKey;
+use smallclaims::claim::{ ClaimRecord};
+use fractal_wire::{ClaimInput};
+use fractal_auth::{MemberKey};
 use smallclaims::principal::{ClaimSignature, KEY_GRANTED, KEY_REVOKED, Verdict, content_digest};
 use smallclaims::store::Store;
 use smallclaims::store::principals::store_claim_signature_tx;
@@ -503,7 +504,7 @@ fn signature_candidates(counterfeits: usize, alternatives: usize) -> SignatureCa
             sequence: fork.sequence,
             hash: fork.hash.clone(),
             member_key: anchor.public().into(),
-            signature: anchor.sign(&smallclaims::fleet::envelope_signature_message(
+            signature: anchor.sign(&fractal_auth::envelope_signature_message(
                 FLEET,
                 &fork.writer,
                 fork.sequence,
@@ -545,7 +546,7 @@ fn push_signature_carrier(
         sequence: fork.sequence,
         hash: fork.hash.clone(),
         member_key: anchor.public().into(),
-        signature: anchor.sign(&smallclaims::fleet::envelope_signature_message(
+        signature: anchor.sign(&fractal_auth::envelope_signature_message(
             FLEET,
             &fork.writer,
             fork.sequence,

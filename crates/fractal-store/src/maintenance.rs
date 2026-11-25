@@ -435,7 +435,7 @@ mod tests {
             }
         }
     }
-    use crate::model::ClaimInput;
+    use fractal_wire::{ClaimInput};
 
     const ADMISSION_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     const ADMISSION_SUBJECT: &str = "resource/quiet-admission";

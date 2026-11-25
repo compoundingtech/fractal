@@ -21,7 +21,8 @@ use serde_json::Value;
 use fractal_drivers::subagents::{self as ledger, Ended, Ledger, Subagent, Tokens};
 
 use crate::client::{Client, api_error_code};
-use crate::model::{ClaimInput, ClaimRecord, StepRunView};
+use crate::model::{ ClaimRecord, StepRunView};
+use fractal_wire::{ClaimInput};
 use crate::store::SUBAGENT_LEASE_MS;
 
 #[cfg(test)]

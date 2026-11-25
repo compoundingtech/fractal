@@ -1,6 +1,7 @@
 //! The part of `rollout` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
-use crate::model::{ClaimInput, DesiredSubject, MemberSpec};
+use crate::model::{ DesiredSubject, MemberSpec};
+use fractal_wire::{ClaimInput};
 use crate::store::{Store, owned_sets::Source};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

@@ -5050,7 +5050,7 @@ mod tests {
     #[tokio::test]
     async fn displayed_person_reply_changes_sender_status_without_reading_hidden_mail() {
         use super::super::view::{Body, Entry};
-        use fractal_daemon::model::ClaimInput;
+        use fractal_wire::{ClaimInput};
         use std::sync::Arc;
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(fractal_daemon::store::Store::open_memory("person-read").unwrap());

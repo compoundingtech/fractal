@@ -465,7 +465,7 @@ mission "fleet/roll/intent-proof" state="ready" timeout="20m" {
         store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
         roll_completion::rebuild(&store).unwrap();
         let revision = "a".repeat(40);
-        let resource = store.append_claim(&crate::model::ClaimInput {
+        let resource = store.append_claim(&fractal_wire::ClaimInput {
             subject: "resource/roll-source-test".into(), kind: "resource.observed".into(), actor: None,
             fields: BTreeMap::from([
                 ("kind".into(), serde_json::json!("custom.fractal.roll-source-test")),

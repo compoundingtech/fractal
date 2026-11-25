@@ -7,9 +7,11 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = ["fractal-delivery/test-support"]
+test-support = ["fractal-auth/test-support", "fractal-delivery/test-support"]
 
 [dependencies]
+fractal-auth = { path = "../fractal-auth" }
+fractal-wire = { path = "../fractal-wire" }
 fractal-delivery = { path = "../fractal-delivery" }
 # Shared test modules of the store are named by their own path.
 fractal-store = { path = "../fractal-store" }
@@ -31,6 +33,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 axum = { version = "0.8", features = ["json"] }
 fractal-secrets = { path = "../fractal-secrets" }
 tokio = { version = "1", features = ["full"] }

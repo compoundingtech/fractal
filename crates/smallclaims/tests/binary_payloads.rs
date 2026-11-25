@@ -1,9 +1,9 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use smallclaims::{
-    claim::{ClaimInput, EnvelopePayload},
+    claim::{ EnvelopePayload},
     replication::ReplicationInventory,
-    store::{Store, runtime::Plain},
-};
+    store::{Store, runtime::Plain}};
+use fractal_wire::{ClaimInput};
 use std::{collections::BTreeMap, sync::Arc};
 
 fn note(store: &Store, n: usize) {

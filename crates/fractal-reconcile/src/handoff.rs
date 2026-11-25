@@ -408,7 +408,7 @@ mod tests {
             .unwrap();
         crate::store::message_routing::send(
             &store,
-            &crate::model::ClaimInput {
+            &fractal_wire::ClaimInput {
                 subject: "message/author-mail".into(),
                 kind: "message.sent".into(),
                 actor: Some("person/requester".into()),

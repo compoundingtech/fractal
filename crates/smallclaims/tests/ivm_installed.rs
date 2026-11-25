@@ -3,16 +3,14 @@
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
-use smallclaims::{
-    ClaimInput, Store,
+use smallclaims::{ Store,
     ivm::{
         self, Definition, Readiness, SourceCut, View, Views,
         events::{self, Publisher},
         install::{Installer, Limits, Mutation, Namespace, Operator, Outcome, ScanPage},
-        installed::{Changed, SyncOutcome},
-    },
-    store::runtime::Plain,
-};
+        installed::{Changed, SyncOutcome}},
+    store::runtime::Plain};
+use fractal_wire::{ClaimInput};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::TryRecvError;
 const NAME: &str = "agent.cards";

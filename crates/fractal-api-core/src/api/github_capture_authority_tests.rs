@@ -13,7 +13,7 @@ fn root_grant() -> AuthorityGrant {
 }
 
 fn fixture() -> Store {
-    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
     let store = Store::open_memory("host-b").unwrap();
     let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     store.bind_fleet(fleet).unwrap();

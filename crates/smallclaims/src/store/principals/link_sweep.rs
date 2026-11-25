@@ -89,8 +89,8 @@ pub(super) fn sweep_page_tx(connection: &Connection, now_ms: u64) -> Result<(usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claim::ClaimInput;
-    use crate::fleet::MemberKey;
+    use fractal_wire::ClaimInput;
+    use fractal_auth::{MemberKey};
 
     fn signed_store(notes: usize) -> (Store, Vec<String>) {
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();

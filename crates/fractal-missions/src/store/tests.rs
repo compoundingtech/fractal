@@ -2893,7 +2893,7 @@ fn work_nudged_operations_are_incremental_in_opposite_arrival_and_batch_orders()
         assert!(worker.project_replication_backlog().unwrap());
         // These private nodes sign the new nudge claims through the normal sealer.
         for source in [&controller, &worker] {
-            source.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+            source.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
         }
         let left = Store::open_memory("left").unwrap();
         let right = Store::open_memory("right").unwrap();

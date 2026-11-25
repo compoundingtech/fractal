@@ -10,8 +10,9 @@ use axum::http::Request;
 use tower::ServiceExt as _;
 
 use super::*;
-use crate::claim::{ClaimInput, ReplicaEnvelopeId};
-use crate::fleet::handshake::JoinRequest;
+use crate::claim::{ ReplicaEnvelopeId};
+use fractal_wire::{ClaimInput};
+use fractal_auth::{handshake::JoinRequest};
 use crate::replication::{ReceiveOptions, ReplicationExportResponse, ReplicationReceiveResponse};
 use crate::store::runtime::Plain;
 use crate::store::{Runtime as _, Store};
@@ -925,79 +926,6 @@ async fn stalled_replication_http_stream_is_bounded() {
     assert!(matches!(result, Ok(Err(error)) if error.is_timeout()));
 }
 
-#[test]
-fn signed_messages_detect_tampering_and_wrong_fleets() {
-    let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[7; 32]);
-    let body = br#"{"hello":"fleet"}"#;
-    let headers = auth.request_headers("node-a", body).unwrap();
-    assert!(
-        auth.verify(&headers, "POST", EXCHANGE_PATH, body, Some("node-a"), None)
-            .is_ok()
-    );
-    assert!(
-        auth.verify(
-            &headers,
-            "POST",
-            EXCHANGE_PATH,
-            br#"{"hello":"other"}"#,
-            Some("node-a"),
-            None
-        )
-        .is_err()
-    );
-    let other = FleetAuth::test("48608b46-bf75-442a-a462-787085dc574e", &[7; 32]);
-    assert!(
-        other
-            .verify(&headers, "POST", EXCHANGE_PATH, body, Some("node-a"), None)
-            .is_err()
-    );
-}
-
-#[test]
-fn response_signatures_bind_to_one_request() {
-    let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[9; 32]);
-    let body = b"response";
-    let headers = auth
-        .response_headers_for(EXCHANGE_PATH, "node-b", body, "request-a")
-        .unwrap();
-    assert!(
-        auth.verify(
-            &headers,
-            "RESPONSE",
-            EXCHANGE_PATH,
-            body,
-            Some("node-b"),
-            Some("request-a")
-        )
-        .is_ok()
-    );
-    assert!(
-        auth.verify(
-            &headers,
-            "RESPONSE",
-            EXCHANGE_PATH,
-            body,
-            Some("node-b"),
-            Some("request-b")
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn fleet_secret_loading_accepts_private_raw_or_hex_files_only() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("fleet-secret");
-    fs::write(&path, [3_u8; 32]).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    FleetAuth::load("1f91ca65-7793-48cc-866e-ac15690130e1", &path).unwrap();
-
-    fs::write(&path, format!("{}\n", hex::encode([4_u8; 32]))).unwrap();
-    FleetAuth::load("1f91ca65-7793-48cc-866e-ac15690130e1", &path).unwrap();
-
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(FleetAuth::load("1f91ca65-7793-48cc-866e-ac15690130e1", &path).is_err());
-}
 
 #[tokio::test]
 async fn an_authenticated_failure_has_a_request_bound_signature() {
@@ -2419,8 +2347,8 @@ fn a_refusal_waits_for_the_settings_lock_without_blocking_the_runtime() {
 
 #[tokio::test]
 async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
-    use crate::fleet::code::{JoinCode, fingerprint};
-    use crate::fleet::handshake::{JoinResponse, Joiner};
+    use fractal_auth::{code::{JoinCode, fingerprint}};
+    use fractal_auth::{handshake::{JoinResponse, Joiner}};
     let fleet = "3b241101-e2bb-4255-8caf-4136c566a962";
     let anchor = Arc::new(MemberKey::generate().unwrap().0);
     let member = MemberKey::generate().unwrap().0;
@@ -2684,9 +2612,9 @@ fn leave_fixture() -> LeaveFixture {
         shared.envelopes.iter().all(|envelope| {
             envelope.member_key.as_deref() == Some(anchor.public())
                 && envelope.signature.as_deref().is_some_and(|signature| {
-                    crate::fleet::verify_signature(
+                    fractal_auth::verify_signature(
                         anchor.public(),
-                        &crate::fleet::envelope_signature_message(
+                        &fractal_auth::envelope_signature_message(
                             fleet,
                             &envelope.writer,
                             envelope.sequence,
@@ -4507,7 +4435,7 @@ mod retry_tests {
         }
         let write = |index: usize, note: &str| {
             stores[index]
-                .append_claim(&crate::claim::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: format!("daemon/{note}"),
                     kind: "daemon.diagnostic".into(),
                     actor: None,
@@ -5202,7 +5130,7 @@ mod retry_tests {
         let mut outbound = vec![start(2, 0), start(2, 1)];
         let write = |index: usize, note: &str| {
             stores[index]
-                .append_claim(&crate::claim::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: format!("daemon/{note}"),
                     kind: "daemon.diagnostic".into(),
                     actor: None,

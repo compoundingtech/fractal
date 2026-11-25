@@ -26,6 +26,7 @@ pub mod backup;
 pub mod ask_digest_clock;
 pub mod conversation_delivery;
 pub mod external_sessions;
+pub mod light_node;
 pub mod gate_admission_receipts;
 pub mod recorder_receipts;
 pub mod replication_worker_build;
@@ -51,5 +52,6 @@ pub mod work_eta;
 pub mod wire_archive_candidates;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
-pub use model::{NormalizedIntent, FractalError};
+pub use model::{NormalizedIntent};
+
 

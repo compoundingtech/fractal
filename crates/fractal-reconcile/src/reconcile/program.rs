@@ -28,9 +28,8 @@ use anyhow::{Context as _, Result, anyhow};
 use serde_json::{Value, json};
 use sha2::Digest as _;
 
-use crate::model::{
-    ClaimInput, ClaimRecord, FractalError, MissionRunView, PROGRAM_ASKER, PersonAskRequest, PersonStepResponse, ProgramSpec,
-};
+use crate::model::{ ClaimRecord, MissionRunView, PROGRAM_ASKER, PersonAskRequest, PersonStepResponse, ProgramSpec};
+use fractal_wire::{ClaimInput, Error as FractalError};
 use crate::store::Store;
 use crate::{MissionsStore, PersonWorkStore};
 
@@ -115,7 +114,7 @@ struct Host {
 /// The actual in-process program runtime generation, distinct from a native agent/person seat.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProgramExecution {
-    pub run: crate::store::run_credentials::RunBinding,
+    pub run: fractal_light_node_core::authority::RunBinding,
     pub runtime: String,
     pub incarnation: String,
 }
@@ -286,7 +285,7 @@ impl ProgramEngine {
         self.run_authority.set(authority).map_err(|_| anyhow::anyhow!("program run authority is already installed"))
     }
 
-    fn execution(&self, run: crate::store::run_credentials::RunBinding, generation: u64, issuance: Option<uuid::Uuid>) -> ProgramExecution {
+    fn execution(&self, run: fractal_light_node_core::authority::RunBinding, generation: u64, issuance: Option<uuid::Uuid>) -> ProgramExecution {
         ProgramExecution {
             runtime: format!("program-step/{}", run.step_run),
             incarnation: match issuance {
@@ -377,7 +376,7 @@ impl ProgramEngine {
             anyhow::ensure!(admitted.run == dispatch.run, "program dispatch names another run");
             admitted
         } else {
-            crate::store::run_credentials::RunBinding {
+            fractal_light_node_core::authority::RunBinding {
                 run: dispatch.run.clone(), step_run: dispatch.step.clone(), attempt: dispatch.attempt,
             }
         };
@@ -405,7 +404,7 @@ impl ProgramEngine {
                 RUN_CREDENTIAL_LIFETIME_MS,
             ) {
                 Ok(credential) => credential,
-                Err(error) if error.downcast_ref::<crate::model::FractalError>()
+                Err(error) if error.downcast_ref::<fractal_wire::Error>()
                     .is_some_and(|error| error.code == "local-authority-backpressure") =>
                 {
                     return Ok(Dispatched::AwaitingAuthority);

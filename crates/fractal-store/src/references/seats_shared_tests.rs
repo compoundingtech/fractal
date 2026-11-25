@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 use std::collections::{BTreeMap, BTreeSet};
-use crate::model::{DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, FractalError, UsedMissionSpec, WorkSelector};
+use crate::model::{DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, UsedMissionSpec, WorkSelector};
+use fractal_wire::{Error as FractalError};
 use crate::graph::parse_intent;
 use crate::store::Store;
 

@@ -185,7 +185,7 @@ objective "example/quality" {
     store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
     let minute = 60_000;
     for (hours, value) in [(9, 20), (7, 20), (5, 20), (3, 20), (1, 1)] {
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: "custom/example/source/one".into(),
             kind: "custom.example.reading".into(),
             actor: None,
@@ -253,7 +253,7 @@ fn merged_fact(store: &Store, name: &str, merged_at: u64, duration: u64, source:
     });
     // Separate accepted claims for one completion must not add denominator weight.
     for retry in 0..2 {
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: format!("custom/landing/dotfiles/merged/{name}"),
             kind: "custom.landing.dotfiles-merged".into(), actor: None,
             fields: fields.as_object().unwrap().clone().into_iter().collect(),

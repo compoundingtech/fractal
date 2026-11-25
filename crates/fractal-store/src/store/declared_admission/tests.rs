@@ -1,5 +1,5 @@
 use super::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use crate::store::directive_notes::tests_shared_delivery::{FLEET, claim, enable, sync};
 
 const ERROR: &str = "declared-admission-feature-barrier";

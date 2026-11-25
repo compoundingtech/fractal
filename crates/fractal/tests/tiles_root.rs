@@ -665,7 +665,7 @@ fn a_tile_reads_no_key_of_its_supervisor() {
         .unwrap();
     std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let keys = state.path().join("keys");
-    smallclaims::fleet::keys::MemberKey::load_or_create(&keys.join("node.key")).unwrap();
+    fractal_auth::MemberKey::load_or_create(&keys.join("node.key")).unwrap();
     for path in [keys.clone(), keys.join("node.key")] {
         let read = as_uid(a.uid, &["cat".as_ref(), path.as_os_str()]);
         assert!(

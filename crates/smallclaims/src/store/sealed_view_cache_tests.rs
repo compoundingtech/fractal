@@ -1,6 +1,7 @@
 //! Sealed-reader authority invalidation and bounded SQL work.
 use super::*;
-use crate::fleet::{FleetView, MemberKey};
+use fractal_auth::{MemberKey};
+use crate::fleet::{FleetView};
 use crate::sqlite::work::{SqliteWork, SqliteWorkScope};
 use crate::store::checkpoint::{claim_tombstone, drop_digest};
 use crate::store::runtime::Plain;

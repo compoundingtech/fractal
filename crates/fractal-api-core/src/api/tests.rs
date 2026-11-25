@@ -25,13 +25,13 @@ async fn simulated_mail_retirement_advances_the_signed_claim_forget_clock() {
     store.bind_fleet("7b6c5d4e-3f20-4b1c-8d9e-0f1a2b3c4d5e").unwrap();
     store.import_retired_identities_paced(|_| {}).unwrap();
     store.trim_locally(true).unwrap();
-    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     // Always exercise the signed-claim guard, even before its calendar activation.
     let written = u128::from(FRESHNESS_FROM_UNIX_MS) + 60_000;
     store.set_write_clock_at(written).unwrap();
     let mut ids = Vec::new();
     for kind in ["message.sent", "message.delivered", "message.read", "message.closed"] {
-        ids.push(store.append_claim(&crate::model::ClaimInput {
+        ids.push(store.append_claim(&fractal_wire::ClaimInput {
             subject: "message/retirement-clock".into(),
             kind: kind.into(),
             actor: Some(if kind == "message.sent" { "agent/retirement-sender" } else { "agent/retirement-reader" }.into()),
@@ -975,7 +975,7 @@ async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
     state.fleet_id = Some("fleet-pairing-test".into());
-    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let (key, _) = fractal_auth::MemberKey::generate().unwrap();
     let public = key.public().to_owned();
     state.store.set_member_key(Some(Arc::new(key))).unwrap();
     let directory = state.state_dir.join("fleet");
@@ -1190,12 +1190,12 @@ async fn activity_summary_keeps_observed_ownership_and_default_status_provenance
         &parse_intent("version 2\nagent \"eval/named\" { workspace \"/declared\"; harness \"claude\" {} }\n", "node").unwrap(),
         "activity-summary-fixture",
     ).unwrap();
-    state.store.append_claim(&crate::model::ClaimInput {
+    state.store.append_claim(&fractal_wire::ClaimInput {
         subject: "agent/eval/named".into(), kind: "workspace.observed".into(), actor: None,
         fields: serde_json::from_value(json!({"workspace":"/observed", "host":"runtime-host"})).unwrap(),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
-    state.store.append_claim(&crate::model::ClaimInput {
+    state.store.append_claim(&fractal_wire::ClaimInput {
         subject: "agent/eval/named".into(), kind: "runtime.observed".into(), actor: None,
         fields: serde_json::from_value(json!({
             "status":"running", "host":"runtime-host",
@@ -4232,7 +4232,7 @@ fn cached_page_cursor_survives_graph_change_and_stays_person_scoped() {
         .expect("three rows require a second page");
     state
         .store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "custom/client/pairing-page-churn".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: None,
@@ -14043,7 +14043,7 @@ fn silent_send_retry_keeps_original_kind_and_rejects_changed_input() {
     marker.from = "person/example".into();
     marker.idempotency_key = "signed-marker".into();
     marker.tags = vec![format!("{}{}", crate::silent::REMAINING_PREFIX, usize::MAX)];
-    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let (key, _) = fractal_auth::MemberKey::generate().unwrap();
     let signature = smallclaims::principal::ClaimSignature::sign(
         &key,
         "",

@@ -6,7 +6,7 @@ pub use crate::store::directive_notes::tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::directive_notes::tests_shared_seats::{FLEET, advertise, claim, declare, enable, store};
 use super::*;
-use crate::fleet::MemberKey;
+use fractal_auth::{MemberKey};
 use rusqlite::StatementStatus;
 use fractal_store::store::directive_notes::tests_shared_delivery::*;
 use fractal_store::store::directive_notes::tests_shared_delivery::{sync};
@@ -334,7 +334,7 @@ fn directive_note_signed_wire_admission_rejects_wrong_writer_bounds_and_expiry()
             envelope.previous_hash.as_deref(), envelope.accepted_at_unix_ms, &bytes);
         envelope.payload = bytes.into();
         envelope.member_key = Some(key.public().into());
-        envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(
+        envelope.signature = Some(key.sign(&fractal_auth::envelope_signature_message(
             FLEET, &envelope.writer, envelope.sequence, &envelope.hash)));
         exchange.inventory = ReplicationInventory {
             envelopes: vec![ReplicaEnvelopeId { writer: envelope.writer.clone(), sequence: envelope.sequence, hash: envelope.hash.clone() }],

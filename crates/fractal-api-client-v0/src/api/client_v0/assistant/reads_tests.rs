@@ -187,7 +187,7 @@ fn seed_assistant_timing_store(state: &AppState) {
         })).unwrap()).unwrap();
     }
     for number in 0..messages {
-        state.store.append_claim(&crate::model::ClaimInput {
+        state.store.append_claim(&fractal_wire::ClaimInput {
             subject: format!("message/assistant-timing-{number}"), kind: "message.sent".into(),
             actor: Some(OWNER.into()), fields: serde_json::from_value(json!({
                 "from": OWNER, "to": format!("agent/bench-host.worker-{}", number % agents),

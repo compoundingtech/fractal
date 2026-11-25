@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use fractal_telemetry::{residency::{Instruments, Summary, SuspendResult, WakeOutcome, WakeSource}, residency_host_sample::{self as sensor, HeldSilent, Memory, MemoryDelta}};
 use serde_json::{Value, json};
 
-use crate::{model::{ClaimInput, ClaimRecord}, store::Store};
+use crate::{model::{ ClaimRecord}, store::Store};
+use fractal_wire::{ClaimInput};
 
 const OUTCOME_MS: u128 = 10 * 60 * 1000;
 const SAMPLE_MS: u128 = 5 * 60 * 1000;
@@ -311,7 +312,7 @@ mod tests {
 
     fn signed(path: &std::path::Path) -> Store {
         let store = Store::open(path, "amber").unwrap();
-        let key = std::sync::Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let key = std::sync::Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
         store.bind_fleet(FLEET).unwrap();
         store.pin_fleet_anchor(key.public()).unwrap();

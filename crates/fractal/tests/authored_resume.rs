@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use fractal_daemon::api::AppState;
-use fractal_daemon::model::{ClaimInput, IntentInput, PlannerSpec};
+use fractal_daemon::model::{ IntentInput, PlannerSpec};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 

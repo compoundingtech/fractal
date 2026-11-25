@@ -117,7 +117,7 @@ fn managed_startup_reads_its_declaration_over_authenticated_unix() {
             const FLEET: &str = "3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69";
             const SUBJECT: &str = "agent/example/managed";
             let store = Arc::new(Store::open_memory(NODE).unwrap());
-            let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+            let key = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
             store.bind_fleet(FLEET).unwrap();
             store.pin_fleet_anchor(key.public()).unwrap();
             store.set_member_key(Some(key.clone())).unwrap();

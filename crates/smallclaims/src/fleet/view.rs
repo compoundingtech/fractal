@@ -111,15 +111,7 @@ impl FleetView {
     }
 }
 
-/// What a node knows about the sender of one signed message.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Sender {
-    pub name: String,
-    /// The member key the message presented, if any.
-    pub member_key: Option<String>,
-    /// Whether the member signature over the message verified against that key.
-    pub member_signature_valid: bool,
-}
+use fractal_auth::Sender;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Acceptance {

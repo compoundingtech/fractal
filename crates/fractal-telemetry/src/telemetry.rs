@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
-use fractal_kernel::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 
 /// What a hook sees of its process environment.
 pub trait HookEnv {

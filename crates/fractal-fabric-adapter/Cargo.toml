@@ -6,6 +6,7 @@ description = "External local Fractal fleet membership to Fabric runtime-peers a
 license = "MIT"
 
 [dependencies]
+fractal-auth = { path = "../fractal-auth" }
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
@@ -19,6 +20,7 @@ smallclaims = { path = "../smallclaims" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "time"] }
 
 [dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
 tempfile = "3"
 
 [[bin]]

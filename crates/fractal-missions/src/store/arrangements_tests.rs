@@ -260,7 +260,7 @@ fn atomic_rekeys_validate_final_positions_not_intermediate_descendants() {
 #[test]
 fn first_agent_action_uses_normal_principal_signing_without_changing_person_ownership() {
     let store = Store::open_memory("node").unwrap();
-    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
     let mut creation = input(json!([{"op":"create","name":"Agent created"}]));
     creation.actor = Some("agent/fleet/fixture-arrangements/new-seat".into());
     let accepted = store.edit_arrangement(&creation,&BTreeMap::new()).unwrap();

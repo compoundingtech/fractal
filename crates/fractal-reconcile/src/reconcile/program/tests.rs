@@ -135,7 +135,7 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    let execution = engine.execution(crate::store::run_credentials::RunBinding {
+    let execution = engine.execution(fractal_light_node_core::authority::RunBinding {
         run: dispatch.run.clone(), step_run: dispatch.step.clone(), attempt: dispatch.attempt,
     }, 1, None);
     engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, execution, requests: BTreeMap::new(),
@@ -180,7 +180,7 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    let execution = engine.execution(crate::store::run_credentials::RunBinding {
+    let execution = engine.execution(fractal_light_node_core::authority::RunBinding {
         run: step.run.clone(), step_run: step.subject.clone(), attempt: 1,
     }, 1, None);
     engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, execution, requests: BTreeMap::new(),
@@ -304,7 +304,7 @@ fn running_attempt(engine: &ProgramEngine, run: &MissionRunView, attempt: u32, g
             program: ProgramSpec { bundle: "/bundle.mjs".into(), bundle_hash: "a".repeat(64), stalled_after_ms: None },
             payload: BTreeMap::new(), env: BTreeMap::new(), cwd: "/".into(),
         },
-        execution: engine.execution(crate::store::run_credentials::RunBinding {
+        execution: engine.execution(fractal_light_node_core::authority::RunBinding {
             run: run.subject.clone(), step_run: step.clone(), attempt,
         }, generation, None),
         generation, requests: BTreeMap::new(),
@@ -1022,18 +1022,18 @@ fn a_new_wait_does_not_treat_an_older_observed_head_as_head_movement() {
 struct JournalRunAuthority {
     local: Mutex<rusqlite::Connection>,
     home: Arc<Store>,
-    host_key: smallclaims::fleet::MemberKey,
+    host_key: fractal_auth::MemberKey,
     revoked: mpsc::Sender<()>,
 }
 
 impl JournalRunAuthority {
-    fn binding(&self, execution: &ProgramExecution) -> crate::store::run_credentials::ExecutionBinding {
+    fn binding(&self, execution: &ProgramExecution) -> fractal_light_node_core::authority::ExecutionBinding {
         use sha2::Digest;
         let revision = serde_json::to_vec(&json!({
             "home": "node", "host": "execution-host", "epoch": 1,
             "run": execution.run, "runtime": execution.runtime, "incarnation": execution.incarnation,
         })).unwrap();
-        crate::store::run_credentials::ExecutionBinding {
+        fractal_light_node_core::authority::ExecutionBinding {
             version: 1, home: "node".into(), host: "execution-host".into(), epoch: 1,
             subject: execution.run.step_run.clone(), runtime: execution.runtime.clone(),
             incarnation: execution.incarnation.clone(),
@@ -1043,7 +1043,7 @@ impl JournalRunAuthority {
     }
 
     fn acknowledge(&self) {
-        use crate::store::run_credentials::local;
+        use fractal_light_node_core::authority::local;
         let mut connection = self.local.lock().unwrap();
         let changes = local::pending_changes(&connection, 1).unwrap();
         for change in &changes {
@@ -1063,7 +1063,7 @@ impl JournalRunAuthority {
 
 impl RunAuthority for JournalRunAuthority {
     fn issue(&self, execution: &ProgramExecution, lifetime_ms: u64) -> Result<String> {
-        use crate::store::run_credentials::local;
+        use fractal_light_node_core::authority::local;
         anyhow::ensure!(self.home.admit_program_attempt(&execution.run.step_run, execution.run.attempt)? == execution.run);
         let binding = self.binding(execution);
         let mut connection = self.local.lock().unwrap();
@@ -1071,7 +1071,7 @@ impl RunAuthority for JournalRunAuthority {
         let issued = if local::offer_execution_tx(&tx, &binding)? {
             local::issue_local_credential_tx(&tx, &binding, lifetime_ms, 1_000)
         } else {
-            Err(crate::model::FractalError::new("local-authority-backpressure", "awaiting prior revocation ACK"))
+            Err(fractal_wire::Error::new("local-authority-backpressure", "awaiting prior revocation ACK"))
         };
         // A backpressure response must still commit its proposal/admission for home delivery.
         tx.commit()?;
@@ -1082,7 +1082,7 @@ impl RunAuthority for JournalRunAuthority {
         let binding = self.binding(execution);
         let mut connection = self.local.lock().unwrap();
         let tx = connection.transaction()?;
-        crate::store::run_credentials::local::revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision)?;
+        fractal_light_node_core::authority::local::revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision)?;
         tx.commit()?;
         let _ = self.revoked.send(());
         Ok(())
@@ -1119,12 +1119,12 @@ export default {
 }
 "#).unwrap();
         let local = rusqlite::Connection::open_in_memory().unwrap();
-        crate::store::run_credentials::local::initialize_local_authority(&local).unwrap();
+        fractal_light_node_core::authority::local::initialize_local_authority(&local).unwrap();
         engine.store.install_run_epoch("execution-host", 1).unwrap();
         let (revoked, receiver) = mpsc::channel();
         let authority = Arc::new(JournalRunAuthority {
             local: Mutex::new(local), home: engine.store.clone(),
-            host_key: smallclaims::fleet::MemberKey::generate().unwrap().0,
+            host_key: fractal_auth::MemberKey::generate().unwrap().0,
             revoked,
         });
         engine.install_run_authority(authority.clone()).unwrap();
@@ -1174,7 +1174,7 @@ impl Drop for AuthorityFixture {
 
 #[test]
 fn an_authority_ack_retry_keeps_its_identity_but_a_failed_trace_issuance_does_not() {
-    use crate::store::run_credentials::local;
+    use fractal_light_node_core::authority::local;
     let fixture = AuthorityFixture::new();
     assert_eq!(fixture.dispatch().unwrap(), Dispatched::AwaitingAuthority);
     let first = fixture.waiting();
@@ -1207,7 +1207,7 @@ fn an_authority_ack_retry_keeps_its_identity_but_a_failed_trace_issuance_does_no
 
 #[test]
 fn a_failed_terminal_write_resumes_with_new_authority_on_the_same_host_and_attempt() {
-    use crate::store::run_credentials::local;
+    use fractal_light_node_core::authority::local;
     let mut fixture = AuthorityFixture::new();
     let gate = fixture._dir.path().join("finish-gate");
     fixture.dispatch.payload.insert("finishGate".into(), gate.to_string_lossy().into_owned());

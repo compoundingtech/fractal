@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use fractal_daemon::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 
 use crate::terminal_attach::{SilentDaemon, serve_unix, state};

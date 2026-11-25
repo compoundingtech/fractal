@@ -39,7 +39,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
-use fractal_daemon::model::{ClaimInput, ClaimRecord};
+use fractal_daemon::model::{ ClaimRecord};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::{CheckpointAction, CheckpointContext, Store, TrimFault, checkpoint};
 use smallclaims::store::LOCAL_TRIM_KINDS;
 use fractal_schema::{FieldSpec, Retention, ValueType};
@@ -2091,7 +2092,7 @@ fn admit(store: &Store) -> anyhow::Result<()> {
 fn append_generated_claim(
     store: &Store,
     input: &ClaimInput,
-) -> Result<ClaimRecord, fractal_daemon::FractalError> {
+) -> Result<ClaimRecord, fractal_wire::Error> {
     // A fleet's checkpoints still trim the diagnostics its older builds replicated.
     if input.kind == "daemon.diagnostic" {
         return store.append_as_older_build_for_test(input);

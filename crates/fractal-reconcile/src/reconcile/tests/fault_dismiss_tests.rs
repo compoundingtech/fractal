@@ -3,7 +3,8 @@
 //! its source, and a later failure of the same source is a new fault. Only one live agent holds
 //! `handles-faults`, and a dismissal counts only from a person or the holder of its time.
 use super::*;
-use crate::model::{FaultDismissRequest, FractalError};
+use crate::model::{FaultDismissRequest};
+use fractal_wire::{Error as FractalError};
 
 const SOURCE: &str = r#"
 version 2

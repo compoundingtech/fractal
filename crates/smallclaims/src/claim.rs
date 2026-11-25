@@ -8,21 +8,6 @@ use serde_json::Value;
 mod envelope_payload;
 pub use envelope_payload::EnvelopePayload;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ClaimInput {
-    pub subject: String,
-    pub kind: String,
-    #[serde(default)]
-    pub actor: Option<String>,
-    #[serde(default)]
-    pub fields: BTreeMap<String, Value>,
-    #[serde(default)]
-    pub evidence: Vec<String>,
-    #[serde(default)]
-    pub expected_subject: Option<Option<String>>,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClaimRecord {

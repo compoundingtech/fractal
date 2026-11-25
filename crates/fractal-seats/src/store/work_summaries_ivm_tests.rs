@@ -137,7 +137,7 @@ fn future_claims_require_bounded_captured_time_pages() {
 
 #[test]
 fn signed_replication_permutations_and_duplicates_match_canonical_reader() {
-    use crate::fleet::{MemberKey, envelope_signature_message, verify_signature};
+    use fractal_auth::{MemberKey, envelope_signature_message, verify_signature};
     pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let at = 1_800_000_000_000;
     let _reset = freeze(at);

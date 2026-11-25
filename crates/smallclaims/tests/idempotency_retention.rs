@@ -9,7 +9,7 @@ use std::sync::{Arc, Barrier};
 fn commit_clock_anchor(store: &Store, time: i64) {
     store.set_write_clock_at(time as u128).unwrap();
     store
-        .append_claim(&smallclaims::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: "custom/example/clock".into(),
             kind: "custom.example.clock".into(),
             actor: None,

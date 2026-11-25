@@ -1,13 +1,8 @@
 //! Releasing old envelope payloads (`store::envelope_release`): an envelope whose claims all carry
 //! their writer's signature loses its payload here, and nothing a reader or a peer sees changes.
-use smallclaims::{
-    claim::ClaimInput,
-    fleet::MemberKey,
-    store::{
-        Store, envelope_release::ENVELOPE_RELEASE, full_compact_replication_inventory, next_replica_sequence,
-        record_bytes::admitted_claim_sql, runtime::Plain,
-    },
-};
+use fractal_auth::{MemberKey};
+use smallclaims::{ store::{Store, envelope_release::ENVELOPE_RELEASE, full_compact_replication_inventory, next_replica_sequence, record_bytes::admitted_claim_sql, runtime::Plain}};
+use fractal_wire::{ClaimInput};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 const FLEET: &str = "sample-fleet";

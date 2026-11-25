@@ -2,7 +2,7 @@
 //! not CPU profiles, signed-peer qualification or a production idle-hour measurement.
 use rusqlite::params;
 use smallclaims::{
-    claim::ClaimInput,
+    fractal_wire::ClaimInput,
     replication::ReplicationExchange,
     store::{Store, full_compact_replication_inventory, runtime::Plain},
 };

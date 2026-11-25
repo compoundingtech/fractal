@@ -4295,7 +4295,7 @@ finally:
 
     def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
         # No subset for signing: with no flag fractal-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
-        # The VM tests and the mail redelivery canaries run daily, not here.
+        # Native scope/custody runs inside linux-gate; mail canaries remain daily-only.
         suite = ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal-web',
                  'rust-tests']
         for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):

@@ -473,7 +473,7 @@ mod wire_tests {
 #[cfg(test)]
 mod custody_tests {
     use super::*;
-    use crate::store::local_sessions::{LocalSession, SessionCustody};
+    use fractal_light_node_core::custody::{LocalSession, SessionCustody};
 
     #[test]
     fn signal_uses_the_resolved_binding_custody_after_owned_to_borrowed_transition() {
@@ -497,7 +497,7 @@ mod custody_tests {
         let mut binding = LocalSession {
             subject: subject.into(), runtime_id: "custody-transition".into(),
             incarnation: native_incarnation.clone(), native_incarnation: native_incarnation.clone(),
-            terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
+            terminal: true, driver: None, lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service,
             custody: SessionCustody::Owned, start_operation: None, invocation: None,
         };
         state.store.bind_local_session(&binding).unwrap();
@@ -507,7 +507,7 @@ mod custody_tests {
         assert_eq!(preliminary.custody, SessionCustody::Owned);
         binding.incarnation = format!("{native_incarnation}:bound:019a0000-0000-7000-8000-000000000001");
         binding.invocation = Some(binding.incarnation.clone());
-        binding.lifecycle = crate::model::MemberLifecycle::TerminalBound;
+        binding.lifecycle = fractal_light_node_core::custody::MemberLifecycle::TerminalBound;
         binding.custody = SessionCustody::Borrowed;
         state.store.bind_local_session(&binding).unwrap();
         let resolved = live_session(&state, subject, Some(&binding.incarnation)).unwrap();

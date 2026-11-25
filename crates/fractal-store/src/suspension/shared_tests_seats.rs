@@ -9,7 +9,7 @@ use crate::suspension::*;
 use serde_json::json;
 
 pub fn continuation_claim(store: &Store, kind: &str, fields: Value, key: Option<String>) {
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: "agent/example".into(), kind: kind.into(), actor: Some("agent/example".into()),
             fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
             expected_subject: None, idempotency_key: key,

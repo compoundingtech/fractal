@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
-use crate::model::{ClaimInput, FractalError};
+use fractal_wire::{ClaimInput, Error as FractalError};
 use smallclaims::error::internal;
 use crate::store::Store;
 

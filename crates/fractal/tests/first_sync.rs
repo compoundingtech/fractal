@@ -26,9 +26,8 @@ use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use fractal_daemon::model::{
-    ClaimInput, IntentInput, MissionRunRequest, ReplicationStatus, ReplicationTimings, WorkRequest,
-};
+use fractal_daemon::model::{ IntentInput, MissionRunRequest, ReplicationStatus, ReplicationTimings, WorkRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 
 const FLEET: &str = "5d0c6f8e-2b1a-4c3d-9e8f-7a6b5c4d3e2f";
@@ -695,10 +694,10 @@ fn report(node: &str, timings: &ReplicationTimings, elapsed: Duration) {
 /// Envelopes are signed by their writer's member key and verified by every receiver. The
 /// benchmark fleet is unkeyed, so measure that work for the same number of envelopes here.
 fn report_signing(envelopes: u64) {
-    let (key, _) = fractal_daemon::fleet::MemberKey::generate().unwrap();
+    let (key, _) = fractal_auth::MemberKey::generate().unwrap();
     let messages = (0..envelopes)
         .map(|sequence| {
-            fractal_daemon::fleet::envelope_signature_message(FLEET, "source", sequence, &"a".repeat(64))
+            fractal_auth::envelope_signature_message(FLEET, "source", sequence, &"a".repeat(64))
         })
         .collect::<Vec<_>>();
     let started = Instant::now();
@@ -709,7 +708,7 @@ fn report_signing(envelopes: u64) {
     let signing = started.elapsed();
     let started = Instant::now();
     for (message, signature) in messages.iter().zip(&signatures) {
-        assert!(fractal_daemon::fleet::verify_signature(
+        assert!(fractal_auth::verify_signature(
             key.public(),
             message,
             signature

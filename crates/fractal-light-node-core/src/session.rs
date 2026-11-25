@@ -6,13 +6,13 @@ use anyhow::{Result, bail, ensure};
 use axum::{Router, extract::{OriginalUri, State, ws::{Message as ServerMessage, WebSocket, WebSocketUpgrade}}, http::{HeaderMap, StatusCode}, response::{IntoResponse as _, Response}, routing::get};
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde::{Deserialize, Serialize};
-use smallclaims::sync::FleetAuth;
+use fractal_auth::FleetAuth;
 use tokio::sync::{Semaphore, watch};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::{Message as ClientMessage, client::IntoClientRequest as _}};
 
 use super::journal::{Admission, Command, Journal, Outcome, Receipt, Recovery, RunRequest, RunResult, Selection, VERSION};
 use crate::config::LIGHT_NODE_SESSION_PATH;
-use crate::store::run_credentials::local::AuthorityChange;
+use crate::authority::local::AuthorityChange;
 
 const MAX_FRAME: usize = 64 * 1024;
 const CAPABILITIES: [&str; 6] = ["commands-v1", "receipts-v1", "joint-checkpoints-v1", "run-effects-v1", "authority-v1", "signed-channel-v1"];
@@ -22,7 +22,24 @@ type ServerSocket = AuthenticatedSocket<WebSocket>;
 
 const SESSION_NONCE_HEADER:&str="x-fractal-light-session-nonce";
 
-struct AuthenticatedSocket<S> { socket:S, channel:Channel }
+/// Actual session work events; no periodic sampler or synthetic idle activity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionEvent { Connect, Disconnect, ReconnectWait, Receive, Send, Wake }
+
+pub trait SessionObserver: Send + Sync {
+    fn record(&self, event: SessionEvent);
+}
+
+struct AuthenticatedSocket<S> {
+    socket: S,
+    channel: Channel,
+    observer: Option<Arc<dyn SessionObserver>>,
+}
+impl<S> AuthenticatedSocket<S> {
+    fn record(&self, event: SessionEvent) {
+        if let Some(observer) = &self.observer { observer.record(event); }
+    }
+}
 
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,34 +123,6 @@ pub trait RunEffects: Send + Sync + 'static {
     fn close_selection(&self, selection: &Selection) -> Result<()>;
 }
 
-pub struct StoreRunEffects { store: Arc<crate::store::Store> }
-impl StoreRunEffects {
-    pub fn new(store: Arc<crate::store::Store>) -> Self { Self { store } }
-}
-impl RunEffects for StoreRunEffects {
-    fn execute(&self, request: &RunRequest) -> Result<RunResult> {
-        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis().try_into()?;
-        let result = self.store.execute_asserted_claim(&request.assertion,&request.claim,now_ms)
-            .map_err(|error| super::journal::RunRefusal { code:error.code.to_string(),message:error.message });
-        Ok(RunResult { request_id:request.assertion.request.request_id.clone(),result })
-    }
-    fn install_selection(&self, selection: &Selection) -> Result<()> {
-        self.store.install_run_epoch(&selection.host,selection.epoch)?;
-        Ok(())
-    }
-    fn close_selection(&self, selection: &Selection) -> Result<()> {
-        self.store.close_run_epoch(&selection.host,selection.epoch)?;
-        Ok(())
-    }
-    fn apply_authority(&self, change: &AuthorityChange, host_key: &str) -> Result<()> {
-        // A non-program seat has native custody but deliberately has no graph run authority.
-        if change.binding.run.is_some() {
-            if change.revoked { self.store.revoke_run_execution(&change.binding)?; }
-            else { self.store.admit_run_execution(&change.binding,host_key)?; }
-        }
-        Ok(())
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -174,6 +163,7 @@ async fn server_send(socket: &mut ServerSocket, frame: Frame) -> Result<()> {
 }
 async fn client_send(socket: &mut ClientSocket, frame: Frame) -> Result<()> {
     socket.socket.send(ClientMessage::Text(socket.channel.encode(frame)?.into())).await?;
+    socket.record(SessionEvent::Send);
     Ok(())
 }
 async fn server_next(socket: &mut ServerSocket) -> Result<Option<Frame>> {
@@ -190,7 +180,11 @@ async fn server_next(socket: &mut ServerSocket) -> Result<Option<Frame>> {
 async fn client_next(socket: &mut ClientSocket) -> Result<Option<Frame>> {
     loop {
         match socket.socket.next().await {
-            Some(Ok(ClientMessage::Text(text))) => return Ok(Some(socket.channel.decode(text.as_bytes())?)),
+            Some(Ok(ClientMessage::Text(text))) => {
+                let frame = socket.channel.decode(text.as_bytes())?;
+                socket.record(SessionEvent::Receive);
+                return Ok(Some(frame));
+            }
             Some(Ok(ClientMessage::Close(_))) | None => return Ok(None),
             Some(Ok(ClientMessage::Ping(_) | ClientMessage::Pong(_))) => {}
             Some(Err(tokio_tungstenite::tungstenite::Error::Io(_) | tokio_tungstenite::tungstenite::Error::ConnectionClosed | tokio_tungstenite::tungstenite::Error::AlreadyClosed)) => return Ok(None),
@@ -282,7 +276,7 @@ async fn upgrade(State(home): State<Home>, OriginalUri(uri): OriginalUri, axum::
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "session signing unavailable").into_response(),
     };
     let mut response = websocket.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).write_buffer_size(16 * 1024).max_write_buffer_size(MAX_FRAME * 2).on_upgrade(move |socket| async move {
-        let mut socket=AuthenticatedSocket {socket,channel};
+        let mut socket=AuthenticatedSocket {socket,channel,observer:None};
         let mut shutdown=home.0.shutdown.subscribe();
         if *shutdown.borrow() {return;}
         tokio::select! {
@@ -390,7 +384,7 @@ async fn serve_home(home: &Home, journal: &Journal, connection:&Semaphore, socke
                     ensure!(drained, "retained evidence must drain before new effects");
                     ensure!(request.assertion.binding.home == selected.home && request.assertion.binding.host == selected.host && request.assertion.binding.epoch == selected.epoch, "run effect selection is fenced");
                     ensure!(selected.grant.subjects.contains(&request.assertion.binding.subject), "run effect outside provisioned subject grant");
-                    let result = home.0.effects.execute(/* sqlite-large-value: allow-for-now lv-h2784ce849550 owner=fractal_peer::light_node::session TODO=trace-statement-and-value-representation */ &request)?;
+                    let result = home.0.effects.execute(/* sqlite-large-value: allow-for-now lv-h2784ce849550 owner=fractal_light_node_core::session TODO=trace-statement-and-value-representation */ &request)?;
                     ensure!(result.request_id == request.assertion.request.request_id, "effect result identity differs");
                     server_send(socket, Frame::RunResult { result }).await?;
                 }
@@ -431,6 +425,7 @@ pub struct SeatClient {
     endpoint: String,
     selected: Selection,
     executor: Arc<dyn Executor>,
+    observer: Option<Arc<dyn SessionObserver>>,
 }
 impl SeatClient {
     pub fn new(journal: Journal, auth: FleetAuth, node: String, endpoint: String, executor: Arc<dyn Executor>) -> Result<Self> {
@@ -438,7 +433,14 @@ impl SeatClient {
         crate::config::LightNodeSessionConfig::Agent { home_endpoint: endpoint.clone(), grant: selection.clone() }.validate_for(&node)?;
         ensure!(selection.host == node && auth.member_key() == Some(selection.host_key.as_str()), "seat signing identity differs from provisioned grant");
         journal.remember_endpoint(&selection,&endpoint)?;
-        Ok(Self { journal, auth, node, endpoint, executor, selected:selection })
+        Ok(Self { journal, auth, node, endpoint, executor, selected:selection, observer:None })
+    }
+    pub fn with_observer(mut self, observer: Arc<dyn SessionObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+    fn record(&self, event: SessionEvent) {
+        if let Some(observer) = &self.observer { observer.record(event); }
     }
     pub fn requester(&self) -> Requester { Requester { journal: self.journal.clone() } }
 
@@ -455,9 +457,10 @@ impl SeatClient {
                 backoff = Duration::from_millis(100);
                 let mut lifecycle=shutdown.clone();
                 let connected=tokio::select! {
-                    _=lifecycle.changed()=>return Ok(()),
+                    _=lifecycle.changed()=>{ self.record(SessionEvent::Disconnect); return Ok(()); },
                     result=self.connected(&mut socket,&mut shutdown)=>result,
                 };
+                self.record(SessionEvent::Disconnect);
                 match connected {
                     Ok(LinkEnd::Retired | LinkEnd::Shutdown)=>return Ok(()),
                     Ok(LinkEnd::Disconnected)=>{},
@@ -470,6 +473,7 @@ impl SeatClient {
             }
             // Only disconnected transport uses time. Connected sessions are entirely driven by
             // socket frames, durable-journal notifications and native completion futures.
+            self.record(SessionEvent::ReconnectWait);
             tokio::select! {
                 _ = shutdown.changed() => return Ok(()),
                 _ = tokio::time::sleep(backoff) => {},
@@ -501,7 +505,8 @@ impl SeatClient {
             Err(_) => return Ok(None),
         };
         let channel=authenticate_response(self.auth.clone(),selected,&path,&request_digest,response.headers())?;
-        Ok(Some(AuthenticatedSocket {socket,channel}))
+        self.record(SessionEvent::Connect);
+        Ok(Some(AuthenticatedSocket {socket,channel,observer:self.observer.clone()}))
     }
 
     async fn connected(&self, socket: &mut ClientSocket, shutdown: &mut watch::Receiver<bool>) -> Result<LinkEnd> {
@@ -604,8 +609,9 @@ impl SeatClient {
             }
             tokio::select! {
                 _ = shutdown.changed() => return Ok(LinkEnd::Shutdown),
-                _ = &mut changed => {},
+                _ = &mut changed => { self.record(SessionEvent::Wake); },
                 finished = async { work.as_mut().expect("guarded native work").await }, if work.is_some() => {
+                    self.record(SessionEvent::Wake);
                     work = None;
                     let (execution,result) = finished;
                     match result {

@@ -421,7 +421,7 @@ impl Store {
     fn envelope_signer(
         &self,
         connection: &Connection,
-    ) -> Result<Option<(Arc<crate::fleet::MemberKey>, EnvelopeSigner)>> {
+    ) -> Result<Option<(Arc<fractal_auth::MemberKey>, EnvelopeSigner)>> {
         let Some(key) = self
             .member_key
             .read()
@@ -513,7 +513,7 @@ impl Store {
                     .map(|sealed| (sealed.batch.sequence, sealed.envelope_hash.clone())),
             );
             for (sequence, envelope_hash) in unsigned {
-                let signature = key.sign(&crate::fleet::envelope_signature_message_in(
+                let signature = key.sign(&fractal_auth::envelope_signature_message_in(
                     shard.as_deref(),
                     fleet_id,
                     &self.origin,

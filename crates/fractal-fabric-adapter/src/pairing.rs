@@ -8,10 +8,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use smallclaims::fleet::{
-    code::{JoinCode, PairingData, fingerprint},
-    handshake::{JoinRequest, JoinResponse, SealedJoin},
-};
+use fractal_auth::{code::{JoinCode, PairingData, fingerprint}, handshake::{JoinRequest, JoinResponse, SealedJoin}};
 use std::{
     collections::BTreeSet,
     io::{BufRead, Write},
@@ -669,7 +666,7 @@ pub async fn join(socket: &Path, state: &Path) -> Result<()> {
                 && resume.request.invite == code.invite_id(),
             "retained join request identity or invite mismatch"
         );
-        smallclaims::fleet::handshake::verify_response(&code, &resume.request, &resume.response)?;
+        fractal_auth::handshake::verify_response(&code, &resume.request, &resume.response)?;
         let confirmed = resume_status(socket, &pairing.gateway, &pairing.attempt, &node).await?;
         (
             resume.response.clone(),

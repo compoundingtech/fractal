@@ -740,7 +740,7 @@ async fn human_send_reports_current_delivery_but_status_failure_keeps_acceptance
         let root = tempfile::tempdir().unwrap();
         let (back, store, server) = daemon(root.path()).await;
         if outcome == "stopped" {
-            store.append_claim(&fractal_daemon::model::ClaimInput {
+            store.append_claim(&fractal_wire::ClaimInput {
                 subject: WORKER.into(), kind: "runtime.observed".into(), actor: Some(WORKER.into()),
                 fields: serde_json::from_value(serde_json::json!({
                     "status":"stopped", "runtime_id":WORKER, "incarnation_id":"fixture",
@@ -995,7 +995,7 @@ async fn runtime_evidence_without_a_declaration_keeps_running_and_stopped_recipi
     let root = tempfile::tempdir().unwrap();
     let (socket, store, server) = daemon(root.path()).await;
     for (recipient, status) in [("agent/alex/tester", "running"), ("agent/alex/reviewer", "stopped")] {
-        store.append_claim(&fractal_daemon::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: recipient.into(), kind: "runtime.observed".into(),
             actor: Some(recipient.into()),
             fields: serde_json::from_value(serde_json::json!({

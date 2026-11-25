@@ -1,10 +1,11 @@
 //! Actual SQLite journals, authenticated loopback transport and native executor custody.
 //! The seat graph is unavailable throughout observe/stop and reconnect recovery.
 use super::*;
-use fractal_peer::light_node::journal::{Admission, CommandDraft, Limits, OperationKind, ReceiptState, Scope};
-use fractal_peer::light_node::session::{Home, SeatClient, StoreRunEffects};
+use fractal_light_node_core::journal::{Admission, CommandDraft, Limits, OperationKind, ReceiptState, Scope};
+use fractal_light_node_core::session::{Home, SeatClient};
+use fractal_store::light_node::StoreRunEffects;
 use crate::store::local_sessions::{LocalSession, SessionCustody};
-use smallclaims::{fleet::MemberKey, sync::FleetAuth};
+use fractal_auth::{MemberKey, FleetAuth};
 use tokio::sync::watch;
 
 #[test]
@@ -113,7 +114,7 @@ impl NativePair {
         let seat_auth = FleetAuth::test("native-session-tests", &[7; 32]).with_member_key(Some(seat_key));
         let home_service = Home::new(vec![home.clone()], home_auth, selection.home.clone(), Arc::new(StoreRunEffects::new(graph.clone()))).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("ws://{}{}", listener.local_addr().unwrap(), fractal_peer::config::LIGHT_NODE_SESSION_PATH);
+        let endpoint = format!("ws://{}{}", listener.local_addr().unwrap(), fractal_light_node_core::config::LIGHT_NODE_SESSION_PATH);
         let app = home_service.router();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let mut pair = Self { root, selection, home, seat, store, graph, runtime, executor, driver, binding, seat_auth, endpoint,
@@ -311,7 +312,7 @@ async fn borrowed_invocation_keeps_distinct_logical_identity_and_detaches_withou
 
 #[tokio::test]
 async fn paired_epoch_replacement_preserves_native_process_and_fences_old_home_stop() {
-    use fractal_peer::light_node::journal::EpochInstall;
+    use fractal_light_node_core::journal::EpochInstall;
     let mut pair = NativePair::new().await;
     pair.connect();
     let observe = pair.home.enqueue(pair.draft("old-epoch-observe", Operation::Observe)).unwrap();

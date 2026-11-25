@@ -117,9 +117,9 @@ fn default_coverage() -> &'static str {
 fn exec_members(lane: &str, macos: bool, helper: bool) -> Result<u32> {
     if !macos { return Ok(1); }
     let slots = fractal_runtime::darwin_slot::Slot::for_lane(lane)
-        .map_err(|error| fractal_daemon::FractalError::new("darwin-custody-lane", error.to_string()))?;
+        .map_err(|error| fractal_wire::Error::new("darwin-custody-lane", error.to_string()))?;
     if !helper {
-        return Err(fractal_daemon::FractalError::new("helperUnavailable",
+        return Err(fractal_wire::Error::new("helperUnavailable",
             "requested Darwin custody lane has no authorized helper").into());
     }
     Ok(slots.len() as u32)
@@ -325,7 +325,7 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
 
 fn validate_receipt_scope(args: &ExecArgs, has_parent: bool) -> Result<()> {
     if args.receipt_file.is_some() && (has_parent || args.require_parent || args.inherit_parent) {
-        return Err(fractal_daemon::FractalError::new("nested-receipt-unsupported",
+        return Err(fractal_wire::Error::new("nested-receipt-unsupported",
             "--receipt-file is supported only for root executions; join nested proof to the outer root receipt").into());
     }
     Ok(())
@@ -560,7 +560,7 @@ mod tests {
         let args = parse(vec!["fractal", "resources", "exec", "--lane", "checks", "--receipt-file", "out.json", "--", "true"]);
         assert!(validate_receipt_scope(&args, false).is_ok());
         let error = validate_receipt_scope(&args, true).unwrap_err();
-        assert_eq!(error.downcast_ref::<fractal_daemon::FractalError>().unwrap().code, "nested-receipt-unsupported");
+        assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "nested-receipt-unsupported");
         let args = parse(vec!["fractal", "resources", "exec", "--inherit-parent", "--receipt-file", "out.json", "--", "true"]);
         assert!(validate_receipt_scope(&args, false).is_err());
         let args = parse(vec!["fractal", "resources", "exec", "--lane", "checks", "--require-parent", "--receipt-file", "out.json", "--", "true"]);
@@ -577,9 +577,9 @@ mod tests {
         assert_eq!(exec_members("heavy", true, true).unwrap(), 1);
         assert_eq!(exec_members("eval", true, true).unwrap(), 1);
         let error = exec_members("gate", true, false).unwrap_err();
-        assert_eq!(error.downcast_ref::<fractal_daemon::FractalError>().unwrap().code, "helperUnavailable");
+        assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "helperUnavailable");
         let error = exec_members("other", true, true).unwrap_err();
-        assert_eq!(error.downcast_ref::<fractal_daemon::FractalError>().unwrap().code, "darwin-custody-lane");
+        assert_eq!(error.downcast_ref::<fractal_wire::Error>().unwrap().code, "darwin-custody-lane");
         assert_eq!(exec_members("arbitrary-linux-lane", false, false).unwrap(), 1);
     }
     #[test]

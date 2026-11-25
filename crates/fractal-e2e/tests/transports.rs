@@ -17,7 +17,7 @@ use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use fractal_daemon::api::AppState;
-use fractal_daemon::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use fractal_client::{
     Capabilities, Client, ClientError, CollectionEvent, Envelope, ErrorCode, Fence,

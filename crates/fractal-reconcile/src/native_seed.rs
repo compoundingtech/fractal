@@ -1,5 +1,6 @@
 //! One durable first-native-launch opportunity per seat, independent of declaration and harness.
-use crate::model::{ClaimInput, ClaimRecord, ClaimsPage};
+use crate::model::{ ClaimRecord, ClaimsPage};
+use fractal_wire::{ClaimInput};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -225,6 +225,79 @@ withdrawable authorization replacing the remaining full-node graph preflight
 reads, while preserving workspace leases, launch-freeze, kernel/capacity and native
 producer/cleanup custody. This Observe/Stop slice does not weaken those start gates.
 
+### Independently packaged physical runtime
+
+`fractal-light-node-agent` is the light-node process, not another mode of the full
+daemon. Its normal Cargo dependency closure contains the shared session/journal
+core, member authentication and native runtime, but no graph Store, replication,
+fleet reductions, planner, reconciliation daemon or full CLI. The full node uses
+the same canonical wire, authentication, authority, custody and session types;
+the graph-backed home effect adapter remains on the home.
+
+This package is an independently reviewable prerequisite for Phase 3, not the
+whole-node cutover itself. It supports the landed Observe/Stop protocol only.
+Start configuration and grants still fail with `light-node-start-not-supported`;
+this package neither imports an unlanded Start implementation nor changes shared
+capacity reservations. Graph-free remote Start remains the separate next slice
+above. Existing graph membership, deployment, caller routing and production
+planning are not changed or silently disabled by installing this binary.
+
+Run `fractal-light-node-agent --config /absolute/private/light-node.json`.
+Configuration version `1` contains these explicit operator-selected fields:
+
+| Field | Meaning |
+|---|---|
+| `state_dir` | Private agent journal, exclusive process lock and `agent.sock`; this is not a graph directory. |
+| `native_state_dir`, `pty_root` | Existing native exec/log and PTY records; the agent opens no graph there. |
+| `pty_binary` | Optional absolute pinned PTY executable; otherwise use only the packaged sibling `bin/pty`, never an ambient full CLI. |
+| `fleet_id`, `fleet_secret_file`, `member_key_file` | Existing fleet identity and privately provisioned credentials. The member key must match the pinned host grant. |
+| `session` | Canonical `role: "agent"` session with exact home endpoint, member pins, epoch and Observe/Stop scope. |
+| `native_sessions` | Explicit canonical `LocalSession` custody metadata, not a list of subjects to discover or adopt. |
+
+Configuration and credential files must be owned regular files inaccessible to
+group/other users; final-component symlinks are refused. The state directory is
+created private (`0700`), and retained files are never permission-repaired or
+truncated. An exclusive directory process lock prevents a second agent from
+replacing a live API socket. Fresh native custody requires positive exact native
+generation/provenance evidence and current grant authority; reoffering identical
+retained custody is restart-idempotent, including after a completed Stop. An empty
+journal does not claim processes merely because their subject appears in a grant.
+This provisioning interface does not implement production custody transfer from
+the full graph or permission to run two decision owners over the same execution.
+
+The Nix package is `packages.<system>.fractal-light-node-agent`. Its standalone
+Home Manager module is `homeManagerModules.fractal-light-node-agent`, with
+`services.fractal-light-node-agent.enable` and an absolute external string
+`configFile`. Do not use a Nix path literal or place credentials/configuration in
+the Nix store. The opt-in Linux user service uses only this binary and its pinned
+PTY sibling. Composing an enabled full `services.fractal` for the same user is
+refused because opaque external configurations cannot prove disjoint custody.
+No Darwin service or automatic production cutover is provided. Service stop or
+transport loss stops the agent, not healthy native processes: `KillMode=process`
+preserves independent PTY/process custody, and restart repairs retained native
+finalization before exposing session receipts. Reconnect/backoff belongs to the
+real session client; the service adds no sampling or watchdog poller.
+
+`GET /v1/performance` is available only on the private `state_dir/agent.sock`
+Unix socket (`0600`), not a TCP listener. Its first-class physical counter measures
+CPU nanoseconds across all agent threads and excludes native children and the
+home. It identifies each accounting instance with a fresh UUID and PID, an
+explicit CPU baseline, monotonic accounting elapsed time, and sample brackets.
+Accounting initialization is not advertised as OS process birth. Clock failure
+returns a structured unavailable response, never a fabricated zero. Requests
+sample on demand; no background timer is needed to maintain the counter.
+
+Bounded work counters describe actual observed session events and native
+Observe/Stop/recovery entry, not an exhaustive attribution of all CPU. Synchronous
+attribution measures only the current thread, does not include asynchronous
+suspension, and cannot drop or repeat a native effect when accounting fails.
+These counters make the later whole-system measurement attributable; they do
+**not** demonstrate the 600-second total-background under-five-point gate, replace
+the full process census, or transfer CPU attribution for native children/home.
+Real two-process home/agent fixtures and native generation/proof/restart tests
+must pass in the Linux lanes before the package is considered ready.
+
+
 
 ## Phases and exit gates
 

@@ -2,7 +2,7 @@
 use rusqlite::Connection;
 use smallclaims::{
     Store,
-    claim::ClaimInput,
+    fractal_wire::ClaimInput,
     store::{checkpoint_capture_epoch, configure_projection_writer, runtime::Plain},
 };
 use std::{collections::BTreeMap, sync::Arc};

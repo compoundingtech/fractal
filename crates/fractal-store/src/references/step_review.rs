@@ -1,4 +1,5 @@
-use super::{Scope, FractalError, agent_review};
+use super::{Scope, agent_review};
+use fractal_wire::{Error as FractalError};
 use crate::model::StepRunView;
 use crate::store::{
     ReferenceGraph, identities, mission_run_header_tx, step_claim_expired,

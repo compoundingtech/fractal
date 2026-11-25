@@ -719,7 +719,7 @@ impl Gateway {
                 "{person} has registered no daemon key; run `st sekrets enable` from a login session"
             ));
         };
-        if !smallclaims::fleet::verify_signature(
+        if !fractal_auth::verify_signature(
             &key,
             &identity::signing_message(&attestation.statement),
             &attestation.signature,

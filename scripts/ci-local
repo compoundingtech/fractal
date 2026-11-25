@@ -3,7 +3,7 @@
 # required-lanes.json, .fractal first, .st only if absent). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
 #
 #   scripts/ci-local mail-redelivery-canaries
-#   scripts/ci-local tests clippy fleet-compat mail-redelivery-canaries      (what a linux-gate skip covers)
+#   scripts/ci-local tests clippy fleet-compat isolation-vm                  (what a linux-gate skip covers)
 #   scripts/ci-local isolation-vm                                            (the VM tests: scripts/ci-local-isolation-vm)
 #
 # Each STAGE is a scripts/ci-linux stage; clippy and fleet-compat run beside tests unless CI_LOCAL_SERIAL=1. Every stage runs

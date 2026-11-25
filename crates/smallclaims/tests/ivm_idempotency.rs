@@ -1,9 +1,8 @@
 use serde_json::json;
-use smallclaims::{
-    ClaimInput, Store,
+use smallclaims::{ Store,
     ivm::{Views, runtime::ViewRuntime, source_cut},
-    store::{claim_operation, current_index, operation_tx},
-};
+    store::{claim_operation, current_index, operation_tx}};
+use fractal_wire::{ClaimInput};
 use std::sync::Arc;
 
 fn runtime() -> Arc<ViewRuntime> {

@@ -2,7 +2,8 @@
 #![cfg(unix)]
 use fractal_daemon::SeatsStoreCore;
 use serde_json::{Value, json};
-use fractal_daemon::{api::AppState, model::ClaimInput, store::Store};
+use fractal_daemon::{api::AppState, store::Store};
+use fractal_wire::{ClaimInput};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Notify, watch};

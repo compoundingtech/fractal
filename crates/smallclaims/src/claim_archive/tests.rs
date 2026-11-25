@@ -64,7 +64,7 @@ fn window_boundary_and_unknown_times_never_establish_old_age() {
 fn contradictory_hot_evidence_is_not_hidden_by_the_archive() {
     let store = crate::Store::open_memory("alder", Arc::new(Plain)).unwrap();
     store.set_write_clock_at(100).unwrap();
-    let claim = store.append_claim(&crate::ClaimInput {
+    let claim = store.append_claim(&fractal_wire::ClaimInput {
         subject: "note/history".into(), kind: "example.note".into(), actor: None,
         fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();

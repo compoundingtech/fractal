@@ -14,7 +14,7 @@ pub fn skew_client_clock(skew_ms: u64) {
 /// A message sent through `store`: a claim that node writes, and one no published list reads.
 pub fn note_local_claim(store: &crate::store::Store, subject: &str) {
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: "message.sent".into(),
             actor: Some("person/example".into()),
@@ -32,7 +32,7 @@ pub fn note_local_claim(store: &crate::store::Store, subject: &str) {
 /// subject), and one the missions list's does not when no step of that name exists.
 pub fn note_local_progress(store: &crate::store::Store, step: &str) {
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: step.into(),
             kind: "work.progress".into(),
             actor: Some("person/example".into()),
@@ -48,7 +48,7 @@ pub fn note_local_progress(store: &crate::store::Store, step: &str) {
 /// not one of the kinds that check counts as neutral.
 pub fn note_local_resource(store: &crate::store::Store, subject: &str) {
     store
-        .append_claim(&crate::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: "resource.observed".into(),
             actor: Some("person/example".into()),

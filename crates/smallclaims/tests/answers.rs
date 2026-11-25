@@ -5,7 +5,7 @@ use proptest::prelude::*;
 use rusqlite::{Connection, params};
 use smallclaims::{
     answers::*,
-    claim::ClaimInput,
+    fractal_wire::ClaimInput,
     replication::ReplicationInventory,
     store::{Store, canonical, runtime::Plain},
 };

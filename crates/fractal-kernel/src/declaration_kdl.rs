@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use kdl::{KdlNode, KdlValue};
 use serde_json::{Map, Value};
 
-use crate::model::FractalError;
+use fractal_wire::{Error as FractalError};
 
 pub fn json_value(value: &KdlValue) -> Result<Value, FractalError> {
     Ok(match value {

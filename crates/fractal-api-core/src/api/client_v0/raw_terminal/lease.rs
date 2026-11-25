@@ -202,7 +202,7 @@ impl MembershipAuthority {
             if name == self.node && key.is_none() && view.anchor.is_none() {
                 continue;
             }
-            let sender = crate::fleet::Sender {
+            let sender = fractal_auth::Sender {
                 name: name.into(),
                 member_key: key.clone(),
                 member_signature_valid: key.is_some(),

@@ -14,7 +14,8 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
-use fractal_daemon::model::{ClaimInput, ClaimRecord, MemberSpec, MissionRunRequest};
+use fractal_daemon::model::{ ClaimRecord, MemberSpec, MissionRunRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
@@ -545,7 +546,7 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
     drop(socket);
     // The synthetic transport has no physical provider authority to publish a loss.
     // Install the same durable loss observation after disconnecting its real socket.
-    let failure = fixture.store.append_claim(&fractal_daemon::model::ClaimInput {
+    let failure = fixture.store.append_claim(&fractal_wire::ClaimInput {
         subject: subject.clone(), kind: "operational.failure".into(),
         actor: Some("daemon/runtime".into()),
         fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
@@ -576,7 +577,7 @@ async fn restart_waits_for_replacement_after_mailbox_disconnect() {
         // An unrelated restart outcome must not settle this accepted request.
         fixture
             .store
-            .append_claim(&fractal_daemon::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: subject.clone(),
                 kind: "runtime.action.failed".into(),
                 actor: Some("agent/example/operator".into()),
@@ -2052,7 +2053,7 @@ fn park(fixture: &Fixture, subject: &str, driver: &str) {
     };
     fixture
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: subject.into(),
             kind: "runtime.reconcile-decision".into(),
             actor: None,
@@ -2103,7 +2104,7 @@ fn reconcile_ready(fixture: &Fixture, daemon: &Reconciler<Runtime>, subject: &st
         {
             fixture
                 .store
-                .append_claim(&fractal_daemon::model::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: subject.into(),
                     kind: "harness.observed".into(),
                     actor: Some(subject.into()),
@@ -2738,7 +2739,7 @@ async fn an_interrupted_explicit_attempt_is_not_launched_again_after_daemon_rest
     let request = fixture.request(&subject, "interrupted").await;
     fixture
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_claim(&fractal_wire::ClaimInput {
             subject: subject.clone(),
             kind: "runtime.action.requested".into(),
             actor: request.actor.clone(),
@@ -2928,7 +2929,7 @@ fn report_harness(
     quiescent: bool,
     observed_at: u128,
 ) {
-    fixture.store.append_claim(&fractal_daemon::model::ClaimInput {
+    fixture.store.append_claim(&fractal_wire::ClaimInput {
         subject: subject.into(),
         kind: "harness.observed".into(),
         actor: Some(subject.into()),

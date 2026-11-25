@@ -573,7 +573,7 @@ pub fn install(store: &Store, state_dir: &Path) -> Result<()> {
 /// Verify signed source authority before looking up immutable receipt keys.
 pub fn ingest(store: &Store, signed: SignedReceipt, now: u64) -> Result<Value> {
     let (receipt, signer) = authenticated_receipt(store, &signed.claim_id)
-        .map_err(|error| crate::model::FractalError::new("invalid-roll-authority", error.to_string()))?;
+        .map_err(|error| fractal_wire::Error::new("invalid-roll-authority", error.to_string()))?;
     let source = store.fractal.extensions.get::<Source>();
     if matches!(&receipt, Receipt::SourceEnabled { .. } | Receipt::SourceFrontier { .. }) {
         source.registry.write().unwrap_or_else(PoisonError::into_inner).membership = membership(store)?;
@@ -585,7 +585,7 @@ pub fn ingest(store: &Store, signed: SignedReceipt, now: u64) -> Result<Value> {
     validate_frontier_position(store, &source.registry.read().unwrap_or_else(PoisonError::into_inner),
         &receipt, &signed.claim_id)?;
     let changed = validate_source(&source.registry.read().unwrap_or_else(PoisonError::into_inner), &receipt, now)
-        .map_err(|error| crate::model::FractalError::new("invalid-roll-receipt", error.to_string()))?;
+        .map_err(|error| fractal_wire::Error::new("invalid-roll-receipt", error.to_string()))?;
     let key = match &receipt {
         Receipt::RollDeclared { roll_id, .. } => json!([roll_id, "declaration"]),
         Receipt::HostTargetResolved { roll_id, host, .. } => json!([roll_id, host, "resolution"]),
@@ -769,14 +769,14 @@ pub(crate) fn publish_frontier(store: &Store, config: &SourceConfig, covered_fro
         host: store.origin().to_owned(), hosts, members, source_claim_id: config.source_claim_id.clone(),
         covered_from_ms, through_ms, source_index, receipt_claim_ids,
         previous_frontier_claim_id: previous.map(|(_, id, _, _)| id), source_lifetime: source_lifetime.to_owned() };
-    let input = crate::model::ClaimInput {
+    let input = fractal_wire::ClaimInput {
         subject: frontier_subject,
         kind: "resource.observed".into(), actor: None,
         fields: BTreeMap::from([("kind".into(), json!("custom.fractal.fleet-roll-receipt")),
             ("state".into(), json!("source-closed")), ("facts".into(), serde_json::to_value(receipt)?)]),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     };
-    let admission = |connection: &rusqlite::Connection| -> Result<(), crate::model::FractalError> {
+    let admission = |connection: &rusqlite::Connection| -> Result<(), fractal_wire::Error> {
         let prefix = format!("mission/{}", config.mission_prefix);
         let raced: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE store_index>?1 AND origin=?2
@@ -787,16 +787,16 @@ pub(crate) fn publish_frontier(store: &Store, config: &SourceConfig, covered_fro
                         ('roll-declared','host-target-resolved','host-observed','intent-observed'))))",
             rusqlite::params![captured_index, store.origin(), through_ms, prefix,
                 "resource/fleet/roll-completion/", "resource/fleet/roll-completion0"],
-            |row| row.get(0)).map_err(|error| crate::model::FractalError::new("roll-source-snapshot", error.to_string()))?;
+            |row| row.get(0)).map_err(|error| fractal_wire::Error::new("roll-source-snapshot", error.to_string()))?;
         if raced {
-            return Err(crate::model::FractalError::new("roll-source-snapshot",
+            return Err(fractal_wire::Error::new("roll-source-snapshot",
                 "an own-origin source event committed behind the captured clock cut; take a new snapshot"));
         }
         Ok(())
     };
-    let fence = |_: &rusqlite::Transaction<'_>, claim: &crate::model::ClaimRecord| -> Result<(), crate::model::FractalError> {
+    let fence = |_: &rusqlite::Transaction<'_>, claim: &crate::model::ClaimRecord| -> Result<(), fractal_wire::Error> {
         if claim.accepted_at_unix_ms <= u128::from(through_ms) {
-            return Err(crate::model::FractalError::new("roll-source-clock",
+            return Err(fractal_wire::Error::new("roll-source-clock",
                 "native frontier acceptance must fence every future own write strictly beyond its source cut"));
         }
         Ok(())
@@ -845,7 +845,7 @@ pub(crate) fn publish_observation(store: &Store, receipt: Receipt, now: u64) -> 
         anyhow::bail!("internal collector may publish only host observations");
     };
     ensure!(host == store.origin(), "collector cannot assert another host");
-    let claim = store.append_claim(&crate::model::ClaimInput {
+    let claim = store.append_claim(&fractal_wire::ClaimInput {
         subject: format!("{RESOURCE}/{roll_id}/{host}/{observed_at_ms}"),
         kind: "resource.observed".into(), actor: None,
         fields: BTreeMap::from([("kind".into(), json!("custom.fractal.fleet-roll-receipt")),
@@ -1093,7 +1093,7 @@ pub(crate) fn publish_intent_observed(store: &Store, producer: &str,
         host: store.origin().to_owned(), roll_id: roll_id.clone(),
         source_claim_id: config.source_claim_id, declaration_claim_id: declaration_claim_id.to_owned(),
         intent_claim_id: intent_claim_id.to_owned(), intent_at_ms };
-    let claim = store.append_claim(&crate::model::ClaimInput {
+    let claim = store.append_claim(&fractal_wire::ClaimInput {
         subject: format!("{RESOURCE}/{roll_id}/intents/{}/{intent_claim_id}", store.origin()),
         kind: "resource.observed".into(), actor: None,
         fields: BTreeMap::from([("kind".into(), json!("custom.fractal.fleet-roll-receipt")),

@@ -215,7 +215,7 @@ fn without_the_check_an_exchange_compares_nothing() {
 fn past_divergence_faults(store: &Store, count: usize) {
     for index in 0..count {
         let failure = store
-            .append_claim(&crate::model::ClaimInput {
+            .append_claim(&fractal_wire::ClaimInput {
                 subject: projection_divergence_subject(store.origin()),
                 kind: "operational.failure".into(),
                 actor: Some("daemon/runtime".into()),
@@ -230,7 +230,7 @@ fn past_divergence_faults(store: &Store, count: usize) {
             .unwrap();
         if index % 2 == 0 {
             store
-                .append_claim(&crate::model::ClaimInput {
+                .append_claim(&fractal_wire::ClaimInput {
                     subject: projection_divergence_subject(store.origin()),
                     kind: "operational.recovered".into(),
                     actor: Some("daemon/runtime".into()),

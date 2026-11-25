@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use serde_json::Value;
-use fractal_daemon::model::{ClaimInput, IntentInput, MemberSpec, MissionRunRequest, MissionRunView};
+use fractal_daemon::model::{ IntentInput, MemberSpec, MissionRunRequest, MissionRunView};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::reconcile::{FaultInjection, Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::Store;
 use tokio::sync::Notify;

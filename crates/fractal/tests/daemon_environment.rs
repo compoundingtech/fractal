@@ -394,7 +394,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
         github: fractal_daemon::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None, observer_requests_per_hour: None, app_token_root: None, webhook_listen: None, webhook_secret_file: None },
         ..Default::default()
     };
-    let key = smallclaims::fleet::MemberKey::load_or_create(
+    let key = fractal_auth::MemberKey::load_or_create(
         &fractal_daemon::fleet::join::key_directory(&config.state_dir).join("node.key")).unwrap();
     let config_path = root.path().join("config/st3/config.toml");
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();

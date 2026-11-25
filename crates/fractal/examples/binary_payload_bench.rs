@@ -1,9 +1,9 @@
 //! Run in release mode on a private SQLite backup, never a live store.
 //! Prints only timings, counts and authority digests, not stored content.
 use fractal_daemon::{
-    model::{ClaimInput, ReplicationInventory},
-    store::Store,
-};
+    model::{ ReplicationInventory},
+    store::Store};
+use fractal_wire::{ClaimInput};
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -156,9 +156,9 @@ fn main() -> anyhow::Result<()> {
                 )
         );
         if let (Some(key), Some(signature)) = (&envelope.member_key, &envelope.signature) {
-            anyhow::ensure!(fractal_daemon::fleet::verify_signature(
+            anyhow::ensure!(fractal_auth::verify_signature(
                 key,
-                &fractal_daemon::fleet::envelope_signature_message(
+                &fractal_auth::envelope_signature_message(
                     &fleet,
                     &envelope.writer,
                     envelope.sequence,
@@ -195,9 +195,9 @@ fn main() -> anyhow::Result<()> {
                 )
         );
         if let (Some(key), Some(signature)) = (&envelope.member_key, &envelope.signature) {
-            anyhow::ensure!(fractal_daemon::fleet::verify_signature(
+            anyhow::ensure!(fractal_auth::verify_signature(
                 key,
-                &fractal_daemon::fleet::envelope_signature_message(
+                &fractal_auth::envelope_signature_message(
                     &fleet,
                     &envelope.writer,
                     envelope.sequence,

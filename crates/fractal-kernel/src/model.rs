@@ -2,11 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use smallclaims::Error as FractalError;
-pub use smallclaims::claim::{
-    ClaimInput, ClaimRecord, ClaimsPage, DocumentVersion, ReplicaBatch, ReplicaEnvelope,
-    ReplicaEnvelopeId, ReplicaEnvelopeSignature,
-};
+use fractal_light_node_core::custody::MemberLifecycle;
+pub use smallclaims::claim::{ ClaimRecord, ClaimsPage, DocumentVersion, ReplicaBatch, ReplicaEnvelope,
+    ReplicaEnvelopeId, ReplicaEnvelopeSignature};
+
 pub use smallclaims::replication::{
     InventoryCheckpoint, ReplicaRecordView, ReplicationExchange, ReplicationExportRequest,
     ReplicationExportResponse, ReplicationFirstSync, ReplicationInventory,
@@ -175,16 +174,6 @@ pub enum RestartType {
     Always,
     OnFailure,
     Never,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MemberLifecycle {
-    #[default]
-    Service,
-    AdoptOnly,
-    /// Borrow a caller-owned shell's PTY; never launch or terminate that PTY.
-    TerminalBound,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

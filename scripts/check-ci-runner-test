@@ -187,9 +187,14 @@ for job in ("linux-clippy", "linux-fleet-compat"):
     assert required_priority in blocks[job], (job, "merge precedes PR")
     assert "github.run-id=" in blocks[job], (job, "prevent cross-run assignment")
     assert "namespace-features:github.run-id=" in blocks[job], (job, "shape labels need a separate features label")
-# The VM tests and the mail redelivery canaries run once a day (daily-long.yml), never per pull request or in the merge queue.
-for job in ('isolation-vm', 'mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-mail-redelivery-canaries'):
-    assert job not in blocks, (job, 'daily only')
+# Physical native scope/custody runs in KVM before merge; mail redelivery stays daily.
+for job in ('mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-mail-redelivery-canaries'):
+    assert job not in blocks, (job, 'no independent VM skip or daily-only job')
+assert 'isolation-vm' in blocks
+assert 'needs.isolation-vm.result' in blocks['linux-gate']
+assert "needs.evidence-gate-linux-gate.outputs.skip" in blocks['isolation-vm']
+assert 'namespace-features:github.run-id=' in blocks['isolation-vm']
+assert 'Probe KVM' in blocks['isolation-vm']
 control_jobs = ('upgrade-impact', 'linux-gate', 'fractal-web-changes', 'fractal-web',
                 'genie-freshness', 'typescript-client')
 evidence_jobs = tuple(job for job in blocks if job.startswith('evidence-gate-'))

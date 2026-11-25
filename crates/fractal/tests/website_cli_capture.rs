@@ -24,7 +24,8 @@ use std::sync::Arc;
 
 use fractal_daemon::MissionsStore;
 use fractal_daemon::api::AppState;
-use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest, WorkRequest};
+use fractal_daemon::model::{ IntentInput, MissionRunRequest, WorkRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

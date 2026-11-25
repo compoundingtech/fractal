@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use crate::store::run_credentials::{ExecutionBinding, local};
+use crate::authority::{ExecutionBinding, local};
 pub use crate::config::{LightNodeGrant as Selection, LightNodeScope as Scope, LightNodeOperation as OperationKind};
 
 pub const VERSION: u32 = 1;
@@ -25,7 +25,7 @@ impl Operation {
 
     fn require_supported(&self)->Result<()> {
         if matches!(self,Self::Start) {
-            return Err(crate::model::FractalError::new("light-node-start-not-supported","light-node sessions support only observe and stop").into());
+            return Err(fractal_wire::Error::new("light-node-start-not-supported","light-node sessions support only observe and stop").into());
         }
         Ok(())
     }
@@ -107,7 +107,7 @@ pub struct Journal {
     limits: Limits,
 }
 
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hdeb9b3a5a824 owner=fractal_peer::light_node::journal TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hdeb9b3a5a824 owner=fractal_light_node_core::journal TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE epochs(epoch INTEGER PRIMARY KEY, selection TEXT NOT NULL, closed INTEGER NOT NULL DEFAULT 0,
  home_floor INTEGER NOT NULL DEFAULT 0, seat_floor INTEGER NOT NULL DEFAULT 0,
  peer_drained INTEGER NOT NULL DEFAULT 0, endpoint TEXT);
@@ -137,8 +137,8 @@ PRAGMA user_version=1;";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRequest {
-    pub assertion: crate::store::run_credentials::assertions::RequestAssertion,
-    pub claim: crate::model::ClaimInput,
+    pub assertion: crate::authority::assertions::RequestAssertion,
+    pub claim: fractal_wire::ClaimInput,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -164,12 +164,13 @@ impl Journal {
             0 => {
                 let tables: u64 = transaction.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |row| row.get(0))?;
                 ensure!(tables == 0, "unversioned journal contains authoritative data; refusing replacement");
-                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h938942f23651 owner=fractal_peer::light_node::journal TODO=trace-statement-and-value-representation */ SCHEMA)?;
+                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h938942f23651 owner=fractal_light_node_core::journal TODO=trace-statement-and-value-representation */ SCHEMA)?;
             }
             VERSION => {}
             _ => bail!("unsupported light-node journal version {version}"),
         }
         local::initialize_local_authority(&transaction)?;
+        crate::custody::initialize(&transaction)?;
         transaction.commit()?;
         Ok(Self { connection: Arc::new(Mutex::new(connection)), changed: Arc::new(Notify::new()), authority_changed: Arc::new(Notify::new()), limits })
     }
@@ -223,14 +224,14 @@ impl Journal {
                 if changed { self.authority_changed.notify_waiters(); self.changed.notify_waiters(); }
                 return Ok(EpochInstall::Draining);
             }
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h4a870d7bef9c owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET closed=1 WHERE closed=2", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h4a870d7bef9c owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET closed=1 WHERE closed=2", [])?;
         }
         let maximum: u64 = tx.query_row("SELECT COALESCE(MAX(epoch),0) FROM epochs", [], |row| row.get(0))?;
         ensure!(selection.epoch > maximum, "retired epoch is fenced");
         let count:usize=tx.query_row("SELECT COUNT(*) FROM epochs",[],|row|row.get(0))?;
         ensure!(count<self.limits.max_identities,"backpressure: retained epoch fences");
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h102052ca35fc owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO epochs(epoch,selection) VALUES(?1,?2)", params![selection.epoch, serde_json::to_string(selection)?])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-he362e06c6cb9 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=0 WHERE name IN ('received','acknowledged','issued')", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h102052ca35fc owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO epochs(epoch,selection) VALUES(?1,?2)", params![selection.epoch, serde_json::to_string(selection)?])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-he362e06c6cb9 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=0 WHERE name IN ('received','acknowledged','issued')", [])?;
         tx.commit()?;
         self.authority_changed.notify_waiters(); self.changed.notify_waiters();
         Ok(EpochInstall::Installed)
@@ -251,7 +252,7 @@ impl Journal {
 
     pub fn mark_peer_drained(&self,epoch:u64)->Result<()> {
         let connection=self.lock()?;
-        let changed=connection.execute(/* sqlite-large-value: allow-for-now lv-h7726667ff8cd owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET peer_drained=1 WHERE epoch=?1 AND peer_drained=0",[epoch])?;
+        let changed=connection.execute(/* sqlite-large-value: allow-for-now lv-h7726667ff8cd owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET peer_drained=1 WHERE epoch=?1 AND peer_drained=0",[epoch])?;
         if changed>0 { self.changed.notify_waiters(); }
         Ok(())
     }
@@ -280,7 +281,7 @@ impl Journal {
         ensure!(epoch_selection(&tx,selection.epoch)?==*selection,"endpoint selection differs");
         let previous:Option<String>=tx.query_row("SELECT endpoint FROM epochs WHERE epoch=?1",[selection.epoch],|row|row.get(0))?;
         if let Some(previous)=previous { ensure!(previous==endpoint,"epoch endpoint is immutable"); }
-        else {tx.execute(/* sqlite-large-value: allow-for-now lv-h920263c26897 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET endpoint=?2 WHERE epoch=?1",params![selection.epoch,endpoint])?;}
+        else {tx.execute(/* sqlite-large-value: allow-for-now lv-h920263c26897 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET endpoint=?2 WHERE epoch=?1",params![selection.epoch,endpoint])?;}
         tx.commit()?;
         Ok(())
     }
@@ -332,7 +333,7 @@ impl Journal {
     pub fn mark_sent(&self, command: &Command) -> Result<()> {
         let connection = self.lock()?;
         validate(&current(&connection)?, command)?;
-        connection.execute(/* sqlite-large-value: allow-for-now lv-hebcba1c5d265 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='sent' WHERE side='home' AND execution=?1 AND state='queued'", [&command.execution_id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hebcba1c5d265 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='sent' WHERE side='home' AND execution=?1 AND state='queued'", [&command.execution_id])?;
         Ok(())
     }
 
@@ -345,7 +346,7 @@ impl Journal {
         ensure!(side == "home" || side == "seat", "invalid journal side");
         let connection = self.lock()?;
         let column = if side == "home" { "home_floor" } else { "seat_floor" };
-        let mut prefix: u64 = connection.query_row(/* sqlite-large-value: allow-for-now lv-h191641c4d241 owner=fractal_peer::light_node::journal TODO=trace-statement-and-value-representation */ &format!("SELECT {column} FROM epochs WHERE epoch=?1"), [epoch], |row| row.get(0))?;
+        let mut prefix: u64 = connection.query_row(/* sqlite-large-value: allow-for-now lv-h191641c4d241 owner=fractal_light_node_core::journal TODO=trace-statement-and-value-representation */ &format!("SELECT {column} FROM epochs WHERE epoch=?1"), [epoch], |row| row.get(0))?;
         let mut query = connection.prepare("SELECT sequence,state,local_finalization FROM commands WHERE side=?1 AND epoch=?2 ORDER BY sequence")?;
         let rows = query.query_map(params![side,epoch], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?)))?;
         for row in rows {
@@ -393,8 +394,8 @@ impl Journal {
         let identities: usize = tx.query_row("SELECT COUNT(*) FROM identities", [], |row| row.get(0))?;
         ensure!(count < self.limits.max_commands && identities < self.limits.max_identities, "backpressure: journal capacity");
         check_identity(tx, side, command)?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h806adaaf48a4 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identities(side,decision,execution,digest,epoch,sequence) VALUES(?1,?2,?3,?4,?5,?6)", params![side, command.decision_id, command.execution_id, digest(command)?, command.binding.epoch, command.sequence])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h93c3cc2b150d owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO commands(side,epoch,sequence,execution,decision,payload,state) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![side, command.binding.epoch, command.sequence, command.execution_id, command.decision_id, payload, state])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h806adaaf48a4 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identities(side,decision,execution,digest,epoch,sequence) VALUES(?1,?2,?3,?4,?5,?6)", params![side, command.decision_id, command.execution_id, digest(command)?, command.binding.epoch, command.sequence])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h93c3cc2b150d owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO commands(side,epoch,sequence,execution,decision,payload,state) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![side, command.binding.epoch, command.sequence, command.execution_id, command.decision_id, payload, state])?;
         Ok(())
     }
 
@@ -414,7 +415,7 @@ impl Journal {
             self.changed.notify_waiters();
             bail!("native entry refused before custody; terminal receipt retained");
         }
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hdd339b4e6193 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1", [execution])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hdd339b4e6193 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1", [execution])?;
         tx.commit()?;
         self.changed.notify_waiters();
         self.enter_committed(&mut connection,command,enter)
@@ -436,7 +437,7 @@ impl Journal {
         }
         let proof = enter(&command, &entry)?;
         ensure!(!proof.is_empty() && proof.len() <= self.limits.max_payload_bytes, "invalid native custody proof");
-        entry.execute(/* sqlite-large-value: allow-for-now lv-he796ea71134f owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET proof=?2 WHERE side='seat' AND execution=?1", params![command.execution_id, proof])?;
+        entry.execute(/* sqlite-large-value: allow-for-now lv-he796ea71134f owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET proof=?2 WHERE side='seat' AND execution=?1", params![command.execution_id, proof])?;
         entry.commit()?;
         self.changed.notify_waiters();
         Ok(Recovery { command, custody_proof: Some(proof), cancellation_reason: None })
@@ -475,7 +476,7 @@ impl Journal {
         ensure!(entry_refusal(&tx,&command)?.is_none(),"Stop reconciliation authority was withdrawn; prior custody remains unknown");
         let proof=reconcile(&command,&tx)?;
         ensure!(!proof.is_empty() && proof.len()<=self.limits.max_payload_bytes,"invalid reconciled native custody proof");
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h286b9d1c1c8b owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET proof=?2 WHERE side='seat' AND execution=?1",params![execution,proof])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h286b9d1c1c8b owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET proof=?2 WHERE side='seat' AND execution=?1",params![execution,proof])?;
         tx.commit()?;
         self.changed.notify_waiters();
         Ok(Recovery {command,custody_proof:Some(proof),cancellation_reason:None})
@@ -518,7 +519,7 @@ impl Journal {
         let authority_changed=tx.total_changes()!=authority_before;
         let receipt = settle(&tx, &command, outcome, &self.limits)?;
         if let Some(proof)=final_proof {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h7f51b642f523 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET local_finalization=?2,proof=?3 WHERE side='seat' AND execution=?1",params![execution,receipt.receipt_sequence,proof])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h7f51b642f523 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET local_finalization=?2,proof=?3 WHERE side='seat' AND execution=?1",params![execution,receipt.receipt_sequence,proof])?;
         }
         tx.commit()?;
         if authority_changed { self.authority_changed.notify_waiters(); }
@@ -537,7 +538,7 @@ impl Journal {
             return Ok(());
         };
         ensure!(state=="settled" && marker!=0,"no terminal local finalization obligation");
-        let changed=tx.execute(/* sqlite-large-value: allow-for-now lv-h9bef278ec2f7 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET local_finalization=-1 WHERE side='seat' AND execution=?1 AND local_finalization>0",[execution])?;
+        let changed=tx.execute(/* sqlite-large-value: allow-for-now lv-h9bef278ec2f7 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET local_finalization=-1 WHERE side='seat' AND execution=?1 AND local_finalization>0",[execution])?;
         tx.commit()?;
         if changed!=0 {self.changed.notify_waiters();}
         Ok(())
@@ -557,7 +558,7 @@ impl Journal {
         let binding=&command.binding;
         local::revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision)?;
         let authority_changed=tx.total_changes()!=authority_before;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h8bd3c4b8c8b9 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1", params![execution,reason])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h8bd3c4b8c8b9 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1", params![execution,reason])?;
         let native_result:Result<()>=if state == "admitted" {
             settle(&tx,&command,Outcome::Cancelled { reason },&self.limits)?;
             tx.commit()?;
@@ -570,7 +571,7 @@ impl Journal {
                 let applied:bool=cancellation.query_row("SELECT cancel_applied FROM commands WHERE side='seat' AND execution=?1",[execution],|row|row.get(0))?;
                 if !applied {
                     revoke(&command,&cancellation,&reason)?;
-                    cancellation.execute(/* sqlite-large-value: allow-for-now lv-h555cdce14fe8 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_applied=1 WHERE side='seat' AND execution=?1", [execution])?;
+                    cancellation.execute(/* sqlite-large-value: allow-for-now lv-h555cdce14fe8 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_applied=1 WHERE side='seat' AND execution=?1", [execution])?;
                 }
                 cancellation.commit()?;
                 Ok(())
@@ -586,7 +587,7 @@ impl Journal {
         let connection = self.lock()?;
         let previous: Option<String> = connection.query_row("SELECT cancel_reason FROM commands WHERE side='home' AND execution=?1", [execution], |row| row.get(0))?;
         if let Some(previous) = previous { ensure!(previous == reason, "conflicting cancellation intent"); }
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h8764bd131643 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='home' AND execution=?1", params![execution,reason])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h8764bd131643 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='home' AND execution=?1", params![execution,reason])?;
         self.changed.notify_waiters();
         Ok(())
     }
@@ -641,7 +642,7 @@ impl Journal {
         ensure!(request.assertion.request.payload_sha256==encoded_digest(&serde_json::to_string(&request.claim)?),"run request claim digest differs");
         let (active,total):(usize,usize)=tx.query_row("SELECT COUNT(payload),COUNT(*) FROM effects",[],|row|Ok((row.get(0)?,row.get(1)?)))?;
         ensure!(active<self.limits.max_commands && total<self.limits.max_identities,"backpressure: run request capacity");
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hbc8ed50798f2 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO effects(request_id,digest,payload) VALUES(?1,?2,?3)",params![id,run_request_digest(request)?,payload])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hbc8ed50798f2 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO effects(request_id,digest,payload) VALUES(?1,?2,?3)",params![id,run_request_digest(request)?,payload])?;
         tx.commit()?;
         self.changed.notify_waiters();
         Ok(())
@@ -660,7 +661,7 @@ impl Journal {
         let payload=serde_json::to_string(result)?;
         ensure!(payload.len()<=self.limits.max_payload_bytes,"run result payload limit");
         if let Some(previous)=previous { ensure!(serde_json::from_str::<RunResult>(&previous)?==*result,"conflicting run result"); return Ok(()); }
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h3d6e4209c6eb owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE effects SET result=?2 WHERE request_id=?1",params![result.request_id,payload])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h3d6e4209c6eb owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE effects SET result=?2 WHERE request_id=?1",params![result.request_id,payload])?;
         self.changed.notify_waiters();
         Ok(())
     }
@@ -686,7 +687,7 @@ impl Journal {
         if retired { return Ok(()); }
         let payload = payload.context("run result has not reached durable custody")?;
         ensure!(serde_json::from_str::<RunResult>(&payload)? == *accepted, "accepted run result differs from retained custody");
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h72a762bf7354 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE effects SET payload=NULL,result=NULL,retired=1 WHERE request_id=?1", [id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h72a762bf7354 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE effects SET payload=NULL,result=NULL,retired=1 WHERE request_id=?1", [id])?;
         tx.commit()?;
         self.changed.notify_waiters();
         Ok(())
@@ -697,11 +698,11 @@ impl Journal {
         let tx=connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let selected=current(&tx)?;
         if binding.epoch!=selected.epoch {
-            return Err(crate::model::FractalError::new("local-authority-backpressure","native authority offer belongs to a superseded epoch").into());
+            return Err(fractal_wire::Error::new("local-authority-backpressure","native authority offer belongs to a superseded epoch").into());
         }
         validate_execution(&selected,binding)?;
         if is_closing(&tx)? {
-            return Err(crate::model::FractalError::new("local-authority-backpressure","epoch is closing; native authority offers await successor installation").into());
+            return Err(fractal_wire::Error::new("local-authority-backpressure","epoch is closing; native authority offers await successor installation").into());
         }
         let before=tx.total_changes();
         let active=local::offer_execution_tx(&tx,binding)?;
@@ -716,11 +717,11 @@ impl Journal {
         let tx=connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let selected=current(&tx)?;
         if binding.epoch!=selected.epoch {
-            return Err(crate::model::FractalError::new("local-authority-backpressure","credential binding belongs to a superseded epoch").into());
+            return Err(fractal_wire::Error::new("local-authority-backpressure","credential binding belongs to a superseded epoch").into());
         }
         validate_execution(&selected,binding)?;
         if is_closing(&tx)? {
-            return Err(crate::model::FractalError::new("local-authority-backpressure","epoch is closing; credential issuance awaits successor installation").into());
+            return Err(fractal_wire::Error::new("local-authority-backpressure","epoch is closing; credential issuance awaits successor installation").into());
         }
         let before=tx.total_changes();
         let active=local::offer_execution_tx(&tx,binding)?;
@@ -728,7 +729,7 @@ impl Journal {
         if !active {
             tx.commit()?;
             if authority_changed { self.authority_changed.notify_waiters(); self.changed.notify_waiters(); }
-            return Err(crate::model::FractalError::new("local-authority-backpressure","prior execution revocation awaits home acknowledgment").into());
+            return Err(fractal_wire::Error::new("local-authority-backpressure","prior execution revocation awaits home acknowledgment").into());
         }
         let secret=local::issue_local_credential_tx(&tx,binding,lifetime_ms,now_ms);
         // An admission newly offered above must survive the expected wait-for-home-ACK
@@ -789,8 +790,8 @@ impl Journal {
         let previous:Option<String>=tx.query_row("SELECT binding FROM reported WHERE epoch=?1 AND revision=?2",params![selected.epoch,change.binding.authorization_revision],|row|row.get(0)).optional()?;
         if let Some(previous)=previous { ensure!(previous==binding,"conflicting reported authority revision"); }
         apply(change,&selected.host_key)?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h77b56b17f8fc owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO authority_received(epoch,sequence,digest) VALUES(?1,?2,?3)",params![selected.epoch,change.sequence,digest])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hbc80366c1c2b owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO reported(epoch,revision,binding,revoked) VALUES(?1,?2,?3,?4) ON CONFLICT(epoch,revision) DO UPDATE SET revoked=MAX(revoked,excluded.revoked)",params![selected.epoch,change.binding.authorization_revision,binding,change.revoked])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h77b56b17f8fc owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO authority_received(epoch,sequence,digest) VALUES(?1,?2,?3)",params![selected.epoch,change.sequence,digest])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hbc80366c1c2b owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO reported(epoch,revision,binding,revoked) VALUES(?1,?2,?3,?4) ON CONFLICT(epoch,revision) DO UPDATE SET revoked=MAX(revoked,excluded.revoked)",params![selected.epoch,change.binding.authorization_revision,binding,change.revoked])?;
         tx.commit()?;
         self.authority_changed.notify_waiters(); self.changed.notify_waiters();
         Ok(change.sequence)
@@ -865,10 +866,10 @@ impl Journal {
         ensure!(receipt.execution_id == command.execution_id && receipt.home == selection.home && receipt.host == selection.host && receipt.home_key == selection.home_key && receipt.host_key == selection.host_key, "receipt provenance differs");
         let (active, retained): (usize, usize) = tx.query_row("SELECT COUNT(payload),COUNT(*) FROM received", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
         ensure!(active < self.limits.max_commands * 2 && retained < self.limits.max_identities * 2, "backpressure: receipt custody capacity");
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hea697bc2d549 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO received(sequence,digest,epoch,command_sequence,payload) VALUES(?1,?2,?3,?4,?5)", params![receipt.receipt_sequence,encoded_digest(&payload),receipt.epoch,receipt.command_sequence,payload])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h9799d5cfd34a owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=?1 WHERE name='received'", [receipt.receipt_sequence])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hea697bc2d549 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO received(sequence,digest,epoch,command_sequence,payload) VALUES(?1,?2,?3,?4,?5)", params![receipt.receipt_sequence,encoded_digest(&payload),receipt.epoch,receipt.command_sequence,payload])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9799d5cfd34a owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=?1 WHERE name='received'", [receipt.receipt_sequence])?;
         if matches!(receipt.state, ReceiptState::Settled { .. }) {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-hea174ad4467c owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='settled' WHERE side='home' AND epoch=?1 AND sequence=?2", params![receipt.epoch, receipt.command_sequence])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hea174ad4467c owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='settled' WHERE side='home' AND epoch=?1 AND sequence=?2", params![receipt.epoch, receipt.command_sequence])?;
         }
         tx.commit()?;
         self.changed.notify_waiters();
@@ -884,8 +885,8 @@ impl Journal {
         let tx = connection.unchecked_transaction()?;
         let blocked:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE side='seat' AND epoch=?1 AND local_finalization>0 AND local_finalization<=?2)",params![current(&tx)?.epoch,through],|row|row.get(0))?;
         ensure!(!blocked,"receipt acknowledgment blocked by local finalization");
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hcdd54fc3ac96 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE receipts SET acknowledged=1 WHERE epoch=?1 AND sequence<=?2", params![current(&tx)?.epoch,through])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h113edb40022a owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=MAX(value,?1) WHERE name='acknowledged'", [through])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hcdd54fc3ac96 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE receipts SET acknowledged=1 WHERE epoch=?1 AND sequence<=?2", params![current(&tx)?.epoch,through])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h113edb40022a owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=MAX(value,?1) WHERE name='acknowledged'", [through])?;
         tx.commit()?;
         self.changed.notify_waiters();
         Ok(())
@@ -898,7 +899,7 @@ impl Journal {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let column = if side == "home" { "home_floor" } else { "seat_floor" };
-        let floor: u64 = tx.query_row(/* sqlite-large-value: allow-for-now lv-h8eee3a85f96b owner=fractal_peer::light_node::journal TODO=trace-statement-and-value-representation */ &format!("SELECT {column} FROM epochs WHERE epoch=?1"), [epoch], |row| row.get(0))?;
+        let floor: u64 = tx.query_row(/* sqlite-large-value: allow-for-now lv-h8eee3a85f96b owner=fractal_light_node_core::journal TODO=trace-statement-and-value-representation */ &format!("SELECT {column} FROM epochs WHERE epoch=?1"), [epoch], |row| row.get(0))?;
         ensure!(through >= floor, "checkpoint floor cannot regress");
         let unsettled: u64 = tx.query_row("SELECT COUNT(*) FROM commands WHERE side=?1 AND epoch=?2 AND sequence<=?3 AND (state<>'settled' OR local_finalization>0)", params![side, epoch, through], |row| row.get(0))?;
         ensure!(unsettled == 0, "checkpoint blocked by unsettled custody");
@@ -907,18 +908,18 @@ impl Journal {
         if side == "seat" {
             let pending: u64 = tx.query_row("SELECT COUNT(*) FROM receipts WHERE epoch=?1 AND command_sequence<=?2 AND acknowledged=0", params![epoch, through], |row| row.get(0))?;
             ensure!(pending == 0, "checkpoint blocked by unacknowledged receipts");
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h23bfa73b5860 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM receipts WHERE epoch=?1 AND command_sequence<=?2 AND acknowledged=1", params![epoch, through])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h23bfa73b5860 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM receipts WHERE epoch=?1 AND command_sequence<=?2 AND acknowledged=1", params![epoch, through])?;
         } else {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-hc882d2a1ceca owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE received SET payload=NULL WHERE epoch=?1 AND command_sequence<=?2", params![epoch,through])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hc882d2a1ceca owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE received SET payload=NULL WHERE epoch=?1 AND command_sequence<=?2", params![epoch,through])?;
         }
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hd2a6d3bd9e80 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM commands WHERE side=?1 AND epoch=?2 AND sequence<=?3", params![side, epoch, through])?;
-        tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-hc5db8e607bbb owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET {column}=?2 WHERE epoch=?1"), params![epoch, through])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hd2a6d3bd9e80 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM commands WHERE side=?1 AND epoch=?2 AND sequence<=?3", params![side, epoch, through])?;
+        tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-hc5db8e607bbb owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET {column}=?2 WHERE epoch=?1"), params![epoch, through])?;
         tx.commit()?;
         Ok(())
     }
 }
 
-fn current(connection: &Connection) -> Result<Selection> {
+pub fn current(connection: &Connection) -> Result<Selection> {
     let payload: String = connection.query_row("SELECT selection FROM epochs WHERE closed<>1", [], |row| row.get(0)).context("no selected light-node home")?;
     Ok(serde_json::from_str(&payload)?)
 }
@@ -969,17 +970,17 @@ fn last_receipt(connection: &Connection, command: &Command) -> Result<Receipt> {
 fn append_receipt(tx: &Transaction<'_>, selection: &Selection, command: &Command, state: ReceiptState, limits: &Limits) -> Result<Receipt> {
     let count: usize = tx.query_row("SELECT COUNT(*) FROM receipts", [], |row| row.get(0))?;
     ensure!(count < limits.max_commands * 2, "backpressure: durable receipt capacity");
-    let sequence: u64 = tx.query_row(/* sqlite-large-value: allow-for-now lv-h577b713b5a24 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=value+1 WHERE name='issued' RETURNING value", [], |row| row.get(0))?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h7bc5ac937863 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO receipts(epoch,sequence,command_sequence,payload) VALUES(?1,?2,?3,'')", params![command.binding.epoch,sequence,command.sequence])?;
+    let sequence: u64 = tx.query_row(/* sqlite-large-value: allow-for-now lv-h577b713b5a24 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=value+1 WHERE name='issued' RETURNING value", [], |row| row.get(0))?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h7bc5ac937863 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO receipts(epoch,sequence,command_sequence,payload) VALUES(?1,?2,?3,'')", params![command.binding.epoch,sequence,command.sequence])?;
     let receipt = Receipt { version: VERSION, receipt_sequence: sequence, epoch: command.binding.epoch, command_sequence: command.sequence, execution_id: command.execution_id.clone(), home: selection.home.clone(), home_key: selection.home_key.clone(), host: selection.host.clone(), host_key: selection.host_key.clone(), state };
     let payload = serde_json::to_string(&receipt)?;
     ensure!(payload.len() <= limits.max_payload_bytes, "receipt payload limit");
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h92381651afd4 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE receipts SET payload=?3 WHERE epoch=?1 AND sequence=?2", params![receipt.epoch,receipt.receipt_sequence,payload])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h92381651afd4 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE receipts SET payload=?3 WHERE epoch=?1 AND sequence=?2", params![receipt.epoch,receipt.receipt_sequence,payload])?;
     Ok(receipt)
 }
 fn settle(tx: &Transaction<'_>, command: &Command, outcome: Outcome, limits: &Limits) -> Result<Receipt> {
     let selection = epoch_selection(tx, command.binding.epoch)?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h58e17ebf7853 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='settled' WHERE side='seat' AND execution=?1", [&command.execution_id])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h58e17ebf7853 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='settled' WHERE side='seat' AND execution=?1", [&command.execution_id])?;
     append_receipt(tx, &selection, command, ReceiptState::Settled { outcome }, limits)
 }
 
@@ -996,7 +997,7 @@ fn encoded_digest(payload: &str) -> String {
     hex::encode(Sha256::digest(payload.as_bytes()))
 }
 
-fn is_closing(connection: &Connection) -> Result<bool> {
+pub fn is_closing(connection: &Connection) -> Result<bool> {
     Ok(connection.query_row("SELECT closed=2 FROM epochs WHERE closed<>1",[],|row|row.get(0))?)
 }
 
@@ -1018,8 +1019,8 @@ fn prepare_closing(tx:&Transaction<'_>,limits:&Limits)->Result<()> {
         settle(tx,&command,Outcome::Cancelled {reason:"epoch replacement before backend entry".into()},limits)?;
     }
     local::revoke_epoch_tx(tx,&old.host,old.epoch)?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h682a40a9a666 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason='epoch replacement' WHERE cancel_reason IS NULL AND state IN ('queued','entered','sent','admitted')",[])?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hc5522da5d7ea owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET closed=2 WHERE closed=0",[])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h682a40a9a666 owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason='epoch replacement' WHERE cancel_reason IS NULL AND state IN ('queued','entered','sent','admitted')",[])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hc5522da5d7ea owner=fractal_light_node_core::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE epochs SET closed=2 WHERE closed=0",[])?;
     Ok(())
 }
 

@@ -1,16 +1,8 @@
 //! What a sponsor answers each join request: the reason a refused request records, and when the
 //! join route closes. The sponsor's own clock decides expiry, so these tests set it per thread.
-use smallclaims::{
-    fleet::{
-        MemberKey,
-        code::JoinCode,
-        handshake::{JoinRequest, Joiner, WriterHead},
-    },
-    store::{
-        CreatedFleetInvite, FLEET_INVITE_FAILURE_LIMIT, FleetRedemption, Store, now_ms,
-        runtime::Plain, set_thread_clock,
-    },
-};
+use fractal_auth::{MemberKey};
+use fractal_auth::{code::JoinCode, handshake::{JoinRequest, Joiner, WriterHead}};
+use smallclaims::{store::{CreatedFleetInvite, FLEET_INVITE_FAILURE_LIMIT, FleetRedemption, Store, now_ms, runtime::Plain, set_thread_clock}};
 use std::{sync::Arc, time::Duration};
 
 const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
@@ -378,7 +370,8 @@ fn a_removed_name_rejoins_only_from_a_store_that_never_wrote_as_it() {
 
 #[test]
 fn an_incomplete_join_replays_verdicts_only_on_the_paced_worker_after_removal() {
-    use smallclaims::{claim::ClaimInput, principal::Verdict};
+    use smallclaims::{ principal::Verdict};
+    use fractal_wire::{ClaimInput};
     use std::collections::BTreeMap;
 
     let store = sponsor();
@@ -541,7 +534,7 @@ fn a_creator_with_a_live_worker_needs_no_exchange_after_its_last_peer_leaves() {
     let high_water = peer.replication_inventory().unwrap().envelopes.iter()
         .filter(|envelope| envelope.writer == "birch")
         .map(|envelope| envelope.sequence).max().unwrap_or(0) + 1;
-    peer.append_claim(&smallclaims::ClaimInput {
+    peer.append_claim(&fractal_wire::ClaimInput {
         subject: "host/birch".into(),
         kind: "fleet.member-left".into(),
         // The node key authenticates this departure; no person signer is installed.
@@ -559,9 +552,9 @@ fn a_creator_with_a_live_worker_needs_no_exchange_after_its_last_peer_leaves() {
     assert!(exchange.envelopes.iter().filter(|envelope| envelope.writer == "birch")
         .any(|envelope| envelope.member_key.as_deref() == Some(key.public())
             && envelope.signature.as_deref().is_some_and(|signature| {
-                smallclaims::fleet::verify_signature(
+                fractal_auth::verify_signature(
                     key.public(),
-                    &smallclaims::fleet::envelope_signature_message(
+                    &fractal_auth::envelope_signature_message(
                         FLEET, &envelope.writer, envelope.sequence, &envelope.hash,
                     ),
                     signature,

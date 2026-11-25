@@ -2,7 +2,7 @@
 //! stored without them, older ones are emptied in pages, and nothing a reader, a peer or a
 //! digest sees changes.
 use smallclaims::{
-    claim::ClaimInput,
+    fractal_wire::ClaimInput,
     store::{Store, runtime::Plain},
 };
 use std::{collections::BTreeMap, sync::Arc};

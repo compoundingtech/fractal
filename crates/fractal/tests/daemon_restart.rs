@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
-use fractal_daemon::model::ClaimInput;
+use fractal_wire::{ClaimInput};
 use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 

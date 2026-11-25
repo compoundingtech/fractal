@@ -2552,7 +2552,7 @@ mission "garden/runtime" state="ready" {
         let mut base = runtimes(&store, None).unwrap().unwrap().0;
         for status in ["running", "stopped", "running"] {
             for subject in &subjects {
-                store.append_claim(&crate::model::ClaimInput {
+                store.append_claim(&fractal_wire::ClaimInput {
                     subject: (*subject).into(), kind: "runtime.observed".into(), actor: None,
                     fields: BTreeMap::from([
                         ("runtime_id".into(), json!(subject)),
@@ -2632,7 +2632,7 @@ fn runtime_publication_counts_only_changed_owners_including_history_transitions(
     use crate::api::client_v0::published_runtimes::fold as runtimes;
     let store = Store::open_memory("cedar").unwrap();
     let observe = |owner: &str, status: &str| {
-        store.append_claim(&crate::model::ClaimInput {
+        store.append_claim(&fractal_wire::ClaimInput {
             subject: owner.into(), kind: "runtime.observed".into(), actor: None,
             fields: BTreeMap::from([
                 ("runtime_id".into(), json!(owner)),

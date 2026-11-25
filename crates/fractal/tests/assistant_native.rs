@@ -9,7 +9,8 @@ use axum::{Router, body::Body, http::{Request, StatusCode}};
 use http_body_util::BodyExt as _;
 use serde::Serialize;
 use serde_json::{Value, json};
-use fractal_daemon::{EvidenceStore as _, api::AppState, model::{ClaimInput, PersonAskRequest}, store::Store};
+use fractal_daemon::{EvidenceStore as _, api::AppState, model::{ PersonAskRequest}, store::Store};
+use fractal_wire::{ClaimInput};
 use fractal_client::{ActionRequest, AssistantGrant, AssistantGrantPolicy, AssistantMinimalReadMode,
     AssistantPairedSession, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
     AttentionDismissParameters, AttentionSeenParameters, AttentionSnoozeParameters,
@@ -52,7 +53,7 @@ impl Harness {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("store.sqlite"), "assistant-native").unwrap());
         store.bind_fleet("3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69").unwrap();
-        store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.set_node_key(Arc::new(fractal_auth::MemberKey::generate().unwrap().0)).unwrap();
         let source = format!("version 2\nagent \"example-worker.local\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"native-mission\" state=\"ready\" {{ goal \"Native integration mission\"; }}", root.path());
         store.apply_internal(&fractal_daemon::graph::parse_intent(&source, "assistant-native").unwrap(), "native-seed").unwrap();
         // There is no daemon task in this harness. Register its production publication

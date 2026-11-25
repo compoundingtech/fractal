@@ -710,6 +710,29 @@
           };
         };
 
+        # Build only the graph-free client, not the claims-graph CLI/daemon.
+        # Shared vendoring resolves the workspace; Cargo's exact target flags
+        # select the minimal dependency closure for compilation and linking.
+        fractalLightNodeAgent = pkgs.rustPlatform.buildRustPackage {
+          pname = "fractal-light-node-agent";
+          inherit version cargoDeps;
+          src = self;
+          dontCargoUseSystemLibs = true;
+          LIBSQLITE3_SYS_USE_PKG_CONFIG = "0";
+          cargoBuildFlags = [ "-p" "fractal-light-node-agent" "--bin" "fractal-light-node-agent" ];
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          doCheck = false;
+          # Preserve the native runtime's sibling-binary discovery contract.
+          # No full CLI wrapper, web assets, replication tools, or poller.
+          postInstall = ''ln -s ${ptyPackage}/bin/pty "$out/bin/pty"'';
+          meta = {
+            description = "Standalone graph-free Fractal seat agent";
+            homepage = "https://github.com/compoundingtech/fractal";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "fractal-light-node-agent";
+          };
+        };
+
         fractalMacCustody = pkgs.rustPlatform.buildRustPackage {
           pname = "fractal-mac-custody";
           inherit version cargoDeps;
@@ -960,6 +983,7 @@
         packages.st2 = fractal;
         packages.fractal-chatgpt = fractalChatgpt;
         packages.fractal-mac-custody = fractalMacCustody;
+        packages.fractal-light-node-agent = fractalLightNodeAgent;
         # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         packages.st-chatgpt = fractalChatgpt;
         # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
@@ -998,7 +1022,7 @@
             package.drvAttrs.dontCargoUseSystemLibs
             && package.drvAttrs.LIBSQLITE3_SYS_USE_PKG_CONFIG == "0"
           ) [
-            sharedDriverCheck fractalCheck fractal fractalChatgpt fractalMcp fractalFabricAdapter
+            sharedDriverCheck fractalCheck fractal fractalChatgpt fractalMcp fractalFabricAdapter fractalLightNodeAgent
             (mkDeployPolicyCheck "absent" null) providerRuntimeCheck
           ];
           pkgs.runCommand "bundled-sqlite-env" { } ''
@@ -1016,6 +1040,13 @@
             inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
           ''touch $out''
+        );
+        checks.light-node-agent-packaging = pkgs.runCommand "fractal-light-node-agent-packaging" { } (
+          assert import ./nix/light-node-agent-tests.nix {
+            inherit self system pkgs;
+            package = fractalLightNodeAgent;
+          };
+          ''touch "$out"''
         );
         checks.st3-help = fractalHelp;
         checks.st3-check-input-isolation = pkgs.runCommand "fractal-check-input-isolation" { } (
@@ -2336,6 +2367,7 @@
       }
     ) // {
       homeManagerModules.smalltalk = import ./nix/hm-module.nix { inherit self; };
+      homeManagerModules.fractal-light-node-agent = import ./nix/light-node-agent-module.nix { inherit self; };
       homeManagerModules.default = self.homeManagerModules.smalltalk;
     };
 }

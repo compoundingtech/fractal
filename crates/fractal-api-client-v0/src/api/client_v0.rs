@@ -6389,7 +6389,7 @@ fn remote_terminal_live_session(
         runtime_id: runtime_id.into(),
         incarnation_id: incarnation.into(),
         native_incarnation_id: incarnation.into(),
-        custody: crate::store::local_sessions::SessionCustody::Owned,
+        custody: fractal_light_node_core::custody::SessionCustody::Owned,
         owner_host_id,
         terminal: fields
             .get("terminal")
@@ -13955,11 +13955,8 @@ mission "differential" state="ready" {
 
     #[test]
     fn signature_state_faults_are_visible_in_doctor_and_fault_snapshot() {
-        use smallclaims::{
-            fleet::MemberKey,
-            principal::{ClaimSignature, content_digest},
-            store::{append_claim_record_tx, principals::store_claim_signature_tx},
-        };
+        use fractal_auth::{MemberKey};
+        use smallclaims::{principal::{ClaimSignature, content_digest}, store::{append_claim_record_tx, principals::store_claim_signature_tx}};
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let key = Arc::new(MemberKey::generate().unwrap().0);
@@ -14162,7 +14159,7 @@ mission "differential" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let observe = |subject: &str, kind: &str, facts: Value| {
-            state.store.append_client_claim(&crate::model::ClaimInput {
+            state.store.append_client_claim(&fractal_wire::ClaimInput {
                 subject: subject.into(),
                 kind: "resource.observed".into(),
                 actor: None,
@@ -15895,7 +15892,7 @@ subscription "watch/source" {
         let edge = Store::open_memory("edge").unwrap();
         edge.bind_fleet(FLEET).unwrap();
         for index in 0..1_200 {
-            edge.append_client_claim(&crate::model::ClaimInput {
+            edge.append_client_claim(&fractal_wire::ClaimInput {
                 subject: format!("resource/sync-{index}"),
                 kind: "resource.observed".into(),
                 actor: None,
@@ -15980,7 +15977,7 @@ subscription "watch/source" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "hub");
         state.store.bind_fleet(FLEET).unwrap();
-        let anchor = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let anchor = Arc::new(fractal_auth::MemberKey::generate().unwrap().0);
         state.store.pin_fleet_anchor(anchor.public()).unwrap();
         state.store.set_member_key(Some(anchor.clone())).unwrap();
         let admit = |name: &str, key: &str, via: &str, mode: &str| {
@@ -25162,7 +25159,7 @@ mission "example/zero-run" state="ready" {
 
     #[test]
     fn retained_local_session_history_does_not_override_the_current_remote_owner() {
-        use crate::store::local_sessions::{LocalSession, SessionCustody};
+        use fractal_light_node_core::custody::{LocalSession, SessionCustody};
         for retained in ["exited", "inactive", "detached"] {
             let owner_root = tempfile::tempdir().unwrap();
             let follower_root = tempfile::tempdir().unwrap();
@@ -25182,13 +25179,13 @@ mission "example/zero-run" state="ready" {
             let mut old = LocalSession {
                 subject: subject.into(), runtime_id: "former-local-runtime".into(),
                 incarnation: "42:former".into(), native_incarnation: "42:former".into(),
-                terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
+                terminal: true, driver: None, lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service,
                 custody: SessionCustody::Owned, start_operation: None, invocation: None,
             };
             if retained == "detached" {
                 old.incarnation = "42:former:bound:019a0000-0000-7000-8000-000000000001".into();
                 old.invocation = Some(old.incarnation.clone());
-                old.lifecycle = crate::model::MemberLifecycle::TerminalBound;
+                old.lifecycle = fractal_light_node_core::custody::MemberLifecycle::TerminalBound;
                 old.custody = SessionCustody::Borrowed;
             }
             follower.store.bind_local_session(&old).unwrap();
@@ -25220,7 +25217,7 @@ mission "example/zero-run" state="ready" {
 
     #[tokio::test]
     async fn managed_native_stop_releases_local_routing_before_migration_to_a_remote_owner() {
-        use crate::store::local_sessions::{LocalSession, SessionCustody};
+        use fractal_light_node_core::custody::{LocalSession, SessionCustody};
         let environment = std::env::vars().collect::<BTreeMap<_, _>>();
         let Ok(binary) = fractal_runtime::resolve_executable("pty", &environment) else {
             assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"), "hosted managed-stop fixtures require pty");
@@ -25244,7 +25241,7 @@ mission "example/zero-run" state="ready" {
         follower.store.bind_local_session(&LocalSession {
             subject: subject.into(), runtime_id: runtime_id.into(), incarnation: incarnation.clone(),
             native_incarnation: incarnation.clone(), terminal: true, driver: None,
-            lifecycle: crate::model::MemberLifecycle::Service, custody: SessionCustody::Owned,
+            lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service, custody: SessionCustody::Owned,
             start_operation: None, invocation: None,
         }).unwrap();
         follower.store.append_claim(&ClaimInput {

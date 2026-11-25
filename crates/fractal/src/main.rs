@@ -36,7 +36,7 @@ use fractal_daemon::client::{Client, Endpoint};
 use fractal_daemon::config::{Config, PeerConfig, validate_unix_socket_path};
 use fractal_daemon::model::{
     ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView, AttentionRequest,
-    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
+    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest,
     ClaimRecord, ClaimsPage, CurrentHarnessView, DoctorReport, DocumentListResponse,
     DocumentPutRequest, DocumentVersion, EvalStatus, EventRecord, IntentInput,
     LaunchApproveAndStartRequest, LaunchApproveAndStartView, LaunchDecisionAnswerRequest,
@@ -52,8 +52,8 @@ use fractal_daemon::model::{
     RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse,
     SessionInputMode, SessionInputRequest, SessionScreen, SessionSignalRequest, StatusResponse,
     StepRunView, SubscriptionRequestDecision, SubscriptionRequestView, WorkExtendRequest,
-    WorkRequest, WorkRetryRequest, WorkWakeRequest,
-};
+    WorkRequest, WorkRetryRequest, WorkWakeRequest};
+use fractal_wire::{ClaimInput};
 use fractal_daemon::reconcile::Reconciler;
 use fractal_daemon::store::Store;
 use fractal_client::{
@@ -22132,7 +22132,7 @@ fn retry_projection_contention_for_store(
                 }
                 Ok((Err(error), current, _)) => {
                     let busy = error
-                        .downcast_ref::<smallclaims::Error>()
+                        .downcast_ref::<fractal_wire::Error>()
                         .is_some_and(|error| error.is_sqlite_contention());
                     (
                         false,

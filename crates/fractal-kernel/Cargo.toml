@@ -6,6 +6,9 @@ description = "Claims-graph agent reconciler: the leaf modules of the Fractal li
 license = "MIT"
 
 [dependencies]
+fractal-wire = { path = "../fractal-wire" }
+fractal-auth = { path = "../fractal-auth" }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
@@ -34,3 +37,6 @@ tar = "0.4"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 walkdir = "2"
+
+[dev-dependencies]
+fractal-auth = { path = "../fractal-auth", features = ["test-support"] }

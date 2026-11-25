@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
-use crate::model::{GateSpec, FractalError};
+use crate::model::{GateSpec};
+use fractal_wire::{Error as FractalError};
 
 use crate::declaration_syntax::*;
 
