@@ -257,7 +257,14 @@ Configuration version `1` contains these explicit operator-selected fields:
 Configuration and credential files must be owned regular files inaccessible to
 group/other users; final-component symlinks and special files are refused without
 waiting for a FIFO writer. The state directory is created private (`0700`), and
-retained files are never permission-repaired or truncated. An exclusive directory process lock prevents a second agent from
+retained files are never permission-repaired or truncated. State and native roots
+require physical absolute paths: every ancestor must be a real directory owned by
+the executing user or root; group/other writes are allowed only on sticky
+directories. Even owned ancestor symlink aliases are refused; provision the
+resolved physical path instead. State ancestry is checked before and after
+recursive creation, so a missing prefix beneath a sticky directory cannot redirect
+later journal, lock, socket or native opens into another user's mutable namespace.
+An exclusive directory process lock prevents a second agent from
 replacing a live API socket. Fresh native custody requires positive exact native
 generation/provenance evidence and current grant authority; reoffering identical
 retained custody is restart-idempotent, including after a completed Stop. An empty

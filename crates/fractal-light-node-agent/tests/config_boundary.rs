@@ -340,6 +340,81 @@ mod unix {
     }
 
     #[test]
+    fn custody_rejects_private_leaves_below_replaceable_ancestors_before_opening_state() {
+        for permissions in [0o775, 0o777] {
+            for kind in ["state", "native", "pty"] {
+                let mut fixture = Fixture::new();
+                let parent = fixture.config_path.parent().unwrap().join("replaceable");
+                fs::create_dir(&parent).unwrap();
+                chmod(&parent, permissions);
+                let leaf = parent.join("private");
+                fs::create_dir(&leaf).unwrap();
+                chmod(&leaf, 0o700);
+                match kind {
+                    "state" => fixture.config.state_dir = leaf,
+                    "native" => fixture.config.native_state_dir = leaf,
+                    _ => fixture.config.pty_root = leaf,
+                }
+                fixture.startup_failure("custody directory ancestry");
+                let leaf = match kind {
+                    "state" => &fixture.config.state_dir,
+                    "native" => &fixture.config.native_state_dir,
+                    _ => &fixture.config.pty_root,
+                };
+                assert_eq!(mode(leaf), 0o700);
+                assert_eq!(fs::read_dir(leaf).unwrap().count(), 0);
+                assert_eq!(mode(&parent), permissions, "refusal must not repair an unsafe ancestor");
+            }
+        }
+    }
+
+    #[test]
+    fn custody_requires_physical_paths_even_for_owned_parent_symlinks() {
+        for kind in ["state", "native", "pty"] {
+            let mut fixture = Fixture::new();
+            let physical = fixture.config_path.parent().unwrap().join("physical");
+            fs::create_dir(&physical).unwrap();
+            chmod(&physical, 0o700);
+            let leaf = physical.join("private");
+            fs::create_dir(&leaf).unwrap();
+            chmod(&leaf, 0o700);
+            let alias = fixture.config_path.parent().unwrap().join("alias");
+            symlink(&physical, &alias).unwrap();
+            match kind {
+                "state" => fixture.config.state_dir = alias.join("private"),
+                "native" => fixture.config.native_state_dir = alias.join("private"),
+                _ => fixture.config.pty_root = alias.join("private"),
+            }
+            fixture.startup_failure("custody directory ancestry");
+            assert_eq!(fs::read_dir(&leaf).unwrap().count(), 0);
+            assert!(fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
+        }
+    }
+
+    #[test]
+    fn owned_sticky_ancestors_allow_new_private_state_and_existing_native_roots() {
+        let mut fixture = Fixture::new();
+        let sticky = fixture.config_path.parent().unwrap().join("sticky");
+        fs::create_dir(&sticky).unwrap();
+        chmod(&sticky, 0o1777);
+        fixture.config.state_dir = sticky.join("new-private-parent").join("state");
+        prepare_state(&fixture.config.state_dir).unwrap();
+        assert_eq!(mode(&fixture.config.state_dir), 0o700);
+        assert_eq!(mode(fixture.config.state_dir.parent().unwrap()), 0o700);
+        let file = fixture.config.state_dir.join("session.sqlite3");
+        private_state_file(&file).unwrap();
+        assert_eq!(mode(&file), 0o600);
+        for native in ["native", "pty"] {
+            fs::create_dir(sticky.join(native)).unwrap();
+            chmod(&sticky.join(native), 0o700);
+        }
+        fixture.config.native_state_dir = sticky.join("native");
+        fixture.config.pty_root = sticky.join("pty");
+        fixture.config.validate().unwrap();
+        assert_eq!(fs::symlink_metadata(&sticky).unwrap().permissions().mode() & 0o7777, 0o1777);
+    }
+
+    #[test]
     fn state_directory_is_private_idempotent_and_never_repairs_unsafe_paths() {
         let fixture = Fixture::new();
         let state = &fixture.config.state_dir;

@@ -100,7 +100,11 @@ pub fn private_file(_path: &Path) -> Result<File> {
 #[cfg(unix)]
 pub fn prepare_state(path: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    require_trusted_ancestors(path)?;
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+    // A different UID could have created a missing prefix beneath a sticky directory.
+    // Recheck the complete created namespace before opening any authoritative state.
+    require_trusted_ancestors(path)?;
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(metadata.is_dir() && !metadata.file_type().is_symlink()
         && metadata.uid() == effective_uid() && metadata.mode() & 0o777 == 0o700,
@@ -133,6 +137,27 @@ pub fn private_state_file(path: &Path) -> Result<File> {
     Ok(file)
 }
 
+/// Reopened SQLite, socket and native paths must not cross a replaceable namespace.
+/// Require physical directory components; even an owned symlink can target a path
+/// containing another user's mutable symlink or directory.
+#[cfg(unix)]
+fn require_trusted_ancestors(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    ensure!(path.is_absolute(), "custody directory must be absolute");
+    let uid = effective_uid();
+    for ancestor in path.ancestors().skip(1) {
+        let metadata = match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("inspect custody directory ancestry"),
+        };
+        ensure!(metadata.is_dir() && (metadata.uid() == uid || metadata.uid() == 0)
+            && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0),
+            "custody directory ancestry must be real, owned by this user or root, and deny group/other writes except sticky directories");
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn validate_native_root(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
@@ -140,6 +165,7 @@ fn validate_native_root(path: &Path) -> Result<()> {
     ensure!(metadata.is_dir() && !metadata.file_type().is_symlink()
         && metadata.uid() == effective_uid() && metadata.mode() & 0o022 == 0,
         "native root must exist, be owned, be a real directory, and deny group/other writes");
+    require_trusted_ancestors(path)?;
     Ok(())
 }
 
