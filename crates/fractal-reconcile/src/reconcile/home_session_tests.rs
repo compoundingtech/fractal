@@ -107,7 +107,7 @@ impl NativePair {
     }
 
     async fn ordinary_owned() -> Self {
-        Self::with_setup(SessionCustody::Owned, true, |executor, store| {
+        Self::with_pregraph_setup(SessionCustody::Owned, true, Some("ordinary-full-node-start"), |executor, store| {
             let mut binding = local_session(store, executor.runtime.as_ref(), "agent/example/worker", None).unwrap();
             let mut operation = crate::store::runtime_starts_tests_shared_seats::operation(
                 "ordinary-full-node-start", &binding.subject, None);
@@ -121,10 +121,12 @@ impl NativePair {
             })).unwrap();
             binding.start_operation = Some(operation.id.clone());
             store.bind_local_session(&binding).unwrap();
+            assert_eq!(local_session(store, executor.runtime.as_ref(), &binding.subject, None).unwrap().start_operation,
+                Some(operation.id.clone()), "the actual native generation must carry the ordinary operation tag");
             assert!(store.remote_runtime_start(&operation.id).unwrap().is_none(),
                 "ordinary producer provenance must not be mistaken for a remote Start envelope");
             executor
-        }).await
+        }, |_| {}).await
     }
 
     async fn for_start() -> Self {
@@ -146,7 +148,7 @@ impl NativePair {
             "finite lane configuration requires an isolated fixture process");
         let lane_configuration = FiniteLaneConfiguration(fractal_runtime::lanes_enforced());
         let binary = crate::ci_test_paths::built_cli_binary();
-        let mut pair = Self::with_pregraph_setup(SessionCustody::Owned, false, |executor, _store| {
+        let mut pair = Self::with_pregraph_setup(SessionCustody::Owned, false, None, |executor, _store| {
             // Use the daemon's initialization contract: LaneHost alone configures
             // admission but does not enable the runtime's actual kernel lanes.
             let mut executor = executor.with_lanes(true);
@@ -176,12 +178,13 @@ impl NativePair {
         launch_existing: bool,
         setup: impl FnOnce(Reconciler<NativeRuntime>, &Store) -> Reconciler<NativeRuntime>,
     ) -> Self {
-        Self::with_pregraph_setup(custody, launch_existing, setup, |_| {}).await
+        Self::with_pregraph_setup(custody, launch_existing, None, setup, |_| {}).await
     }
 
     async fn with_pregraph_setup(
         custody: SessionCustody,
         launch_existing: bool,
+        start_operation: Option<&str>,
         setup: impl FnOnce(Reconciler<NativeRuntime>, &Store) -> Reconciler<NativeRuntime>,
         pregraph: impl FnOnce(&Self),
     ) -> Self {
@@ -203,8 +206,12 @@ impl NativePair {
         let binary = fractal_runtime::resolve_executable("pty", &environment).expect("native session fixtures require the real pty binary");
         let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&root.path().join("pty")), &binary));
         if launch_existing {
+        let mut tags = BTreeMap::new();
+        if let Some(operation) = start_operation {
+            tags.insert(start_jobs::OPERATION_TAG.into(), operation.into());
+        }
         runtime.pty().unwrap().spawn("native-worker", &fractal_runtime::Launch::Shell("exec sleep 600".into()),
-            root.path(), &environment, None, &BTreeMap::new(), None).unwrap();
+            root.path(), &environment, None, &tags, None).unwrap();
         let generation = runtime.snapshot_ptys().unwrap().into_iter().find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
         // Owned sessions use the exact native generation. Only adoption creates a
         // distinct logical invocation identity; exercise that contract separately.
