@@ -149,6 +149,7 @@ export const Open: Story = {
     for (const element of rows) await expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth)
     await userEvent.click(rows[0]!)
     await expect(args.onOpenUsage).toHaveBeenCalledTimes(1)
+    await expect(args.onOpenUsage).toHaveBeenCalledWith('codex/team-north')
   },
 }
 
