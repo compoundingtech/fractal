@@ -8,25 +8,24 @@ use tokio::sync::Notify;
 
 use crate::store::run_credentials::{ExecutionBinding, local};
 pub use crate::config::{LightNodeGrant as Selection, LightNodeScope as Scope, LightNodeOperation as OperationKind};
+pub use super::start::{StartAuthorization, StartCheckout, StartContinuation, StartCredentials, StartHelperScope, StartRender, StartRolloutScope, StartWorkspaceAdmission};
 
 pub const VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    Start,
+    Start { authorization: Box<StartAuthorization> },
     Observe,
     Stop,
 }
 impl Operation {
     pub fn kind(&self) -> OperationKind {
-        match self { Self::Start => OperationKind::Start, Self::Observe => OperationKind::Observe, Self::Stop => OperationKind::Stop }
+        match self { Self::Start { .. } => OperationKind::Start, Self::Observe => OperationKind::Observe, Self::Stop => OperationKind::Stop }
     }
 
     fn require_supported(&self)->Result<()> {
-        if matches!(self,Self::Start) {
-            return Err(crate::model::FractalError::new("light-node-start-not-supported","light-node sessions support only observe and stop").into());
-        }
+        if let Self::Start { authorization } = self { authorization.verify()?; }
         Ok(())
     }
 }
@@ -51,6 +50,7 @@ pub struct CommandDraft {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Outcome {
+    Started { incarnation: String },
     Observed { incarnation: String, state: String },
     Stopped { incarnation: String },
     Refused { reason: String },
@@ -170,6 +170,7 @@ impl Journal {
             _ => bail!("unsupported light-node journal version {version}"),
         }
         local::initialize_local_authority(&transaction)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h17d2cf9e3f86 owner=fractal_peer::light_node::journal TODO=trace-statement-and-value-representation */ START_SCHEMA)?;
         transaction.commit()?;
         Ok(Self { connection: Arc::new(Mutex::new(connection)), changed: Arc::new(Notify::new()), authority_changed: Arc::new(Notify::new()), limits })
     }
@@ -309,6 +310,7 @@ impl Journal {
         let execution_id = format!("execution/{}", uuid::Uuid::new_v4());
         let command = Command { version: VERSION, sequence, execution_id, decision_id: draft.decision_id, binding: draft.binding, operation: draft.operation };
         validate(&selection, &command)?;
+        install_start(&tx, "home", &command, &self.limits)?;
         self.insert(&tx, "home", &command, "queued")?;
         tx.commit()?;
         self.changed.notify_waiters();
@@ -316,6 +318,30 @@ impl Journal {
     }
 
     pub fn pending_commands(&self) -> Result<Vec<Command>> { commands(&*self.lock()?, "home", None) }
+
+    /// Snapshot retained home launch custody for event-driven graph-fact withdrawal.
+    /// Includes acknowledged Started results until exact Stop/withdrawal closure.
+    /// The caller receives owned values and must not hold this barrier while reading Store.
+    pub fn home_active_starts(&self) -> Result<Vec<Command>> {
+        let connection = self.lock()?;
+        let mut query = connection.prepare(
+            "SELECT c.payload FROM commands c JOIN start_authorizations a ON a.side=c.side AND a.execution=c.execution
+             JOIN epochs e ON e.epoch=c.epoch WHERE c.side='home' AND a.closed=0 AND e.closed=0
+             ORDER BY c.epoch,c.sequence")?;
+        query.query_map([], |row| row.get::<_,String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// Seat-owned live launch custody, including Started and ordered withdrawal drain.
+    /// Native wakes may use this snapshot to withdraw a dead local helper without graph reads.
+    pub fn live_start_commands(&self) -> Result<Vec<Command>> {
+        let connection = self.lock()?;
+        let mut query = connection.prepare(
+            "SELECT c.payload FROM commands c JOIN start_authorizations a ON a.side=c.side AND a.execution=c.execution
+             WHERE c.side='seat' AND a.closed=0 ORDER BY c.epoch,c.sequence")?;
+        query.query_map([], |row| row.get::<_,String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
 
     pub fn replay_commands(&self,from:u64)->Result<Vec<Command>> {
         let connection=self.lock()?;
@@ -336,6 +362,14 @@ impl Journal {
         Ok(())
     }
 
+    /// Snapshot withdrawal at the same durable send boundary as initial/replay delivery.
+    pub fn prepare_delivery(&self, command: &Command) -> Result<Option<String>> {
+        let connection = self.lock()?;
+        validate(&current(&connection)?, command)?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h11b731d64a83 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='sent' WHERE side='home' AND execution=?1 AND state='queued'", [&command.execution_id])?;
+        Ok(connection.query_row("SELECT cancel_reason FROM commands WHERE side='home' AND execution=?1", [&command.execution_id], |row| row.get(0))?)
+    }
+
     pub fn acknowledged_high_water(&self) -> Result<u64> {
         Ok(self.lock()?.query_row("SELECT value FROM counters WHERE name='acknowledged'", [], |row| row.get(0))?)
     }
@@ -351,6 +385,8 @@ impl Journal {
         for row in rows {
             let (sequence,state,finalization) = row?;
             if sequence != prefix + 1 || state != "settled" || finalization>0 { break; }
+            let live_start: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM start_authorizations a JOIN commands c ON c.side=a.side AND c.execution=a.execution WHERE c.side=?1 AND c.epoch=?2 AND c.sequence=?3 AND a.closed=0)", params![side,epoch,sequence], |row| row.get(0))?;
+            if live_start { break; }
             if side == "seat" {
                 let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM receipts WHERE epoch=?1 AND command_sequence=?2 AND acknowledged=0)", params![epoch,sequence], |row| row.get(0))?;
                 if pending { break; }
@@ -361,6 +397,13 @@ impl Journal {
     }
 
     pub fn admit(&self, command: &Command) -> Result<Admission> {
+        self.admit_withdrawal(command, None)
+    }
+
+    /// Retained withdrawal is admitted with the original identity and contiguous receipt
+    /// sequence, but never exposes fresh backend entry permission.
+    pub fn admit_withdrawal(&self, command: &Command, cancellation: Option<&str>) -> Result<Admission> {
+        ensure!(cancellation.is_none_or(|reason|reason.len()<=4096),"cancellation reason too large");
         command.operation.require_supported()?;
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -372,17 +415,37 @@ impl Journal {
         validate(&selection, command)?;
         if let Some(existing) = load_command(&tx, "seat", command.binding.epoch, command.sequence)? {
             ensure!(same(&existing, command)?, "conflicting command sequence reuse");
+            if let Some(reason)=cancellation {
+                let state:String=tx.query_row("SELECT state FROM commands WHERE side='seat' AND execution=?1",[&command.execution_id],|row|row.get(0))?;
+                if state=="admitted" {
+                    tx.execute(/* sqlite-large-value: allow-for-now lv-h8657669b49f1 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=COALESCE(cancel_reason,?2) WHERE side='seat' AND execution=?1",params![command.execution_id,reason])?;
+                    let retained:String=tx.query_row("SELECT cancel_reason FROM commands WHERE side='seat' AND execution=?1",[&command.execution_id],|row|row.get(0))?;
+                    local::revoke_execution_tx(&tx,&command.binding.host,&command.binding.authorization_revision)?;
+                    settle(&tx,command,Outcome::Cancelled {reason:retained},&self.limits)?;
+                    let receipt=last_receipt(&tx,command)?;
+                    tx.commit()?;
+                    self.changed.notify_waiters();
+                    self.authority_changed.notify_waiters();
+                    return Ok(Admission::Duplicate(receipt));
+                }
+            }
             return Ok(Admission::Duplicate(last_receipt(&tx, command)?));
         }
         let next: u64 = tx.query_row("SELECT MAX(COALESCE((SELECT MAX(sequence) FROM commands WHERE side='seat' AND epoch=?1),0),(SELECT seat_floor FROM epochs WHERE epoch=?1))+1", [selection.epoch], |row| row.get(0))?;
         if command.sequence != next { return Ok(Admission::Replay { next_sequence: next }); }
+        install_start(&tx, "seat", command, &self.limits)?;
         self.insert(&tx, "seat", command, "admitted")?;
         let receipt = append_receipt(&tx, &selection, command, ReceiptState::Accepted, &self.limits)?;
-        if let Some(outcome)=entry_refusal(&tx,command)? {
+        if let Some(reason)=cancellation {
+            local::revoke_execution_tx(&tx,&command.binding.host,&command.binding.authorization_revision)?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h8bd3c4b8c8b9 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1",params![command.execution_id,reason])?;
+            settle(&tx,command,Outcome::Cancelled {reason:reason.to_owned()},&self.limits)?;
+        } else if let Some(outcome)=entry_refusal(&tx,command)? {
             settle(&tx,command,outcome,&self.limits)?;
         }
         tx.commit()?;
         self.changed.notify_waiters();
+        if cancellation.is_some() {self.authority_changed.notify_waiters();}
         Ok(Admission::Accepted(receipt))
     }
 
@@ -510,10 +573,17 @@ impl Journal {
         ensure!(state == "entered", "completion requires backend custody");
         let (cancellation,applied):(Option<String>,bool)=tx.query_row("SELECT cancel_reason,cancel_applied FROM commands WHERE side='seat' AND execution=?1",[execution],|row|Ok((row.get(0)?,row.get(1)?)))?;
         ensure!(cancellation.is_none() || applied,"native cancellation custody is not yet applied");
+        if let Outcome::Started { incarnation } = &outcome {
+            ensure!(matches!(&command.operation, Operation::Start { .. }) && !incarnation.is_empty() && cancellation.is_none(),
+                "Started proof requires a live Start and an actual native incarnation");
+        }
         let authority_before=tx.total_changes();
         if matches!(&outcome,Outcome::Stopped { .. } | Outcome::Detached { .. }) {
             let binding=&command.binding;
             local::revoke_execution_tx(&tx,&binding.host,&binding.authorization_revision)?;
+            if matches!(&command.operation, Operation::Stop) && final_proof.is_none() {
+                close_starts_stopped_by(&tx, &command, &outcome, &self.limits)?;
+            }
         }
         let authority_changed=tx.total_changes()!=authority_before;
         let receipt = settle(&tx, &command, outcome, &self.limits)?;
@@ -537,6 +607,16 @@ impl Journal {
             return Ok(());
         };
         ensure!(state=="settled" && marker!=0,"no terminal local finalization obligation");
+        if marker>0 {
+            let command=by_execution(&tx,execution)?;
+            if matches!(&command.operation,Operation::Stop) {
+                let receipt=last_receipt(&tx,&command)?;
+                let ReceiptState::Settled {outcome}=receipt.state else {bail!("local finalization lacks terminal proof");};
+                // Associated Start closure must not escape before exact native Store
+                // finalization. Commit all its terminal receipts with barrier release.
+                close_starts_stopped_by(&tx,&command,&outcome,&self.limits)?;
+            }
+        }
         let changed=tx.execute(/* sqlite-large-value: allow-for-now lv-h9bef278ec2f7 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET local_finalization=-1 WHERE side='seat' AND execution=?1 AND local_finalization>0",[execution])?;
         tx.commit()?;
         if changed!=0 {self.changed.notify_waiters();}
@@ -551,13 +631,22 @@ impl Journal {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let command = by_execution(&tx, execution)?;
         let (state, previous): (String,Option<String>) = tx.query_row("SELECT state,cancel_reason FROM commands WHERE side='seat' AND execution=?1", [execution], |row| Ok((row.get(0)?,row.get(1)?)))?;
-        if state == "settled" { return Ok(()); }
-        if let Some(previous) = previous { ensure!(previous == reason, "conflicting cancellation intent"); }
+        let live_start = matches!(&command.operation, Operation::Start { .. }) && tx.query_row(
+            "SELECT NOT closed FROM start_authorizations WHERE side='seat' AND execution=?1", [execution], |row| row.get::<_,bool>(0))?;
+        if state == "settled" && !live_start { return Ok(()); }
+        let state = if state == "settled" {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h5186cc67b6df owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='entered' WHERE side='seat' AND execution=?1", [execution])?;
+            "entered".to_string()
+        } else { state };
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h2fcfecf8755f owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE start_authorizations SET revoked=1 WHERE side='seat' AND execution=?1", [execution])?;
+        // Independent valid revokers may race. Withdrawal is monotonic; retain the
+        // first durable intent rather than terminating the authenticated session.
+        let reason=previous.unwrap_or(reason);
         let authority_before=tx.total_changes();
         let binding=&command.binding;
         local::revoke_execution_tx(&tx, &binding.host, &binding.authorization_revision)?;
         let authority_changed=tx.total_changes()!=authority_before;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h8bd3c4b8c8b9 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1", params![execution,reason])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hc3cd8ed405bc owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='seat' AND execution=?1", params![execution,reason])?;
         let native_result:Result<()>=if state == "admitted" {
             settle(&tx,&command,Outcome::Cancelled { reason },&self.limits)?;
             tx.commit()?;
@@ -582,13 +671,28 @@ impl Journal {
     }
 
     pub fn request_cancel(&self, execution: &str, reason: &str) -> Result<()> {
+        self.request_cancel_inner(execution, reason, false).map(|_| ())
+    }
+
+    /// Automatic home withdrawal must retain an earlier explicit operator intent.
+    pub fn request_cancel_if_unset(&self, execution: &str, reason: &str) -> Result<bool> {
+        self.request_cancel_inner(execution, reason, true)
+    }
+
+    fn request_cancel_inner(&self, execution: &str, reason: &str, retain_previous: bool) -> Result<bool> {
         ensure!(reason.len() <= 4096, "cancellation reason too large");
-        let connection = self.lock()?;
+        let mut connection = self.lock()?;
+        let connection = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous: Option<String> = connection.query_row("SELECT cancel_reason FROM commands WHERE side='home' AND execution=?1", [execution], |row| row.get(0))?;
-        if let Some(previous) = previous { ensure!(previous == reason, "conflicting cancellation intent"); }
+        if let Some(previous) = previous {
+            ensure!(retain_previous || previous == reason, "conflicting cancellation intent");
+            return Ok(false);
+        }
         connection.execute(/* sqlite-large-value: allow-for-now lv-h8764bd131643 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET cancel_reason=?2 WHERE side='home' AND execution=?1", params![execution,reason])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h52f848373ef7 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE start_authorizations SET revoked=1 WHERE side='home' AND execution=?1", [execution])?;
+        connection.commit()?;
         self.changed.notify_waiters();
-        Ok(())
+        Ok(true)
     }
 
     pub fn command_receipt(&self,execution:&str)->Result<Option<Receipt>> {
@@ -606,7 +710,7 @@ impl Journal {
 
     pub fn pending_cancellations(&self) -> Result<Vec<(String,String)>> {
         let connection = self.lock()?;
-        let mut query = connection.prepare("SELECT execution,cancel_reason FROM commands WHERE side='home' AND state<>'settled' AND cancel_reason IS NOT NULL ORDER BY epoch,sequence")?;
+        let mut query = connection.prepare("SELECT execution,cancel_reason FROM commands WHERE side='home' AND cancel_reason IS NOT NULL AND (state<>'settled' OR EXISTS(SELECT 1 FROM start_authorizations a WHERE a.side='home' AND a.execution=commands.execution AND a.closed=0)) ORDER BY epoch,sequence")?;
         Ok(query.query_map([], |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -864,10 +968,11 @@ impl Journal {
         let selection = epoch_selection(&tx, receipt.epoch)?;
         ensure!(receipt.execution_id == command.execution_id && receipt.home == selection.home && receipt.host == selection.host && receipt.home_key == selection.home_key && receipt.host_key == selection.host_key, "receipt provenance differs");
         let (active, retained): (usize, usize) = tx.query_row("SELECT COUNT(payload),COUNT(*) FROM received", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
-        ensure!(active < self.limits.max_commands * 2 && retained < self.limits.max_identities * 2, "backpressure: receipt custody capacity");
+        ensure!(active < self.limits.max_commands * 3 && retained < self.limits.max_identities * 3, "backpressure: receipt custody capacity");
         tx.execute(/* sqlite-large-value: allow-for-now lv-hea697bc2d549 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO received(sequence,digest,epoch,command_sequence,payload) VALUES(?1,?2,?3,?4,?5)", params![receipt.receipt_sequence,encoded_digest(&payload),receipt.epoch,receipt.command_sequence,payload])?;
         tx.execute(/* sqlite-large-value: allow-for-now lv-h9799d5cfd34a owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=?1 WHERE name='received'", [receipt.receipt_sequence])?;
-        if matches!(receipt.state, ReceiptState::Settled { .. }) {
+        if let ReceiptState::Settled { outcome } = &receipt.state {
+            close_start(&tx, "home", &command, outcome)?;
             tx.execute(/* sqlite-large-value: allow-for-now lv-hea174ad4467c owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='settled' WHERE side='home' AND epoch=?1 AND sequence=?2", params![receipt.epoch, receipt.command_sequence])?;
         }
         tx.commit()?;
@@ -902,6 +1007,8 @@ impl Journal {
         ensure!(through >= floor, "checkpoint floor cannot regress");
         let unsettled: u64 = tx.query_row("SELECT COUNT(*) FROM commands WHERE side=?1 AND epoch=?2 AND sequence<=?3 AND (state<>'settled' OR local_finalization>0)", params![side, epoch, through], |row| row.get(0))?;
         ensure!(unsettled == 0, "checkpoint blocked by unsettled custody");
+        let active_start: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM commands c JOIN start_authorizations a ON a.side=c.side AND a.execution=c.execution WHERE c.side=?1 AND c.epoch=?2 AND c.sequence<=?3 AND a.closed=0)", params![side,epoch,through], |row| row.get(0))?;
+        ensure!(!active_start, "checkpoint blocked by live Start authorization");
         let maximum: u64 = tx.query_row("SELECT MAX(COALESCE(MAX(sequence),0),?3) FROM commands WHERE side=?1 AND epoch=?2", params![side, epoch, floor], |row| row.get(0))?;
         ensure!(through <= maximum, "checkpoint exceeds admitted prefix");
         if side == "seat" {
@@ -968,7 +1075,7 @@ fn last_receipt(connection: &Connection, command: &Command) -> Result<Receipt> {
 }
 fn append_receipt(tx: &Transaction<'_>, selection: &Selection, command: &Command, state: ReceiptState, limits: &Limits) -> Result<Receipt> {
     let count: usize = tx.query_row("SELECT COUNT(*) FROM receipts", [], |row| row.get(0))?;
-    ensure!(count < limits.max_commands * 2, "backpressure: durable receipt capacity");
+    ensure!(count < limits.max_commands * 3, "backpressure: durable receipt capacity");
     let sequence: u64 = tx.query_row(/* sqlite-large-value: allow-for-now lv-h577b713b5a24 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE counters SET value=value+1 WHERE name='issued' RETURNING value", [], |row| row.get(0))?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7bc5ac937863 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO receipts(epoch,sequence,command_sequence,payload) VALUES(?1,?2,?3,'')", params![command.binding.epoch,sequence,command.sequence])?;
     let receipt = Receipt { version: VERSION, receipt_sequence: sequence, epoch: command.binding.epoch, command_sequence: command.sequence, execution_id: command.execution_id.clone(), home: selection.home.clone(), home_key: selection.home_key.clone(), host: selection.host.clone(), host_key: selection.host_key.clone(), state };
@@ -979,6 +1086,7 @@ fn append_receipt(tx: &Transaction<'_>, selection: &Selection, command: &Command
 }
 fn settle(tx: &Transaction<'_>, command: &Command, outcome: Outcome, limits: &Limits) -> Result<Receipt> {
     let selection = epoch_selection(tx, command.binding.epoch)?;
+    close_start(tx, "seat", command, &outcome)?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h58e17ebf7853 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state='settled' WHERE side='seat' AND execution=?1", [&command.execution_id])?;
     append_receipt(tx, &selection, command, ReceiptState::Settled { outcome }, limits)
 }
@@ -1014,6 +1122,8 @@ pub enum EpochInstall { Installed, Draining }
 
 fn prepare_closing(tx:&Transaction<'_>,limits:&Limits)->Result<()> {
     let old=current(tx)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h9568d516e2dc owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE start_authorizations SET revoked=1 WHERE closed=0", [])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h547eede63354 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE commands SET state=CASE side WHEN 'seat' THEN 'entered' ELSE 'sent' END WHERE state='settled' AND EXISTS(SELECT 1 FROM start_authorizations a WHERE a.side=commands.side AND a.execution=commands.execution AND a.closed=0)", [])?;
     for command in commands(tx,"seat",Some("admitted"))? {
         settle(tx,&command,Outcome::Cancelled {reason:"epoch replacement before backend entry".into()},limits)?;
     }
@@ -1040,6 +1150,9 @@ fn entry_refusal(connection:&Connection,command:&Command)->Result<Option<Outcome
     }
     let cancelled:Option<String>=connection.query_row("SELECT cancel_reason FROM commands WHERE side='seat' AND execution=?1",[&command.execution_id],|row|row.get(0))?;
     if let Some(reason)=cancelled {return Ok(Some(Outcome::Cancelled {reason}));}
+    if matches!(&command.operation, Operation::Start { .. }) {
+        return Ok(require_start(connection, command).err().map(|error| Outcome::Refused { reason: error.to_string() }));
+    }
     if let Err(error)=local::require_execution(connection,&command.binding) {
         if matches!(error.code,"local-execution-authority-refused" | "local-authority-backpressure") {
             return Ok(Some(Outcome::Refused {reason:format!("{}: {}",error.code,error.message)}));
@@ -1047,4 +1160,81 @@ fn entry_refusal(connection:&Connection,command:&Command)->Result<Option<Outcome
         return Err(error.into());
     }
     Ok(None)
+}
+
+// Additive schema preserves all authoritative Observe/Stop and credential rows.
+const START_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h74418ba2dde0 owner=fractal_peer::light_node::journal TODO=chunk-or-reference-variable-columns */ "
+CREATE TABLE IF NOT EXISTS start_authorizations(
+ side TEXT NOT NULL, epoch INTEGER NOT NULL, host TEXT NOT NULL, subject TEXT NOT NULL,
+ revision INTEGER NOT NULL, digest TEXT NOT NULL, execution TEXT NOT NULL,
+ revoked INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(side,epoch,host,subject,revision), UNIQUE(side,execution));";
+
+fn install_start(tx: &Transaction<'_>, side: &str, command: &Command, limits: &Limits) -> Result<()> {
+    let Operation::Start { authorization } = &command.operation else { return Ok(()); };
+    authorization.verify()?;
+    let binding = &command.binding;
+    ensure!(binding.run.is_none() && binding.authorization_revision == authorization.revision.to_string(),
+        "Start seat launch binding must carry its exact authorization revision and no run authority");
+    ensure!(authorization.member.host == binding.host && authorization.launch_member.host == binding.host
+        && authorization.member.runtime_id == binding.runtime && authorization.launch_member.runtime_id == binding.runtime,
+        "Start launch member differs from execution scope");
+    let previous: Option<(u64, bool)> = tx.query_row(
+        "SELECT revision,closed FROM start_authorizations WHERE side=?1 AND host=?2 AND subject=?3 ORDER BY epoch DESC,revision DESC LIMIT 1",
+        params![side,binding.host,binding.subject], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    if let Some((revision, closed)) = previous {
+        ensure!(closed, "Start replacement waits for predecessor withdrawal receipt and custody closure");
+        ensure!(authorization.revision > revision, "Start authorization revision is stale");
+    }
+    let count: usize = tx.query_row("SELECT COUNT(*) FROM start_authorizations", [], |row| row.get(0))?;
+    ensure!(count < limits.max_identities, "backpressure: Start authorization fence capacity");
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h8d7c117df52a owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO start_authorizations(side,epoch,host,subject,revision,digest,execution) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![side,binding.epoch,binding.host,binding.subject,authorization.revision,authorization.content_sha256,command.execution_id])?;
+    Ok(())
+}
+
+/// Physical launch gates call this with the connection already held by `Journal::enter`.
+/// It never calls a backend or offers run authority and cannot start from an ACK.
+pub fn require_start(connection: &Connection, command: &Command) -> Result<()> {
+    ensure!(same(&by_execution(connection, &command.execution_id)?, command)?, "Start command differs from durable admitted identity");
+    validate(&current(connection)?, command)?;
+    ensure!(!is_closing(connection)?, "Start epoch is closing");
+    let Operation::Start { authorization } = &command.operation else { bail!("operation is not Start"); };
+    authorization.verify()?;
+    let (revision, digest, revoked, closed): (u64, String, bool, bool) = connection.query_row(
+        "SELECT revision,digest,revoked,closed FROM start_authorizations WHERE side='seat' AND execution=?1",
+        [&command.execution_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+    ensure!(revision == authorization.revision && digest == authorization.content_sha256 && !revoked && !closed,
+        "Start authorization is stale, revoked or content-mismatched");
+    let cancellation: Option<String> = connection.query_row("SELECT cancel_reason FROM commands WHERE side='seat' AND execution=?1", [&command.execution_id], |row| row.get(0))?;
+    ensure!(cancellation.is_none(), "Start was cancelled");
+    Ok(())
+}
+
+fn close_start(connection: &Connection, side: &str, command: &Command, outcome: &Outcome) -> Result<()> {
+    if matches!(&command.operation, Operation::Start { .. }) && !matches!(outcome, Outcome::Started { .. }) {
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hf18e8963c367 owner=fractal_peer::light_node::journal TODO=bound-or-reference-values-and-reclamation */ "UPDATE start_authorizations SET revoked=1,closed=1 WHERE side=?1 AND execution=?2", params![side,command.execution_id])?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "start_tests.rs"]
+pub(super) mod start_tests;
+
+fn close_starts_stopped_by(tx: &Transaction<'_>, stop: &Command, outcome: &Outcome, limits: &Limits) -> Result<()> {
+    let Outcome::Stopped { incarnation } = outcome else { return Ok(()); };
+    ensure!(incarnation == &stop.binding.incarnation, "Stop proof differs from exact target generation");
+    let mut query = tx.prepare("SELECT c.payload FROM commands c JOIN start_authorizations a ON a.side=c.side AND a.execution=c.execution WHERE c.side='seat' AND a.closed=0 AND a.host=?1 AND a.subject=?2")?;
+    let starts: Vec<Command> = query.query_map(params![stop.binding.host,stop.binding.subject], |row| row.get::<_,String>(0))?
+        .map(|row| Ok(serde_json::from_str(&row?)?)).collect::<Result<_>>()?;
+    drop(query);
+    for start in starts {
+        if start.binding.runtime != stop.binding.runtime { continue; }
+        let receipt = last_receipt(tx, &start)?;
+        if matches!(receipt.state, ReceiptState::Settled { outcome: Outcome::Started { incarnation: ref actual } } if actual == incarnation) {
+            settle(tx, &start, outcome.clone(), limits)?;
+        }
+    }
+    Ok(())
 }

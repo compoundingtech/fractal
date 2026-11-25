@@ -9,6 +9,10 @@ use sha2::{Digest as _, Sha256};
 
 pub const PATH_ENV: &str = "FRACTAL_EXEC_PAYLOAD_RECEIPT";
 pub const TRACK_ENV: &str = "FRACTAL_NATIVE_STEP_PAYLOAD";
+/// Set by the private finite gate from the host-minted generation, never inherited
+/// from a launch environment. Driver bootstrap consumes it before starting threads.
+/// This is an attribution fence, not permission to launch or signal a process.
+pub const GENERATION_ENV: &str = "FRACTAL_FINITE_EXEC_GENERATION";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]

@@ -136,6 +136,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub(super) fn resource_lane_fit(&self, request: &LaneRequest) -> Result<Fit> {
+        self.resource_lane_fit_with_accounting(request, &|now| Ok((
+            self.lanes_held(&request.id, now, true, false)?,
+            self.finite_burst_reserve(&request.id)?.kept,
+        )))
+    }
+
+    pub(super) fn resource_lane_fit_with_accounting(
+        &self, request: &LaneRequest, accounting: &dyn Fn(u64) -> Result<(u64, u64)>,
+    ) -> Result<Fit> {
         if request.capacity.is_none() { return Ok(Fit::default()); }
         let memberships = self.store.resource_memberships_for_host(&self.host)?;
         if memberships.iter()
@@ -184,8 +193,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         if let (Some(host), Some(_)) = (self.seat_admission.lanes, request.capacity) {
             smallclaims::touched::note_read(|| "host-lane-memory".into());
-            fit.held_bytes = self.lanes_held(&request.id, now, true, false)?;
-            fit.reserve_bytes = self.finite_burst_reserve(&request.id)?.kept;
+            (fit.held_bytes, fit.reserve_bytes) = accounting(now)?;
             let observation = (host.outside)(&self.seat_admission.finite_policy.psi_brake).context("UnsupportedCoverage: outside-lane host observation unavailable")?;
             fit.outside_bytes = observation.outside_bytes;
             fit.psi_blocked = observation.psi_blocked;
@@ -193,8 +201,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // Advisory execution still reserves custody when the host's lane backend is off.
             // There is no configured lane/outside-memory probe or enforcement claim.
             if fit.room.is_some() && request.capacity.is_some() {
-                fit.held_bytes = self.lanes_held(&request.id, now, true, false)?;
-                fit.reserve_bytes = self.finite_burst_reserve(&request.id)?.kept;
+                (fit.held_bytes, fit.reserve_bytes) = accounting(now)?;
             }
         }
         if self.seat_admission.status.lane_wait_class(&request.id,

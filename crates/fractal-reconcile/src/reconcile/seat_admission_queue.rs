@@ -186,8 +186,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 burst_raise = burst_raise.max(asked.saturating_sub(base.memory));
             }
         }
-        let full = smallest.map_or(0, |smallest| burst_lane.memory.saturating_sub(smallest));
-        Ok(BurstReserve { full, kept: full.saturating_sub(burst_raise) })
+        Ok(reserved_burst(smallest, burst_lane.memory, burst_raise))
     }
 
     /// The memory of this host's other laned seats that run, or were admitted to start and are not
@@ -334,6 +333,11 @@ const LANE_RETRY_MS: u128 = 30_000;
 pub(super) struct BurstReserve {
     pub(super) full: u64,
     pub(super) kept: u64,
+}
+
+pub(super) fn reserved_burst(smallest: Option<u64>, burst_memory: u64, burst_raise: u64) -> BurstReserve {
+    let full = smallest.map_or(0, |smallest| burst_memory.saturating_sub(smallest));
+    BurstReserve { full, kept: full.saturating_sub(burst_raise) }
 }
 
 enum LaneFit {

@@ -149,6 +149,7 @@
         "scripts/ci-script-tests"
       ],
       "definition_paths": [
+        ".config/nextest.toml",
         ".st",
         "apps/fractal-web/scripts/devnet",
         "apps/ios/modules/fractal-fabric/build.sh",
@@ -163,6 +164,7 @@
       ],
       "tree_inputs": [
         ".config/daily-only.filterset",
+        ".config/nextest.toml",
         ".gitattributes",
         ".github",
         ".gitignore",
@@ -197,7 +199,8 @@
         "scripts/ci-local",
         "tests",
         "clippy",
-        "fleet-compat"
+        "fleet-compat",
+        "isolation-vm"
       ],
       "definition_paths": [
         ".cargo/config.toml",
@@ -210,6 +213,8 @@
         "flake.lock",
         "flake.nix",
         "nix/hm-module.nix",
+        "nix/sekrets-vm.nix",
+        "nix/transport-isolation-vm.nix",
         "scripts/build-stamp-watch-test",
         "scripts/check-fractal-boundary",
         "scripts/check-fractal-boundary-test",
