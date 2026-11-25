@@ -70,12 +70,12 @@ dependency_restores = 0
 main_dependency_saves = 0
 for workflow in sorted((root / '.github/workflows').glob('*.yml')):
     jobs = workflow.read_text().split('\njobs:\n', 1)[1]
-    blocks = re.split(r'(?m)^  [A-Za-z0-9_-]+:\n', jobs)[1:]
-    for block in blocks:
+    blocks = re.split(r'(?m)^  ([A-Za-z0-9_-]+):\n', jobs)
+    for job_id, block in zip(blocks[1::2], blocks[2::2]):
         count += 1
         if 'scripts/ci-linux' in block or 'scripts/ci-perf cost' in block or 'Archive the st2 integration test binary' in block:
             assert 'CI_CACHE_DEV_SHELL: default' in block, 'workspace shell closure must be retained'
-        if workflow.name == 'nix.yml' and 'name: Build the exact consumer package' in block:
+        if workflow.name == 'nix.yml' and job_id == 'publish-x86_64-linux':
             assert 'runs-on: ubuntu-latest' in block, 'the publisher must not occupy the persistent verification pool'
             assert "github.ref == 'refs/heads/main'" in block and "github.event_name == 'push'" in block
             assert '?rev=$PUBLISH_SHA&shallow=1#packages.x86_64-linux.fractal' in block
@@ -152,7 +152,9 @@ nix-store() {
                 if private_status:
                     assert 'injected private failure' in result.stderr, 'private diagnostics must remain visible'
             assert 'name: fractal-native-publication' in block and 'fractal-native-closure.json' in block
-        elif workflow.name == 'nix.yml':
+        # The persistent-store verifier's build/repeat proof is not the contract
+        # of every job in this workflow. Other publishers require normal reporting.
+        elif workflow.name == 'nix.yml' and job_id == 'nix-release-x86_64-linux':
             assert 'scripts/ci-nix-release build' in block and 'scripts/ci-nix-release verify-cache' in block
         elif workflow.name == 'perf.yml' and 'name: Performance scope' in block:
             assert 'runs-on: ubuntu-latest' in block
