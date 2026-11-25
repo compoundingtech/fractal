@@ -41,7 +41,7 @@ describe('program declarations as data', () => {
           {
             ...programStep,
             timeout: '1h',
-            program: { ...programStep.program, stalledAfter: '5m' },
+            program: { ...programStep.program, stalledAfter: '5m', finalizerGrace: '2m' },
           },
         ],
       }),
@@ -58,12 +58,22 @@ describe('program declarations as data', () => {
         '    write "resource/z"',
         '  }',
         '  step "program" timeout="1h" {',
-        `    program "/bundles/land.mjs" sha256="${sha256}" stalled-after="5m"`,
+        `    program "/bundles/land.mjs" finalizer-grace="2m" sha256="${sha256}" stalled-after="5m"`,
         '  }',
         '}',
         '',
       ].join('\n'),
     )
+  })
+
+  it('renders program resource inputs through the native input grammar', () => {
+    expect(render({ inputs: [
+      { name: 'source', kind: 'resource', resourceKind: 'vcs.pull-request' },
+      { name: 'head', kind: 'text' },
+    ] })).toContain('input "source" kind="resource" resource-kind="vcs.pull-request"\n  input "head" kind="text"')
+    expect(() => render({ inputs: [
+      { name: 'head', kind: 'text', resourceKind: 'vcs.pull-request' },
+    ] })).toThrow()
   })
 
   it('refuse a program step that does not alone decide its outcome', () => {

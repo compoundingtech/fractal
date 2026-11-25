@@ -77,6 +77,7 @@ use completion::{Complete, Entity, WorkFilter};
 mod cli_help;
 mod demo;
 mod setup;
+mod light_node;
 mod onboarding;
 mod change_cli;
 mod availability;
@@ -8116,6 +8117,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.unlaned_seat.clone(),
     )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_finite_resources(config.finite_resources.clone()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.install_launch_contract_reader();
+    let light_node_service = light_node::Service::prepare(&config, reconciler.clone()).await?;
+    let local_run_authority = light_node_service.as_ref().and_then(light_node::Service::authority);
+    let light_node_controls = light_node_service.as_ref()
+        .map(light_node::Service::control_router).unwrap_or_default();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     reconciler.set_idle_residency(config.reconcile.idle_residency()?);
@@ -8458,14 +8463,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let mut relayed_closes_worker = tokio::spawn(
         fractal_daemon::api::relayed_close_maintenance::run(state.clone(), relayed_closes_stopped),
     );
+    let (light_node_stop, light_node_stopped) = tokio::sync::watch::channel(false);
     let serving = async {
         let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
-                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
+                fractal_daemon::api::worker_authenticated(router(state.clone()).merge(light_node_controls), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
                 Some(state.store.clone()),
                 Some(worker_observer),
-                None,
+                local_run_authority,
                 ready
             ),
             fractal_daemon::api::serve_reserved_unix_with_ready(
@@ -8485,14 +8491,22 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     None => std::future::pending().await,
                 }
             },
+            async {
+                match light_node_service {
+                    Some(service) => service.run(light_node_stopped).await,
+                    None => std::future::pending().await,
+                }
+            },
         );
         Err(served)
     };
     let shutdown = async {
-        tokio::select! {
-            _ = terminate.recv() => Ok(libc::SIGTERM),
-            _ = interrupt.recv() => Ok(libc::SIGINT),
-        }
+        let signal = tokio::select! {
+            _ = terminate.recv() => libc::SIGTERM,
+            _ = interrupt.recv() => libc::SIGINT,
+        };
+        light_node_stop.send_replace(true);
+        Ok(signal)
     };
     let stopped = fractal_daemon::api::stop_before_listener_drop(
         serving, shutdown, stop_agents_request_slo,
@@ -13305,17 +13319,25 @@ fn render_performance(view: &Value) -> String {
         "PERFORMANCE  last {} seconds · sorted by total wall time\n",
         view["window_seconds"]
     );
+    if let Some(note) = view["sqlite_cache_miss_bytes_note"].as_str() {
+        let _ = writeln!(out, "SQLite cache-miss bytes: {note}");
+    }
+    if let Some(note) = view["mmap_major_faults_note"].as_str() {
+        let _ = writeln!(out, "mmap major faults: {note}");
+    }
     for (key, title) in [("requests", "REQUESTS AND TASKS"), ("queries", "QUERIES")] {
-        let _ = writeln!(out, "{title}  count · total ms · max ms · CPU ms · kind");
+        let _ = writeln!(out, "{title}  count · total ms · max ms · CPU ms · SQLite cache-miss bytes · mmap major faults · kind");
         if let Some(rows) = view[key].as_array() {
             for row in rows {
                 let _ = writeln!(
                     out,
-                    "  {}  {:.1}  {:.1}  {:.1}  {}",
+                    "  {}  {:.1}  {:.1}  {:.1}  {}  {}  {}",
                     row["count"],
                     row["total_ms"].as_f64().unwrap_or(0.0),
                     row["max_ms"].as_f64().unwrap_or(0.0),
                     row["cpu_ms"].as_f64().unwrap_or(0.0),
+                    row["sqlite_cache_miss_bytes"].as_u64().unwrap_or(0),
+                    row["mmap_major_faults"],
                     row["kind"].as_str().unwrap_or("?")
                 );
             }
@@ -13330,10 +13352,10 @@ fn render_performance(view: &Value) -> String {
         );
     }
     for (key, title) in [
-        ("clients", "CLIENTS  count · total ms · CPU ms · client"),
+        ("clients", "CLIENTS  count · total ms · CPU ms · SQLite cache-miss bytes · mmap major faults · client"),
         (
             "client_requests",
-            "CLIENT REQUESTS  count · total ms · CPU ms · client · kind",
+            "CLIENT REQUESTS  count · total ms · CPU ms · SQLite cache-miss bytes · mmap major faults · client · kind",
         ),
     ] {
         let Some(rows) = view[key].as_array() else {
@@ -13343,10 +13365,12 @@ fn render_performance(view: &Value) -> String {
         for row in rows {
             let _ = write!(
                 out,
-                "  {}  {:.1}  {:.1}  {}",
+                "  {}  {:.1}  {:.1}  {}  {}  {}",
                 row["count"],
                 row["total_ms"].as_f64().unwrap_or(0.0),
                 row["cpu_ms"].as_f64().unwrap_or(0.0),
+                row["sqlite_cache_miss_bytes"].as_u64().unwrap_or(0),
+                row["mmap_major_faults"],
                 row["client"].as_str().unwrap_or("?")
             );
             if let Some(kind) = row["kind"].as_str() {

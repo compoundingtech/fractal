@@ -150,9 +150,10 @@ can run an effect to its end but can never journal it.
 | host → daemon | `journal` | `step`, `attempt`, `seq`, `key`, `status` (`started`/`completed`/`failed`), `value`/`error`, `ms` | an inner step began or ended |
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
-| daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
+| daemon → host | `cancel` | `step`, `attempt`, `reason` | interrupt the program's Effect root fiber; stop existing effect groups, but admit finalizer steps and commands during the configured grace |
 | host → daemon | `ending` | `step`, `attempt` | this attempt began termination for any reason; precedes its terminal notification and is not proof of worker exit |
 | host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups after explicit or host-initiated termination; matched to the host incarnation and attempt, not another host's acknowledgement |
+| host → daemon | `finalizers` | `step`, `attempt`, `outcome` | root finalization completed, or exhausted its grace (`timed-out`); not proof of worker exit |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
 | host → daemon | `await-pr` | `step`, `attempt`, `seq`, `key`, `repo`, `pr`, `head` | register or adopt a native pull-request outcome wait for `key` (§6) |
@@ -181,6 +182,60 @@ without either cannot run program steps. Cancellation is eager: every evaluation
 engine which of the run's program attempts left their step (ended, failed, timed out, retried,
 cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
 cancels the child runs and asks the attempt still waits on (§6).
+
+Cancellation and mission deadline expiry enter the existing non-terminal cleanup phase
+(`cleanup-cancelled` or `cleanup-failed`). A live program attempt stays live, with its unchanged
+run credential, until its root fiber's finalizers finish or exhaust the published program's
+`finalizer-grace`. Author it with `Fractal.mission({ ..., finalizerGrace: '5m' }, body)`;
+the loader carries it into `program "/bundle.mjs" sha256="..." finalizer-grace="5m"`.
+It must be positive and no greater than 15 minutes; publication refuses other values with
+`invalid-finalizer-grace`. When omitted, the engine's `Liveness.finalizer_grace` defaults to
+30 seconds. The engine records the effective grace and reason under the reserved
+`$finalizers` journal key before sending the interrupt. The host aborts the root's `AbortSignal`,
+which the SDK passes to Effect, rather than immediately terminating its worker. `ensuring`,
+`acquireRelease` and `onInterrupt` can therefore run `Fractal.step` and `Fractal.command`;
+their normal started/result journal acknowledgements remain authoritative during cleanup.
+Existing command groups are stopped at interruption; finalizer commands get their own groups.
+The SDK preserves the finalizer's interruption mask when executing its activities: the workflow
+suspension wrapper's explicit interruptible region must not reinstate the pending root interrupt.
+Interruption detaches preexisting child/ask waits; late results cannot become finalizer results.
+Finalizer requests remain admitted under the same live attempt.
+Only keys started during finalization may publish finalizer results; a killed normal command
+cannot journal a late completion merely because cleanup retains the attempt. Normal root
+`done` notifications are fenced by the authoritative cleanup phase even before the engine
+observes cancellation; the `$result` append rechecks that phase in its own transaction.
+Only finalizer outcomes, not queued normal root success or failure, may settle cleanup.
+
+The `$finalizers` result is tagged `Finalizers`, with `outcome: completed | failed | timed-out |
+interrupted-by-restart | worker-failed` and the effective `grace_ms`. Incomplete finalization is
+a failed journal entry with that typed error, visible in `missions show`, not a failed run.
+Finalizer defects and journal refusals remain `FinalizerFailed` across the SDK/worker boundary.
+The SDK conservatively classifies any failure or defect in the final cause after cancellation
+as `FinalizerFailed`, including failures from user `ensuring` and nested user-owned scopes.
+Known limitation: if the body has already failed and cancellation arrives while its cleanup
+runs successfully, that earlier body failure also produces `FinalizerFailed`. This false
+positive raises operator attention rather than silently reporting failed cleanup as successful.
+Precise body-versus-cleanup attribution is not provided by this contract; changing it must
+preserve failure reporting for existing programs and their user-owned finalizers.
+The result's optional `cause` preserves that failure across the SDK/worker boundary.
+`$finalizers` is reserved for both steps and request-backed operations.
+A timed-out worker is forcibly terminated,
+and its command groups are killed. Worker-thread termination can still await blocking native
+I/O: the timeout is recorded immediately, but the run's execution fence waits for actual exit,
+not merely a queued `Worker.terminate()`. Finalization never changes cancellation into program
+failure: the terminal outcome remains cancelled, or the original mission-timeout failure.
+`missions show` retains the journal outcome; incomplete finalization also raises operator
+attention. The run cannot become terminal and revoke its attempt credential ahead of finalization.
+Light-node execution authority follows the same boundary: cancellation retains the exact
+execution binding during finalization, revokes it before recording the finalizer outcome,
+and still waits for the exact host/attempt termination acknowledgement before forgetting
+the worker. A subscription-started resource-input program follows this same cleanup path.
+
+Known limit: losing the daemon or host during cleanup cannot reconstruct an arbitrary Effect
+finalizer. Recovery records `interrupted-by-restart`, ends the attempt without replaying normal
+work, and raises operator attention. Durable finalization replay is tracked in
+[#7079](https://github.com/compoundingtech/fractal/issues/7079).
+
 
 #### Native retries and resource retirement
 
@@ -302,8 +357,8 @@ a program compensates inside its body.
 
 `sha256` is the bundle's 64 lowercase hex digits; the path must be absolute. The optional
 `stalled-after` is how long the program may go without a new journal entry before its run reports
-it stalled (§8). The step definition stores them as `program {bundle, bundle_hash,
-stalled_after_ms?}`.
+it stalled (§8). `finalizer-grace` bounds cancellation finalization (§2). The step definition
+stores these as `program {bundle, bundle_hash, stalled_after_ms?, finalizer_grace_ms?}`.
 
 Steps act as the run (R07). The engine starts every effect with a run credential scoped to
 `(run, step run, attempt)`; the daemon binds a request carrying it to the actor
@@ -341,12 +396,21 @@ pair with one verb, the narrower pattern if one covers the other, nothing otherw
 **Credential.** On an unconfigured full node, each start or resume mints a `program-run` store
 capability whose subject is the step run and whose incarnation is the attempt. The opt-in
 light-node issuer instead uses the session journal's exact execution binding: engine instance,
-actual host generation, runtime, run, step, attempt and admitted authorization revision. It waits
-for the home admission ACK before minting and for predecessor revocation ACK before replacing;
-an ACK targets waiting run evaluations, not a timer poll. Already acknowledged live authority can
-mint offline. Both paths hash secrets at rest, never journal them as graph claims, and pass only
+actual host generation, fresh dispatch identity, runtime, run, step, attempt and admitted
+authorization revision. An admission-ACK wait retains that dispatch identity while the graph
+attempt and actual host generation match. Once issuance is revoked, retrying the same graph
+attempt on the same live host uses a new dispatch identity; a persistence failure cannot
+resurrect a tombstoned authorization revision. The issuer waits for its own home admission ACK
+before minting and for predecessor revocation ACK before replacing; an ACK targets waiting run
+evaluations, not a timer poll. Already acknowledged live authority can mint offline. Both paths
+hash secrets at rest, never journal them as graph claims, and pass only
 the local secret as `ST_RUN_CREDENTIAL` in the start message's `env`. The host spreads run env last,
 so an effect cannot replace it. See [light-node authorization](light-node.md#authorization-withdrawal-and-host-admission).
+The shared host is launched without inherited `ST_AGENT`, `FRACTAL_AGENT` or
+`ST_RUN_CREDENTIAL` markers from the process that started the daemon. Each effect
+receives only its own dispatch's authoritative run credential; an invoking
+harness's identity must not conflict with that run at the Unix ancestry guard.
+The guard still rejects an effect that explicitly supplies both identity kinds.
 
 **Binding.** The ancestry walk reads `ST_RUN_CREDENTIAL` from each ancestor's exec-time environment
 beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon
@@ -887,6 +951,24 @@ value. The success value is encoded with `intent.output` and journaled under the
 `$result`; a typed failure is encoded with its `_tag` and fields, journaled under the same key as
 a failed result, and fails the step with it. Retry classification reads this attempt's durable
 failure rather than an inner effect's possibly caught error.
+
+Required string-encoded fields normally lower to `input "name" kind="text"`. For a native
+subscription resource binding, use `Schema.Struct({ source: Fractal.resourceInput('vcs.pull-request') })`.
+This field lowers to `input "source" kind="resource" resource-kind="vcs.pull-request"`, the same
+resource input convention used by native missions. Use the helper directly as the Struct field;
+it carries declaration metadata in addition to the pinned-reference string schema. Optional fields
+are not admitted. The existing subscription `delivery "mission" { ...; resource "source" }` starts
+the program without a dispatch mission or a separate program delivery protocol.
+
+Run admission resolves and pins the observation before the worker starts. Both explicit
+`resource/NAME@CLAIM` and unpinned `resource/NAME` starts check the resolved claim's resource kind,
+not the subject's latest kind; `vcs.item.state` pins use their `item_kind`. A mismatch returns the
+typed native error code `resource-input-kind-mismatch` and creates no run. The program receives
+the unchanged `resource/NAME@CLAIM` string, preserving native observation identity and replay.
+Constraints are optional for existing native declarations; declarations without one retain their
+previous behavior and serialized revision identity. Deploy supporting daemons to every member
+that can admit runs before publishing constrained inputs; older binaries do not enforce the new
+constraint in replicated structured revisions.
 
 A program waiting on an ask, a child run or a pull-request outcome stays loaded in the host.
 A replaced host replays the program to the same wait.

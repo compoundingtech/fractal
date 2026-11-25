@@ -18,7 +18,7 @@ import {
 import { objective, validName, type Objective, type ObjectiveInput } from './objective.ts'
 import { bundleProgram } from './program-bundler.ts'
 import { ProgramEntry } from './program-engine.ts'
-import { programInputNames, type InputSchema, type ProgramIntent } from './program.ts'
+import { programInputs, type InputSchema, type ProgramIntent } from './program.ts'
 import type { SubjectKind, SubjectRef } from './subject-ref.ts'
 export {
   defineAgent,
@@ -325,7 +325,7 @@ const programDeclaration = Effect.fnUntraced(function* ({
     })
   }
   const inputs = yield* Effect.try({
-    try: () => programInputNames(intent.input),
+    try: () => programInputs(intent.input),
     catch: (cause) => new SubjectTreeError({ path, message: 'Invalid program inputs', cause }),
   })
   if (programs.bundleDir === undefined) {
@@ -361,7 +361,7 @@ const programDeclaration = Effect.fnUntraced(function* ({
     ...timeout,
     ...(intent.concurrentRuns === undefined ? {} : { concurrentRuns: intent.concurrentRuns }),
     ...(intent.authority === undefined ? {} : { authority: intent.authority }),
-    inputs: inputs.map((name) => ({ name, kind: 'text' })),
+    inputs,
     steps: [
       {
         id: 'program',
@@ -371,6 +371,7 @@ const programDeclaration = Effect.fnUntraced(function* ({
           bundle,
           sha256,
           ...(intent.stalledAfter === undefined ? {} : { stalledAfter: intent.stalledAfter }),
+          ...(intent.finalizerGrace === undefined ? {} : { finalizerGrace: intent.finalizerGrace }),
         },
       },
     ],

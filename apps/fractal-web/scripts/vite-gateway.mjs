@@ -3,8 +3,13 @@ import { Tracer } from 'effect'
 import { createFractalWebMiddleware } from '../server/core.mts'
 import { devAdmission } from '../server/devAdmission.mts'
 import { readAuthorization } from '../server/authorization.mts'
+import { loopbackProducer } from '../server/relayHttp.mts'
 
-/** Enable live data only when explicitly configured; Storybook remains credential-free. */
+/**
+ * Enable live data only when explicitly configured; Storybook remains credential-free.
+ * `WF_USAGE_HISTORY_URL` additionally enables the interim usage-history relay (server/usageHistory.mts),
+ * and `WF_ROOT_DETAIL_URL` the root-detail relay (server/rootDetail.mts).
+ */
 export function webfractalGateway({ edgeHost, edgeAliases = [] } = {}) {
   return {
     name: 'wf:shared-client-gateway',
@@ -38,6 +43,8 @@ export function webfractalGateway({ edgeHost, edgeAliases = [] } = {}) {
           timeoutMs: 30_000,
         },
         tracer: Tracer.make({ span: (options) => new Tracer.NativeSpan(options) }),
+        usageHistory: loopbackProducer(process.env.WF_USAGE_HISTORY_URL, 'WF_USAGE_HISTORY_URL'),
+        rootDetail: loopbackProducer(process.env.WF_ROOT_DETAIL_URL, 'WF_ROOT_DETAIL_URL'),
       })
       vite.middlewares.use(boundary.middleware)
       vite.httpServer.once('close', boundary.close)

@@ -111,6 +111,7 @@ impl Fixture {
         self.store.connection.send(WriterJob::Batched {
             run: Box::new(job),
             profile: None,
+            charged: None,
             wait: None,
             holder: smallclaims::windows::holds::Holder::current(),
             enqueued: Instant::now(),

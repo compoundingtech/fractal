@@ -13,6 +13,7 @@ import {
 } from './effect.ts'
 import { fakeHost, journalOf, start } from './program-host.fixture.ts'
 import type { HostContextV1, ResourceRequest } from './program-engine.ts'
+import { programInputs } from './program.ts'
 import {
   ReviewError, ReviewResult, reviewComment, reviewKey, type ReviewOptions,
 } from './review.ts'
@@ -32,6 +33,36 @@ const reportTo: AgentRef = {
 const meta = { url: 'file:///tree/factory/test/mission.ts' }
 const Change = Schema.Struct({ change: Schema.String })
 
+
+describe('program resource inputs', () => {
+  const Source = Fractal.resourceInput('vcs.pull-request')
+  const Input = Schema.Struct({ source: Source, head: Schema.String })
+
+  it('uses the native resource input declaration alongside ordinary text inputs', () => {
+    expect(programInputs(Input)).toEqual([
+      { name: 'source', kind: 'resource', resourceKind: 'vcs.pull-request' },
+      { name: 'head', kind: 'text' },
+    ])
+    expect(() => Fractal.resourceInput(' ')).toThrow('Resource input kind must be nonempty')
+    expect(() => programInputs(Schema.Struct({ source: Schema.optionalKey(Source) }))).toThrow(
+      'Program input source must be required and encode to a string',
+    )
+  })
+
+  it.effect('decodes the pinned observation without changing its immutable reference', () =>
+    Effect.gen(function* () {
+      const source = `resource/github/example/repo/pull-request/7@${'a'.repeat(64)}`
+      const program = Fractal.mission({
+        meta, id: 'factory/test', goal: 'Consume the subscribed resource.', reportTo,
+        input: Input, output: Schema.String,
+      }, (input) => Effect.succeed(input.source))
+      expect(yield* start(program, fakeHost({ payload: { source, head: 'h1' } }))).toEqual({
+        _tag: 'Success', value: source,
+      })
+      expect(Schema.is(Source)('resource/github/example/repo/pull-request/7')).toBe(false)
+    }),
+  )
+})
 describe('pull request waits', () => {
   const request = { id: 'await-outcome', repo: 'owner/repo', pr: 42, head: 'head-sha' }
   const waiting = Fractal.mission(
@@ -731,6 +762,92 @@ describe('cancellation', () => {
       expect(host.recorded).toEqual([])
     }),
   )
+  it.effect('journals an ensuring finalizer step wrapping a command after root interruption', () =>
+    Effect.gen(function* () {
+      const host = fakeHost()
+      const waiting = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Drain on cancel.', reportTo, input: Change },
+        () => Fractal.step({ id: 'merge' },
+          Effect.sync(() => host.cancel()).pipe(Effect.andThen(Effect.never)),
+        ).pipe(Effect.ensuring(
+          Fractal.step({ id: 'drain', success: Schema.String },
+            Fractal.command(['sh', '-c', 'drain']).pipe(Effect.map((result) => result.stdout), Effect.orDie),
+          ).pipe(Effect.orDie),
+        )),
+      )
+      expect(yield* start(waiting, host)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'Interrupted' },
+      })
+      expect(host.started).toEqual(['merge', 'drain'])
+      expect(host.recorded).toMatchObject([
+        { key: 'drain', status: 'completed', value: 'sh -c drain' },
+      ])
+    }),
+  )
+  for (const nack of [undefined, 'finalizer journal refused']) {
+    it.effect(`preserves finalizer ${nack === undefined ? 'defects' : 'journal refusals'} after cancellation`, () =>
+      Effect.gen(function* () {
+        const host = fakeHost({ ...(nack === undefined ? {} : { nack }) })
+        const waiting = Fractal.mission(
+          { meta, id: 'factory/test', goal: 'Report failed cleanup.', reportTo, input: Change },
+          () => Fractal.step({ id: 'work' },
+            Effect.sync(() => host.cancel()).pipe(Effect.andThen(Effect.never)),
+          ).pipe(Effect.ensuring(
+            Fractal.step({ id: 'drain' },
+              nack === undefined ? Effect.die('drain failed') : Effect.void,
+            ).pipe(Effect.orDie),
+          )),
+        )
+        expect(yield* start(waiting, host)).toMatchObject({
+          _tag: 'Failure', error: { _tag: 'FinalizerFailed' },
+        })
+      }),
+    )
+  }
+  it.effect('preserves acquireRelease finalizer defects across workflow interruption', () =>
+    Effect.gen(function* () {
+      const host = fakeHost()
+      const waiting = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Report failed resource release.', reportTo, input: Change },
+        () => Effect.scoped(Effect.acquireRelease(Effect.void, () =>
+          Fractal.step({ id: 'release' }, Effect.die('release failed')).pipe(Effect.orDie),
+        ).pipe(Effect.andThen(
+          Fractal.step({ id: 'work' },
+            Effect.sync(() => host.cancel()).pipe(Effect.andThen(Effect.never)),
+          ),
+        ))),
+      )
+      expect(yield* start(waiting, host)).toMatchObject({
+        _tag: 'Failure', error: { _tag: 'FinalizerFailed', message: expect.stringContaining('release failed') },
+      })
+    }),
+  )
+  for (const defect of [false, true]) {
+    for (const scoped of [false, true]) {
+      it.effect(`conservatively reports a prior body ${defect ? 'defect' : 'typed failure'} during successful ${scoped ? 'scoped release' : 'ensuring cleanup'} as FinalizerFailed`, () =>
+        Effect.gen(function* () {
+          const host = fakeHost()
+          let released = false
+          const cleanup = Effect.sync(() => host.cancel()).pipe(
+            // Cancellation lands while successful cleanup crosses an async boundary.
+            Effect.andThen(Effect.yieldNow),
+            Effect.andThen(Effect.sync(() => { released = true })),
+          )
+          const body = defect ? Effect.die('body defect') : Effect.fail(new Refused({ reason: 'body failure' }))
+          const waiting = Fractal.mission(
+            { meta, id: 'factory/test', goal: 'Pin conservative cleanup classification.', reportTo, input: Change },
+            () => scoped
+              ? Effect.scoped(Effect.acquireRelease(Effect.void, () => cleanup).pipe(Effect.andThen(body)))
+              : body.pipe(Effect.ensuring(cleanup)),
+          )
+          expect(yield* start(waiting, host)).toMatchObject({
+            _tag: 'Failure', error: { _tag: 'FinalizerFailed' },
+          })
+          expect(released).toBe(true)
+        }),
+      )
+    }
+  }
 })
 
 describe('commands', () => {

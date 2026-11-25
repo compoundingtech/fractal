@@ -839,6 +839,7 @@ export const ProgramSpecSchema = Schema.Struct({
     }),
   ),
   stalledAfter: Schema.optionalKey(Duration),
+  finalizerGrace: Schema.optionalKey(Duration),
 }).annotate({ identifier: 'Fractal.ProgramSpec' })
 
 /**
@@ -1968,6 +1969,9 @@ const lowerStep = (input: typeof StepSchema.Encoded): Node => {
           ...(s.program.stalledAfter === undefined
             ? {}
             : { 'stalled-after': lowerDuration(s.program.stalledAfter) }),
+          ...(s.program.finalizerGrace === undefined
+            ? {}
+            : { 'finalizer-grace': lowerDuration(s.program.finalizerGrace) }),
         },
       }),
     )
@@ -2759,7 +2763,10 @@ export const mission = <const TMission extends string>(input: MissionInput<TMiss
         ? []
         : [node({ name: 'concurrent-runs', props: { max: m.concurrentRuns } })]),
       ...(m.inputs ?? []).map((value) =>
-        node({ name: 'input', args: [value.name], props: { kind: value.kind } }),
+        node({ name: 'input', args: [value.name], props: {
+          kind: value.kind,
+          ...(value.resourceKind === undefined ? {} : { 'resource-kind': value.resourceKind }),
+        } }),
       ),
       ...(m.assignedTo === undefined
         ? []
