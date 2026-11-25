@@ -17,6 +17,14 @@ pub(super) struct Notification<'a> {
 }
 type Callback = Arc<dyn Fn(Notification<'_>) + Send + Sync>;
 type Paths = Vec<(PathBuf, bool)>;
+// FSEvents coalescing retains an affected subtree; dropped events do not.
+pub(super) fn subtree_rescan(event: &notify::Event) -> bool {
+    event.need_rescan() && !event.paths.is_empty()
+        && event.attrs.info() == Some("rescan: subtree")
+}
+pub(super) fn global_rescan(event: &notify::Event) -> bool {
+    event.need_rescan() && !subtree_rescan(event)
+}
 type Predicate = Arc<dyn Fn(&notify::Event) -> bool + Send + Sync>;
 type Users = Arc<Mutex<Subscribers>>;
 #[derive(Default)]
@@ -53,7 +61,7 @@ impl Subscribers {
 
     fn callbacks(&self, event: &notify::Event, coverage: bool) -> Vec<Callback> {
         let mut ids = BTreeSet::new();
-        if event.need_rescan() && !coverage || event.paths.is_empty() {
+        if global_rescan(event) && !coverage || event.paths.is_empty() {
             ids.extend(self.leases.keys().copied());
         } else {
             for path in &event.paths {
@@ -62,7 +70,7 @@ impl Subscribers {
                         ids.extend(users);
                     }
                 }
-                if coverage || matches!(event.kind, EventKind::Remove(_)
+                if coverage || subtree_rescan(event) || matches!(event.kind, EventKind::Remove(_)
                     | EventKind::Modify(ModifyKind::Name(_))) {
                     for root in subtree(&self.roots, path) {
                         ids.extend(&self.roots[root]);
@@ -78,8 +86,8 @@ impl Subscribers {
             } else if let Some(predicate) = self.inputs.get(&id) {
                 predicate(event)
             } else {
-                event.need_rescan() || event.paths.is_empty() || paths.iter().any(|(root, recursive)|
-                    event.paths.iter().any(|path| path == root
+                global_rescan(event) || event.paths.is_empty() || paths.iter().any(|(root, recursive)|
+                    event.paths.iter().any(|path| (subtree_rescan(event) && root.starts_with(path)) || path == root
                         || (*recursive && path.starts_with(root))
                         || path.parent() == Some(root.as_path())
                         || (root.starts_with(path) && matches!(event.kind, EventKind::Remove(_)
@@ -167,7 +175,7 @@ fn invalidate_coverage(generations: &Mutex<BTreeMap<PathBuf, (bool, u64)>>, even
         return;
     }
     let mut generations = lock(generations);
-    if event.need_rescan() || event.paths.is_empty() {
+    if global_rescan(event) || event.paths.is_empty() {
         for (_, generation) in generations.values_mut() { *generation += 1; }
     } else {
         let mut roots = BTreeSet::new();
@@ -409,6 +417,33 @@ mod tests {
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
             .add_path(PathBuf::from("/a/bc/input"));
         assert_eq!(dispatch(&users, &event, false), 1);
+    }
+
+    #[test]
+    fn subtree_rescans_select_declared_paths_but_dropped_events_select_every_input() {
+        let users = Users::default();
+        for (id, target) in ["/workspace/input", "/workspace/output", "/other/input"].iter().enumerate() {
+            let target = PathBuf::from(*target);
+            let parent = target.parent().unwrap().to_owned();
+            let predicate_target = target.clone();
+            let predicate_parent = parent.clone();
+            let mut subscribers = lock(&users);
+            subscribers.insert(id as u64, (vec![(parent, false)], Arc::new(|_| {})));
+            subscribers.inputs.insert(id as u64, Arc::new(move |event|
+                super::super::FileWatch::relevant(event, &predicate_target, &predicate_parent, None)));
+        }
+        let rescan = |path: &str, info: &str| notify::Event::new(EventKind::Other)
+            .set_flag(notify::event::Flag::Rescan).set_info(info)
+            .add_path(PathBuf::from(path));
+        assert_eq!(dispatch(&users, &rescan("/workspace/logs", "rescan: subtree"), false), 0);
+        assert_eq!(dispatch(&users, &rescan("/workspace/input", "rescan: subtree"), false), 1);
+        assert_eq!(dispatch(&users, &rescan("/workspace", "rescan: subtree"), false), 2);
+        for info in ["rescan: user dropped", "rescan: kernel dropped", "rescan: event ids wrapped", ""] {
+            assert_eq!(dispatch(&users, &rescan("/unwatched", info), false), 3);
+        }
+        let unknown = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan)
+            .set_info("rescan: subtree");
+        assert_eq!(dispatch(&users, &unknown, false), 3, "missing paths remain stream-wide");
     }
 
     #[test]
