@@ -286,13 +286,33 @@ Home Manager module is `homeManagerModules.fractal-light-node-agent`, with
 `services.fractal-light-node-agent.enable` and an absolute external string
 `configFile`. Do not use a Nix path literal or place credentials/configuration in
 the Nix store. The opt-in Linux user service uses only this binary and its pinned
-PTY sibling. Composing an enabled full `services.fractal` for the same user is
-refused because opaque external configurations cannot prove disjoint custody.
-No Darwin service or automatic production cutover is provided. Service stop or
-transport loss stops the agent, not healthy native processes: `KillMode=process`
-preserves independent PTY/process custody, and restart repairs retained native
-finalization before exposing session receipts. Reconnect/backoff belongs to the
-real session client; the service adds no sampling or watchdog poller.
+PTY sibling. On Darwin the same module delegates to the minimal binary's owned
+GUI-login lifecycle instead of adding a second launchd manager. Composing an
+enabled full `services.fractal` for the same user is refused because opaque
+external configurations cannot prove disjoint custody.
+
+The Darwin CLI is `fractal-light-node-agent service <action> --config
+/absolute/private/light-node.json`, where actions are `install`, `start`, `stop`,
+`restart`, `health` and `uninstall`. Installation writes the private owned
+`com.compoundingtech.fractal-light-node-agent` LaunchAgent but does not start it;
+start registers it once in the current user's GUI domain. There is no privileged,
+headless-user or alternate-domain fallback, and no TCC permission grant.
+Stop unloads only the matching owned agent job; uninstall also removes only its
+owned login definition, never native records or the durable journal. Repeating
+unchanged install/start does not restart an existing matching process. A foreign
+or mismatched definition/job is a refusal, not an instruction to replace or kill
+it. A full-node conflict must be fenced separately, never automatically stopped.
+
+Darwin health checks the matching loaded job and its private performance identity;
+a loaded plist alone is not readiness. Local process health is distinct from home
+reachability and never advertises graph-ready authority. Home Manager no-op
+activation preserves manual stop; changed executable/configuration and disable
+use the recorded prior owner's lifecycle to avoid orphaned login definitions.
+No automatic production cutover is provided. Service stop or transport loss stops
+the agent, not healthy native processes: Linux `KillMode=process` and Darwin
+`AbandonProcessGroup` preserve independent PTY/process custody. Restart repairs
+retained native finalization before exposing session receipts. Reconnect/backoff
+belongs to the real session client; the service adds no sampling or watchdog poller.
 
 `GET /v1/performance` is available only on the private `state_dir/agent.sock`
 Unix socket (`0600`), not a TCP listener. Its first-class physical counter measures

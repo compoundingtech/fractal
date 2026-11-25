@@ -27,6 +27,7 @@ import {
   nixCacheStep,
   linuxRunner,
   requiredLinuxRunner,
+  macosRunner,
   controlLinuxRunner,
   prerequisiteLinuxRunner,
   linuxStageJob as namespaceStageJob,
@@ -417,7 +418,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   // actionlint must know the Namespace shape label the stage jobs use.
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...requiredLinuxRunner, ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...requiredLinuxRunner, ...linuxStageRunner, ...macosRunner],
   },
   jobs: wireEvidenceSkips({
     [pickRunnerJobId]: pickRunnerJob,
@@ -533,6 +534,20 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         { name: 'Prove full-node activation and standalone agent packaging boundaries',
           run: 'nix build .#checks.x86_64-linux.hm-module-eval .#checks.x86_64-linux.light-node-agent-packaging .#checks.x86_64-linux.st3-runtime-inputs --no-link --print-build-logs' },
+      ],
+    },
+    // Linux evidence notes cannot waive real Darwin lifecycle proof.
+    'light-node-darwin': {
+      name: 'light-node-darwin',
+      'runs-on': macosRunner,
+      'timeout-minutes': 120,
+      defaults: { run: { shell: 'bash' } },
+      steps: [
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }).slice(0, queue ? 1 : undefined),
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        megarepoApplyStep,
+        nixDevelopStep({ name: 'Prove real Darwin agent lifecycle and minimal closure',
+          command: ['bash', 'scripts/ci-light-node-darwin'] }),
       ],
     },
     // Exercise the actual Nix package link, not only Cargo in a development shell:
@@ -756,7 +771,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
     },
     'linux-gate': {
       name: 'linux-gate',
-      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm', 'ci-script-tests', 'evidence-gate-ci-script-tests', 'hm-module-eval', 'bundled-sqlite-packages'],
+      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm', 'ci-script-tests', 'evidence-gate-ci-script-tests', 'hm-module-eval', 'bundled-sqlite-packages', 'light-node-darwin'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
       // Aggregation needs no build caches and no picker output.
@@ -814,6 +829,11 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
           name: 'Require bundled SQLite package links to pass',
           env: { SQLITE_RESULT: '${{ needs.bundled-sqlite-packages.result }}' },
           run: 'test "$SQLITE_RESULT" = success',
+        },
+        {
+          name: 'Require real Darwin agent lifecycle proof to pass',
+          env: { DARWIN_RESULT: '${{ needs.light-node-darwin.result }}' },
+          run: 'test "$DARWIN_RESULT" = success',
         },
       ],
     },
@@ -1036,6 +1056,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   }, {
   "hm-module-eval": "Builds only shell activation fixtures in the runner's Nix store; no Rust or product build and no separate Actions build cache.",
   "bundled-sqlite-packages": "Uses the runner's Nix store and declared read-only binary caches; no separate Actions build cache.",
+  "light-node-darwin": "Exercises real owned GUI launchd lifecycle and native PTY on a hosted Mac; uses the declared Nix store and no separate Actions build cache.",
   "swift-client-changes": "Classifies Git paths only; builds nothing.", "swift-client": "Uses a digest-pinned container and ephemeral compiler output; no reusable build cache.", "evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."}))))
 )
 }

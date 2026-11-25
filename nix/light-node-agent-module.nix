@@ -8,10 +8,18 @@ let
     "\"${lib.replaceStrings [ "\\" "\"" "$" "%" ] [ "\\\\" "\\\"" "$$" "%%" ] arg}\"";
   fullGraphEnabled = lib.hasAttrByPath [ "services" "fractal" "enable" ] options
     && config.services.fractal.enable;
+  executable = "${cfg.package}/bin/fractal-light-node-agent";
+  ownershipReceipt = ".local/share/fractal-light-node-agent/lifecycle-owner";
+  # This generation receipt contains paths, never configuration or credentials.
+  # Only the owning binary may fence, unload, or remove its launchd definition.
+  receiptText = ''
+    lightNodeAgentExecutable=${lib.escapeShellArg executable}
+    lightNodeAgentConfig=${lib.escapeShellArg cfg.configFile}
+  '';
 in
 {
   options.services.fractal-light-node-agent = {
-    enable = lib.mkEnableOption "the standalone graph-free Fractal seat agent (Linux only)";
+    enable = lib.mkEnableOption "the standalone graph-free Fractal seat agent (Linux systemd or Darwin interactive GUI login)";
     package = lib.mkOption {
       type = lib.types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.fractal-light-node-agent;
@@ -30,11 +38,40 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkMerge [
+    (lib.mkIf pkgs.stdenv.hostPlatform.isDarwin {
+      # Keep this entry when disabled so the previous generation can surrender
+      # only its exact launchd job. Home Manager never manages a parallel agent.
+      home.activation.fractalLightNodeAgent = lib.hm.dag.entryBetween
+        [ "linkGeneration" ] [ "writeBoundary" ] ''
+          if [[ -n "''${DRY_RUN_CMD:-}" ]]; then
+            verboseEcho "Would converge the Fractal light-node GUI login service"
+          else
+            (
+              set -eu
+              desiredExecutable=${lib.escapeShellArg (if cfg.enable then executable else "")}
+              desiredConfig=${lib.escapeShellArg (if cfg.enable then cfg.configFile else "")}
+              if [[ -n "''${oldGenPath:-}" && -f "$oldGenPath/home-files/${ownershipReceipt}" ]]; then
+                source "$oldGenPath/home-files/${ownershipReceipt}"
+                if [[ "$lightNodeAgentExecutable" == "$desiredExecutable" && "$lightNodeAgentConfig" == "$desiredConfig" ]]; then
+                  # In particular, do not undo a manual service stop on switch.
+                  exit 0
+                fi
+                "$lightNodeAgentExecutable" service uninstall --config "$lightNodeAgentConfig"
+              fi
+              if [[ -n "$desiredExecutable" ]]; then
+                "$desiredExecutable" service install --config "$desiredConfig"
+                "$desiredExecutable" service start --config "$desiredConfig"
+              fi
+            )
+          fi
+        '';
+    })
+    (lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = pkgs.stdenv.hostPlatform.isLinux;
-        message = "services.fractal-light-node-agent supports Linux systemd user services only; no Darwin service is provided.";
+        assertion = pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin;
+        message = "services.fractal-light-node-agent supports Linux systemd user services or Darwin interactive GUI login services only.";
       }
       {
         assertion = lib.hasPrefix "/" cfg.configFile
@@ -52,6 +89,9 @@ in
     ];
 
     home.packages = [ cfg.package ];
+    home.file = lib.mkIf pkgs.stdenv.hostPlatform.isDarwin {
+      "${ownershipReceipt}".text = receiptText;
+    };
     systemd.user.services = lib.mkIf pkgs.stdenv.hostPlatform.isLinux {
       fractal-light-node-agent = {
         Unit = {
@@ -84,5 +124,6 @@ in
     };
     # This unit runs only the real client, which owns reconnect/backoff. No
     # replication daemon, graph initializer, watchdog poller, or fleet cutover.
-  };
+    })
+  ];
 }
