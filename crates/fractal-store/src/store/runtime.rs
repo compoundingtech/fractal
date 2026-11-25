@@ -190,6 +190,16 @@ impl Store {
 
 impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
+        // Only the privacy-capable application opts into this floor. Plain graph
+        // stores retain the reader-first default writer format at version 20.
+        // Fence old readers before any application can admit private thread data.
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version < fractal_schema::STORAGE_VERSION {
+            if version == smallclaims::store::record_bytes::VALID_RECORDS_GONE_VERSION {
+                smallclaims::store::record_bytes::mark_valid_records_gone(connection)?;
+            }
+            connection.pragma_update(None, "user_version", fractal_schema::STORAGE_VERSION)?;
+        }
         runtime_starts::create_schema(connection)?;
         local_sessions::create_schema(connection)?;
         resource_references::create_schema(connection)?;
@@ -1200,6 +1210,29 @@ mod schema_install_tests {
             assert_eq!(connection.total_changes(), changes, "complete reopen must not write");
             assert_eq!(connection.pragma_query_value(None, "schema_version", |row| row.get::<_, u32>(0)).unwrap(), cookie);
         }
+    }
+
+    #[test]
+    fn thread_indexes_are_not_installed_on_fresh_or_existing_schemas() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+        let indexes = [
+            "claims_thread_conversation_index", "claims_thread_message_accepted_index",
+            "claims_thread_inbox_origin_index", "claims_thread_mission_index", "claims_thread_closed_owner_index",
+            "claims_operational_episode_index",
+            "claims_thread_unread_owner_time_index", "claims_thread_history_link_index",
+        ];
+        let has_index = |name: &str| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",
+                [name], |row| row.get::<_, bool>(0),
+            ).unwrap()
+        };
+        install_initial_schema(&connection, true).unwrap();
+        assert!(indexes.iter().all(|name| !has_index(name)));
+        install_initial_schema(&connection, false).unwrap();
+        assert!(indexes.iter().all(|name| !has_index(name)));
+
     }
 
     #[test]

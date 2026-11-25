@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reach agent-pane thread headings by keyboard: Ctrl+Up/Down walk tools then threads, Ctrl+Enter expands or collapses the focused thread",
+  "replay": { "status": "none", "detail": "No durable data is replayed; moving focus queues no thread action." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes." },
+  "rules": { "status": "none", "detail": "Thread authority, fences and mutation rules are unchanged; the thread keys still need the same grants." },
+  "compatibility": { "status": "changed", "detail": "In an agent conversation Ctrl+Up/Down now move focus through the tool blocks and then the thread headings below them, in the order they are drawn, also from the message box or a thread reply box, which let go of the keys and keep their drafts. The focused heading gets the ▌ gutter even when collapsed, Ctrl+Enter expands or collapses it without moving the keys into its reply box, and the thread keys (alt+p z n v) act on it. Clicking a tool or a thread moves the single focus the same way." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required." },
+  "manual": { "status": "changed", "detail": "In fractal tui open an agent conversation with threads, type a draft, press Ctrl+Down until a thread heading shows ▌ (the footer says Thread i of n focused), press Ctrl+Enter twice to expand and collapse it, then type a letter: it joins the kept draft. ? help lists the keys." },
+  "recovery": { "status": "none", "detail": "Presentation and keyboard routing only; no daemon state, pairings or drafts change." }
+}

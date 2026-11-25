@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Enroll verdict compatibility fixtures before fresh-writer archive recovery",
+  "replay": {"status": "none", "detail": "No production history replay or rewrite."},
+  "schema": {"status": "none", "detail": "No storage format or migration changes."},
+  "rules": {"status": "none", "detail": "The judging-prune and verdict-index fixtures migrate their original legacy identities through supported fleet enrollment before settling and archiving. Restores retain fresh writer identities and recover authenticated membership roots from the archive; no node keys or configuration are copied."},
+  "compatibility": {"status": "none", "detail": "All verdict equality, pruning, index and recovery assertions remain unchanged. Source inspection supports the trust-root diagnosis; runtime success is not implied."},
+  "downtime": {"status": "none", "detail": "No deployment."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Privacy-floor rollback still requires restoring a pre-upgrade backup."}
+}

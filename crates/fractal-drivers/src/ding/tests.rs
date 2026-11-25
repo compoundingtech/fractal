@@ -90,6 +90,7 @@ fn fractal_ping_keeps_the_plain_bounded_notice_for_the_claude_channel() {
             "agent/example/cos\nspoofed",
             Some("Check\rreceipt"),
             "Reply once\nwith token.",
+            None,
         ),
         "[PING from st3] message/abc123 from agent/example/cos spoofed: Check receipt\n\nReply once with token."
     );
@@ -98,9 +99,13 @@ fn fractal_ping_keeps_the_plain_bounded_notice_for_the_claude_channel() {
         "agent/a",
         Some("title"),
         &"x".repeat(FRACTAL_BODY_MAX_CHARS + 1),
+        None,
     );
     assert!(long.ends_with("… [read the full message in st3]"));
     assert!(!long.contains(&"x".repeat(FRACTAL_BODY_MAX_CHARS + 1)));
+    let threaded = fractal_ping_text("message/abc123", "person/ada", None, "Check CI.", Some("thread/ci"));
+    assert!(threaded.contains("fractal conversations reply-in-thread 'thread/ci' --quote 'message/abc123'"));
+    assert!(!threaded.contains(PERSON_REPLY_INSTRUCTION));
 }
 
 #[test]
@@ -159,7 +164,7 @@ fn person_messages_tell_the_agent_to_answer_in_the_conversation_in_both_native_n
             "x".repeat(FRACTAL_BODY_MAX_CHARS + 1),
         ] {
             let hash = fractal_body_sha256(&body);
-            let ping = fractal_ping_text("message/abc123", from, Some("Question"), &body);
+            let ping = fractal_ping_text("message/abc123", from, Some("Question"), &body, None);
             let envelope = fractal_notification_text(
                 "message/abc123",
                 from,
@@ -558,7 +563,7 @@ fn an_external_assistant_send_carries_the_exact_warning_from_trusted_metadata() 
         Some("Request"),
         "please summarize",
         "0".repeat(64).as_str(),
-        NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+        NotificationMetadata { attachments: &[], assistant: Some(&metadata), delivery_thread: None },
     );
     assert!(envelope.starts_with(&format!(
         "[PING from st3] message/abc from assistant/example sender_class=external-assistant: Request\n\
@@ -583,6 +588,7 @@ fn an_external_assistant_send_carries_the_exact_warning_from_trusted_metadata() 
             assistant: Some(&AssistantMessageMetadata {
                 assistant_grant_id: None,
             }),
+            delivery_thread: None,
         },
     );
     assert!(bare.contains(" sender_class=\"external-assistant\">\n"));
@@ -595,7 +601,7 @@ fn assistant_metadata_never_grants_person_reply_treatment() {
         let metadata = AssistantMessageMetadata { assistant_grant_id: Some("assistant-grant/one") };
         let envelope = fractal_notification_with_metadata(
             "message/assistant", from, "agent/seat", None, "request", &"0".repeat(64),
-            NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+            NotificationMetadata { attachments: &[], assistant: Some(&metadata), delivery_thread: None },
         );
         assert!(envelope.contains(EXTERNAL_ASSISTANT_WARNING));
         assert!(!envelope.contains(PERSON_REPLY_INSTRUCTION));
@@ -617,6 +623,7 @@ fn the_external_assistant_warning_survives_body_truncation() {
             assistant: Some(&AssistantMessageMetadata {
                 assistant_grant_id: Some("assistant-grant/one"),
             }),
+            delivery_thread: None,
         },
     );
     let warning_line = format!("{EXTERNAL_ASSISTANT_WARNING}\n");

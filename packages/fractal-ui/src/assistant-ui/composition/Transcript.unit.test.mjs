@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
 import * as React from 'react'
+import { JSDOM } from 'jsdom'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 import stylex from '@stylexjs/unplugin'
@@ -38,6 +39,24 @@ for (const turns of [[], [turn]]) test(`Transcript server-renders ${turns.length
     assert.doesNotMatch(markup, /data-testid="transcript-empty"/)
     assert.match(markup, /data-testid="transcript-placeholder"/)
   }
+})
+
+for (const turns of [[], [turn]]) test(`host after-content shares the transcript scroll viewport with ${turns.length} turns`, () => {
+  const element = React.createElement(EmbraceRuntimeProvider, {
+    options: { messages: [], isRunning: false, onNew: async () => {} },
+  }, React.createElement(Transcript, {
+    turns, title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now,
+    afterTranscript: React.createElement('section', { 'data-testid': 'host-after-transcript' }, 'Related discussion'),
+  }))
+  const dom = new JSDOM(renderToStaticMarkup(element))
+  try {
+    const document = dom.window.document
+    const content = document.querySelector('[data-testid="host-after-transcript"]')
+    const viewport = document.querySelector('[data-testid="transcript-scroll"]')
+    assert.ok(content && viewport)
+    assert.equal(content.closest('[data-testid="transcript-scroll"]'), viewport)
+    assert.equal(document.querySelectorAll('[data-testid="host-after-transcript"]').length, 1)
+  } finally { dom.window.close() }
 })
 
 test('the package keeps its transcript window exports and duration token', async () => {

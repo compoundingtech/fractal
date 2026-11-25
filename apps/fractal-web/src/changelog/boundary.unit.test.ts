@@ -13,7 +13,7 @@ const manifest = compileChangelog({
 })
 const privateEntries = manifest.entries.filter(({ visibility }) => visibility === 'private')
 const publicManifest = { ...manifest, entries: manifest.entries.filter(({ visibility }) => visibility === 'public') }
-const clean = { manifest: publicManifest, privateEntries, privateDirectory, modules: ['/checkout/apps/fractal-web/src/web/main.tsx'], texts: [JSON.stringify(publicManifest)] }
+const clean = { manifest: publicManifest, privateEntries, privateDirectories: [privateDirectory], modules: ['/checkout/apps/fractal-web/src/web/main.tsx'], texts: [JSON.stringify(publicManifest)] }
 
 describe('public changelog boundary', () => {
   it('accepts a public bundle that carries only public entries', () => {
@@ -35,6 +35,26 @@ describe('public changelog boundary', () => {
     expect(() => assertPublicChangelogBoundary({ ...clean, modules: [...clean.modules, `${privateDirectory}/mod.ts`] }))
       .toThrow('Public build leaked private changelog modules')
   })
+  it('rejects configured and real private paths, including query-bearing module IDs', () => {
+    const privateDirectories = [privateDirectory, '/real-checkout/private/.changelog', '/registry-target/private']
+    for (const directory of privateDirectories)
+      expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectories, modules: [`${directory}/mod.ts?raw`] }))
+        .toThrow('Public build leaked private changelog modules')
+  })
+
+  it('rejects private modules behind virtual and Vite filesystem prefixes', () => {
+    for (const prefix of ['\0', '/@fs', '\0/@fs'])
+      expect(() => assertPublicChangelogBoundary({ ...clean, modules: [`${prefix}${privateDirectory}/mod.ts?raw`] }))
+        .toThrow('Public build leaked private changelog modules')
+  })
+
+  it('does not classify a similarly named neighbouring directory as private', () => {
+    const privateDirectories = [privateDirectory, '/real-checkout/private/.changelog', '/registry-target/private']
+    expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectories,
+      modules: privateDirectories.map((directory) => `${directory}-public/mod.ts`),
+    })).not.toThrow()
+  })
+
 })
 
 describe('build identity evaluation', () => {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reconcile bounded attention retention with captured discussion contexts",
+  "replay": {"status": "none", "detail": "No history replay or rewrite."},
+  "schema": {"status": "none", "detail": "No storage format or migration changes."},
+  "rules": {"status": "none", "detail": "Candidate-seat enumeration accepts context-bearing source rows. Main's noncandidate subject removal and roster-owned delivery cleanup remain intact; discussion context capture and equality remain intact."},
+  "compatibility": {"status": "none", "detail": "Mechanical integration of main retention bounds with the context-bearing attention source tuple."},
+  "downtime": {"status": "none", "detail": "No deployment."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No recovery procedure changes."}
+}
