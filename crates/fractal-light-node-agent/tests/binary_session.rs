@@ -3,6 +3,10 @@
 //! missing PTY executable, relaxes native admission, or substitutes logical retirement.
 #![cfg(target_os = "linux")]
 
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 mod common;
 
 use std::{collections::{BTreeMap, BTreeSet}, fs::{self, OpenOptions}, io::Write as _, net::SocketAddr,

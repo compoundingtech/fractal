@@ -1,6 +1,11 @@
 //! Real operator-file and executable boundaries. No native backend is launched here.
 
 #[cfg(unix)]
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
+#[cfg(unix)]
 mod common;
 #[cfg(unix)]
 mod unix {
