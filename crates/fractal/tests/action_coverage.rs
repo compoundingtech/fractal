@@ -757,6 +757,7 @@ async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
 struct Daemon {
     root: tempfile::TempDir,
     state: AppState,
+    thread_writes: bool,
     server: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
@@ -778,6 +779,7 @@ impl Daemon {
         let mut daemon = Self {
             root,
             state,
+            thread_writes: false,
             server: None,
         };
         daemon.serve().await;
@@ -867,6 +869,9 @@ impl Daemon {
         assert!(server.await.unwrap_err().is_cancelled());
         std::fs::remove_file(self.socket()).unwrap();
         self.state = Self::state(self.root.path(), &self.state.node);
+        if self.thread_writes {
+            self.state.store.configure_thread_write_rollout([]);
+        }
         self.serve().await;
     }
 
@@ -997,6 +1002,7 @@ impl Daemon {
             .unwrap_or_else(|error| panic!("{kind} replay: {error}"));
         let replay = serde_json::to_value(replay.value).unwrap();
         assert_eq!(replay["affected_ids"], accepted["affected_ids"], "{kind}");
+        assert_eq!(replay["operation_id"], accepted["operation_id"], "{kind}");
         assert_eq!(
             self.store().index().unwrap(),
             index,
@@ -1114,6 +1120,9 @@ async fn dispatch(
         "session.import" => session_import, "terminal.attach" => terminal_attach,
         "terminal.create" => terminal_create, "terminal.detach" => terminal_detach,
         "terminal.end" => terminal_end, "terminal.input" => terminal_input, "terminal.resize" => terminal_resize,
+        "thread.start" => thread_start, "thread.reply" => thread_reply, "thread.read" => thread_read,
+        "thread.mark-unread" => thread_mark_unread, "thread.clear-unread" => thread_clear_unread,
+        "thread.rename" => thread_rename, "thread.close" => thread_close, "thread.reopen" => thread_reopen,
         "work.ask" => work_ask, "work.cancel-ask" => work_cancel_ask,
         "work.claim" => work_claim, "work.complete" => work_complete,
         "work.done" => work_done, "work.fail" => work_fail, "work.progress" => work_progress,
@@ -1534,6 +1543,178 @@ mission "example/attention-authored" state="ready" {
     assert!(work.person_answers.is_empty());
     assert!(attention_row(&daemon, PERSON, &own_dismiss).await.is_some());
     assert!(asker_notices(&daemon, &own_dismiss).is_empty());
+}
+
+/// Topic actions cross the real typed Unix boundary and a fresh disk-backed daemon for
+/// stale refusal, first acceptance and exact retry. Replies never reopen a closed topic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn topic_thread_actions_survive_stale_fences_and_restarts() {
+    use fractal_daemon::store::{thread_delivery, thread_metadata};
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    // This private one-member world has no older readers. Reapply its verified startup
+    // attestation after every restart, without changing other action fixtures' gates.
+    daemon.thread_writes = true;
+    daemon.store().configure_thread_write_rollout([]);
+    daemon.worker();
+    let ask = ask_from_worker(&daemon, PERSON, "topic-start", json!({})).await;
+    let source = attention_row(&daemon, PERSON, &ask).await.unwrap();
+    let thread = "thread/action-coverage";
+    let fence = daemon.fence(PERSON).await;
+    let started = daemon.exercise(PERSON, "thread.start", json!({
+        "target_id": thread, "agent_id": WORKER,
+        "origin": {"source_id": ask, "episode": source["episode"]},
+        "title": "Worker checks", "content": "Which checks passed?",
+    }), fence).await;
+    let first = started["affected_ids"][1].as_str().unwrap().to_owned();
+    let created = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(created.title, "Worker checks");
+    assert_eq!(created.agent_id, WORKER);
+    let creation = daemon.store().claims_for(thread, Some("thread.created")).unwrap();
+    assert_eq!(creation.len(), 1);
+    assert_eq!(creation[0].body["fields"]["origin_source"], ask);
+    assert_eq!(creation[0].body["fields"]["origin_episode"], source["episode"]);
+
+    let mut fence = daemon.fence(PERSON).await;
+    fence.subject_revisions.insert(thread.into(), created.revision);
+    daemon.exercise(PERSON, "thread.rename", json!({
+        "target_id": thread, "title": "Reviewed worker checks", "title_revision": created.title_revision,
+    }), fence).await;
+    let renamed = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(renamed.title, "Reviewed worker checks");
+    let mut fence = daemon.fence(PERSON).await;
+    fence.subject_revisions.insert(thread.into(), renamed.revision);
+    daemon.exercise(PERSON, "thread.close", json!({"target_id": thread}), fence).await;
+    let closed = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(closed.state, fractal_client::ThreadState::Closed);
+
+    // Seed a real admitted incoming reply, so thread.read acknowledges a rendered
+    // incoming message rather than exercising an empty or outgoing-only no-op.
+    let incoming = "message/topic-coverage-incoming";
+    thread_delivery::append_reply(daemon.store(), &ClaimInput {
+        subject: incoming.into(), kind: "message.sent".into(), actor: Some(WORKER.into()),
+        fields: BTreeMap::from([
+            ("thread_id".into(), json!(thread)), ("from".into(), json!(WORKER)),
+            ("to".into(), json!(PERSON)), ("content".into(), json!("The worker test passed.")),
+            ("thread_quote_id".into(), json!(first)), ("status".into(), json!("sent")),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: Some("topic-incoming".into()),
+    }, thread_metadata::PersonAuthority::BoundAgent { actor: WORKER }, None).unwrap();
+    let fence = daemon.fence(PERSON).await;
+    let replied = daemon.exercise(PERSON, "thread.reply", json!({
+        "target_id": thread, "content": "Thanks; keep this thread closed.", "thread_quote_id": incoming,
+    }), fence).await;
+    let reply = replied["affected_ids"][1].as_str().unwrap();
+    let sent = daemon.store().claims_for(reply, Some("message.sent")).unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].body["fields"]["thread_quote_id"], incoming);
+    let still_closed = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(still_closed.state, fractal_client::ThreadState::Closed);
+    assert_eq!(still_closed.revision, closed.revision);
+
+    let fence = daemon.fence(PERSON).await;
+    let read = daemon.exercise(PERSON, "thread.read", json!({
+        "target_id": thread, "through_message_id": incoming, "seen_message_ids": [incoming],
+    }), fence).await;
+    assert_eq!(read["affected_ids"], json!([incoming]));
+    let reads = daemon.store().claims_for(incoming, Some("message.read")).unwrap();
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].actor.as_deref(), Some(PERSON));
+    let mut fence = daemon.fence(PERSON).await;
+    fence.subject_revisions.insert(thread.into(), closed.revision);
+    daemon.exercise(PERSON, "thread.reopen", json!({"target_id": thread}), fence).await;
+    let reopened = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(reopened.state, fractal_client::ThreadState::Open);
+    assert_eq!(reopened.title, "Reviewed worker checks");
+    let timeline = thread_metadata::mixed_timeline(daemon.store(), PERSON, thread, None, None, 50).unwrap();
+    let events = serde_json::to_value(timeline).unwrap();
+    let items = events["items"].as_array().unwrap();
+    let rename = items.iter().find(|event| event["kind"] == "thread.renamed").unwrap();
+    assert_eq!(rename["previous_title"], "Worker checks");
+    assert_eq!(rename["title"], "Reviewed worker checks");
+    for kind in ["thread.renamed", "thread.closed", "thread.reopened"] {
+        assert_eq!(items.iter().filter(|event| event["kind"] == kind).count(), 1, "{kind}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thread_unread_actions_survive_stale_fences_and_restarts() {
+    use fractal_daemon::store::{thread_delivery, thread_metadata};
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.thread_writes = true;
+    daemon.store().configure_thread_write_rollout([]);
+    daemon.worker();
+    let thread = "thread/unread-restart-coverage";
+    let incoming = "message/unread-restart-anchor";
+    thread_metadata::apply(
+        daemon.store(), PERSON, thread, "coverage:unread-thread-create",
+        thread_metadata::Edit::Create { agent: WORKER, title: "Return after restart" },
+    ).unwrap();
+    thread_delivery::append_reply(daemon.store(), &ClaimInput {
+        subject: incoming.into(), kind: "message.sent".into(), actor: Some(WORKER.into()),
+        fields: BTreeMap::from([
+            ("thread_id".into(), json!(thread)), ("from".into(), json!(WORKER)),
+            ("to".into(), json!(PERSON)), ("content".into(), json!("An unread anchor.")),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: Vec::new(), expected_subject: None,
+        idempotency_key: Some("coverage:unread-anchor-message".into()),
+    }, thread_metadata::PersonAuthority::BoundAgent { actor: WORKER }, None).unwrap();
+    let before = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(before.unread, Some(true));
+    assert!(before.unread_reminder.is_none());
+    let history = serde_json::to_value(
+        thread_metadata::mixed_timeline(daemon.store(), PERSON, thread, None, None, 50).unwrap(),
+    ).unwrap();
+
+    let fence = daemon.fence(PERSON).await;
+    let marked = daemon.exercise(PERSON, "thread.mark-unread", json!({
+        "target_id": thread, "anchor_message_id": incoming, "observed_marks": [],
+    }), fence).await;
+    // `exercise` compares operation IDs, affected IDs and the store index across a
+    // full restart and identical-key replay. Require a real operation, not null == null.
+    assert!(!marked["operation_id"].as_str().unwrap().is_empty());
+    assert_eq!(marked["affected_ids"], json!([thread]));
+    let marked_summary = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(marked_summary.unread, Some(true));
+    let reminder = marked_summary.unread_reminder.unwrap();
+    assert_eq!(reminder.anchor_message_id, incoming);
+    assert_eq!(reminder.marks.len(), 1);
+    assert_eq!(reminder.marks[0].anchor_message_id, incoming);
+    // The observed mark comes from Summary, never the action receipt or a claim ID.
+    let observed_mark = reminder.marks[0].mark_id.clone();
+    let marks = daemon.store().claims_for(thread, Some(fractal_schema::threads::UNREAD_MARKED)).unwrap();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(Some(observed_mark.as_str()), marks[0].operation_id.as_deref());
+    daemon.restart().await;
+    let persisted = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(persisted.unread_reminder, Some(reminder));
+
+    let fence = daemon.fence(PERSON).await;
+    let cleared = daemon.exercise(PERSON, "thread.clear-unread", json!({
+        "target_id": thread, "observed_marks": [observed_mark],
+    }), fence).await;
+    assert!(!cleared["operation_id"].as_str().unwrap().is_empty());
+    assert_eq!(cleared["affected_ids"], json!([thread]));
+    let cleared_summary = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert!(cleared_summary.unread_reminder.is_none());
+    assert_eq!(cleared_summary.unread, Some(true));
+    daemon.restart().await;
+    assert_eq!(daemon.client(PERSON).thread_get(thread).await.unwrap().value, cleared_summary);
+    assert_eq!(
+        serde_json::to_value(
+            thread_metadata::mixed_timeline(daemon.store(), PERSON, thread, None, None, 50).unwrap(),
+        ).unwrap(),
+        history,
+    );
+    assert!(daemon.store().claims_for(incoming, Some("message.read")).unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

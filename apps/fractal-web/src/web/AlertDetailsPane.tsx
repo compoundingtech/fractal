@@ -1,4 +1,5 @@
 import { markdownInline } from '@fractal/client/markdown'
+import type { Attention } from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -13,16 +14,19 @@ import { useAlertAnswersStore } from '../conversation/alerts/alertAnswers.ts'
 import { AnswerAlert } from '../conversation/alerts/AnswerAlert.tsx'
 import { PromptAlert } from '../conversation/alerts/PromptAlert.tsx'
 import { useAlertAnswers } from '../conversation/alerts/useAlertAnswers.ts'
+import { useAutoResolved } from '../conversation/alerts/useAutoResolved.ts'
 import { useNow } from '../data/react.tsx'
+import { credentialExpiredMessage, credentialExpiredTitle } from '../data/source.ts'
+import { LiveInboxThreads, LiveResolvedInboxThreads } from '../threads/LiveThreads.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { alertsTabRows } from './alertsTab.ts'
 
 const isOpenableRef = (ref: string): boolean => /^(?:doc|agent|mission)\//.test(ref)
 
 /**
- * One alert as the main area's content: the same decision card at its full density. Answering advances to the next
- * alert at once, before the server replies, as the Fractal terminal UI does; a refused answer returns to the list
- * without taking the person off what they moved on to.
+ * One alert as the main area's content: the same decision card at its full density, with the threads about this exact
+ * Inbox source below it. Answering advances to the next alert at once, before the server replies, as the Fractal
+ * terminal UI does; a refused answer returns to the list without taking the person off what they moved on to.
  */
 export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBack }: {
   readonly id: string
@@ -37,12 +41,20 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
   const touch = React.useContext(NarrowLayoutContext)
   const now = useNow()
   const store = useAlertAnswersStore()
-  const { feed, onAct, onAnswer } = useAlertAnswers(ux)
+  const { feed, onAct, onAnswer, paused } = useAlertAnswers(ux)
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const open = rows.filter((row) => !store.hidden(row.item))
   const row = open.find((each) => each.id === id)
   const records = [...store.getSnapshot().pending.values()]
   const answeredHere = store.getSnapshot().pending.has(id)
+  const { read: autoResolved } = useAutoResolved()
+  const resolvedAsk = autoResolved?._tag === 'Observed' ? autoResolved.asks.find(ask => `auto-resolved:${ask.resolution_id}` === id) : undefined
+  // Retain only the selected card's exact opening, not a new inventory of completed sources.
+  const retained = React.useRef<Attention | undefined>(undefined)
+  const current = feed._tag === 'Observed' ? feed.value.find(item => item.id === id) : undefined
+  const answered = records.find(record => record.item.id === id)?.item
+  if (current !== undefined || answered !== undefined) retained.current = current ?? answered
+  const resolved = row === undefined && retained.current?.id === id ? retained.current : undefined
   const card = React.useRef<HTMLElement>(null)
   const advance = () => {
     const at = open.findIndex((each) => each.id === id)
@@ -72,12 +84,26 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
         {records.map((record) => <DecisionCard key={record.item.id} density="row" data={{ 'data-answer-phase': record.phase }} label={`Answered: ${record.item.title}`} meta={[]} heading={record.item.title} resolved={`You answered ${record.label}`}
           {...(record.phase === 'confirmed' ? {} : { status: { tone: 'progress' as const, text: record.phase === 'sending' ? 'Sending…' : 'Waiting for Fractal to clear it…' } })} />)}
         {feed._tag === 'Waiting' ? <SystemNotice kind="loading" title="Loading alert" />
-          : feed._tag === 'Unavailable' ? <SystemNotice kind="empty" title="Alerts could not be loaded" detail="Reconnect and try again" />
+          // Reconnecting cannot fix a refusal: only a failed read is worth another try.
+          : feed._tag === 'Unavailable' ? feed.reason === 'unauthorized' ? <SystemNotice kind="error" title={credentialExpiredTitle} detail={credentialExpiredMessage} />
+            : feed.reason === 'ungranted' ? <SystemNotice kind="error" title="Read access to alerts has not been granted" />
+              : feed.reason === 'unsupported' ? <SystemNotice kind="empty" title="This connection does not support alerts" />
+                : <SystemNotice kind="empty" title="Alerts could not be loaded" detail="Reconnect and try again" />
             : row !== undefined
-              ? row.item.attention_kind === 'harness-prompt'
-                ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} {...(onAnswer === undefined ? {} : { onAnswer })} />
-                : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} {...(onAct === undefined ? {} : { onAct })} />
-              : <div {...stylex.props(styles.gone)}>
+              ? <>
+                {row.item.attention_kind === 'harness-prompt'
+                  ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} context="Inbox" paused={paused === true} {...(onAnswer === undefined ? {} : { onAnswer })} />
+                  : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} context="Inbox" paused={paused === true} {...(onAct === undefined ? {} : { onAct })} />}
+                <LiveInboxThreads alert={row.item} onOpenThread={onOpenRef} />
+              </>
+              : resolvedAsk !== undefined ? <>
+                <DecisionCard density="full" label={resolvedAsk.title} meta={[]} heading={resolvedAsk.title}
+                  resolved={resolvedAsk.default_answer === undefined ? 'Resolved at its deadline' : `Default applied: ${resolvedAsk.default_answer.label}`} />
+                <LiveResolvedInboxThreads sourceId={resolvedAsk.target_id} episode={resolvedAsk.episode} title={resolvedAsk.title} onOpenThread={onOpenRef} />
+              </> : resolved !== undefined ? <>
+                <DecisionCard density="full" label={resolved.title} meta={[]} heading={resolved.title} resolved="No longer open" />
+                <LiveInboxThreads alert={resolved} onOpenThread={onOpenRef} />
+              </> : <div {...stylex.props(styles.gone)}>
                 <h2 {...stylex.props(styles.goneTitle)}>{answeredHere ? 'All answered' : 'No longer open'}</h2>
                 {next === undefined
                   ? <p {...stylex.props(styles.goneText)}>Nothing else needs you.</p>

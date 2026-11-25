@@ -20,6 +20,7 @@ import * as Schema from 'effect/Schema'
 import type { MissionView, ProposedMissionFields } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { isWaitingForAnswer } from './attention.ts'
+import { agentDisplayName } from './agentName.ts'
 import type { Agent, Fleet, Host, Known } from './source.ts'
 
 /** A goal shows on one-line rows and hover facts: its words, without Markdown markers. */
@@ -59,6 +60,20 @@ const activityOf = (agent: DecodedAgent): Agent['activity'] => {
     return harnessState
   if (agent.state === 'running' || agent.state === 'starting') return 'working'
   return 'idle'
+}
+
+/**
+ * The seat's own word on its turn, unlike `activity`, which reads a running seat as working. As the shared
+ * Rust agent model reads it, only harness `working` is a turn in progress; an idle, waiting, blocked or
+ * logged-out harness, or a seat that is not running, holds none. Anything else (an indeterminate or
+ * unrecognized report, or a running seat without one) is unknown.
+ */
+const turnOf = (agent: DecodedAgent): Agent['turn'] => {
+  const harnessState = Option.getOrUndefined(agent.harness_state)
+  if (harnessState === 'working') return 'active'
+  if (harnessState === 'idle' || harnessState === 'waiting' || harnessState === 'blocked' || harnessState === 'unauthenticated') return 'inactive'
+  if (harnessState !== undefined || typeof agent.state !== 'string' || agent.state === 'running' || agent.state === 'starting') return undefined
+  return 'inactive'
 }
 
 const statusOf = (agent: DecodedAgent): string => {
@@ -118,17 +133,19 @@ const agentFromRow = (row: DecodedAgent): Agent => {
       : undefined
   const lastActivityAt = Option.getOrUndefined(row.last_activity_at)
   const lastProseAt = Option.getOrUndefined(row.last_prose_at)
+  const turn = turnOf(row)
   return {
     ref: row.id,
     terminal: terminalSubjectForAgent(row.id),
     ...(row.runtime_ids.length === 0 ? { terminalDisabledReason: 'This agent has no terminal.' } : {}),
     runtimeKey: row.runtime_ids.join(' '),
-    name: row.name,
+    name: agentDisplayName({ id: row.id, name: row.name }),
     lifecycle: lifecycleOf(row),
     host: hostName(row),
     ...(harness === undefined ? {} : { harness }),
     driver: classifySubagentDriver(driver === undefined ? undefined : leafText(driver)),
     activity: activityOf(row),
+    ...(turn === undefined ? {} : { turn }),
     status: statusOf(row),
     state: leafText(row.state),
     ...(description === undefined ? {} : { description }),
@@ -306,6 +323,7 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   a.driver?._tag === b.driver?._tag &&
   a.driver?.name === b.driver?.name &&
   a.activity === b.activity &&
+  a.turn === b.turn &&
   a.status === b.status &&
   a.state === b.state &&
   a.description === b.description &&

@@ -244,6 +244,25 @@ fn lower(screen: &str) -> String {
     screen.to_lowercase()
 }
 
+/// These agents are declared but never executed: there is no runtime/session to load.
+/// Count their actual view headers, not raw IDs (which the TUI deliberately does not show)
+/// or their names in the caller's notification, tab title, or details panel.
+fn starting_agent_panes(screen: &str, name: &str) -> usize {
+    screen.lines().map(|line| {
+        line.split_whitespace().collect::<Vec<_>>().windows(2)
+            .filter(|words| *words == [name, "starting"]).count()
+    }).sum()
+}
+
+#[test]
+fn starting_agent_pane_count_distinguishes_side_by_side_headers_from_name_only_noise() {
+    let one = "~ Gardener\nAssistant opened Gardener\n◌ Gardener  starting ? · seat-one";
+    assert_eq!(starting_agent_panes(one, "Gardener"), 1);
+    let two = "◌ Gardener  starting ? · seat-one │ ◌ Gardener  starting ? · seat-one";
+    assert_eq!(starting_agent_panes(two, "Gardener"), 2);
+    assert_eq!(starting_agent_panes("~ Gardener │ Assistant opened Gardener", "Gardener"), 0);
+}
+
 fn said(output: &Output) -> String {
     format!(
         "{}{}",
@@ -300,7 +319,7 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
     assert!(said(&output).contains("focus stayed"), "{}", said(&output));
     let screen = tui
         .wait("the agent's split", |screen| {
-            lower(screen).contains("agent/seat-one.gardener")
+            starting_agent_panes(screen, "Gardener") == 1
         })
         .await;
     // The person is told why the screen changed, by the seat's own name.
@@ -327,7 +346,7 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
         })
         .await;
     assert!(
-        lower(&screen).contains("agent/seat-one.gardener"),
+        starting_agent_panes(&screen, "Gardener") == 1,
         "the agent stays open beside the mission:\n{screen}"
     );
 
@@ -341,10 +360,8 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
     assert!(again.status.success(), "{}", said(&again));
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
-        lower(&tui.screen())
-            .matches("agent/seat-one.gardener")
-            .count(),
-        lower(&screen).matches("agent/seat-one.gardener").count(),
+        starting_agent_panes(&tui.screen(), "Gardener"),
+        starting_agent_panes(&screen, "Gardener"),
         "the same pane, not another"
     );
 
@@ -423,8 +440,8 @@ async fn an_alert_a_seat_raises_for_itself_shows_above_the_input_and_is_dismisse
         .await;
     let shown = seat_opens(root.path(), &socket, &["agent/seat-one.assistant"]).await;
     assert!(shown.status.success(), "{}", said(&shown));
-    tui.wait("the agent's conversation", |screen| {
-        lower(screen).contains("agent/seat-one.assistant")
+    tui.wait("the agent's view", |screen| {
+        starting_agent_panes(screen, "Assistant") == 1
     })
     .await;
 

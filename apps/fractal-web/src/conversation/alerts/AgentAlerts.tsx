@@ -43,12 +43,14 @@ const useRoom = (): readonly [React.RefCallback<HTMLElement>, number | undefined
  * The alerts of an agent's conversation, above its composer: one focused card, with a pager when there are several.
  * Answering advances to the next at once; a refused answer comes back without moving the person off what they are on.
  */
-export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, onOpenDocument }: {
+export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, paused = false, onOpenDocument }: {
   readonly alerts: readonly Native.Attention[]
   /** Keeps the record of an answer in view after the feed has dropped its alert. */
   readonly agentRef?: string
   readonly onAnswer?: Answer
   readonly onAct?: Act
+  /** Disconnected, or grants not read yet: the cards wait instead of reading as read-only. */
+  readonly paused?: boolean
   readonly onOpenDocument?: (ref: string) => void
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
@@ -89,7 +91,7 @@ export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, onOpenDocument 
     onPrevious: () => setCurrentId(open[index - 1]?.id),
     onNext: () => setCurrentId(open[index + 1]?.id),
   } : undefined
-  const shared = { density: folded ? 'row' as const : 'docked' as const, onFold: () => setFoldChoice(!folded), onBegin, focusRef: card, ...(pager === undefined ? {} : { pager }), ...(maxBlockSize === undefined ? {} : { maxBlockSize }) }
+  const shared = { density: folded ? 'row' as const : 'docked' as const, paused, onFold: () => setFoldChoice(!folded), onBegin, focusRef: card, ...(pager === undefined ? {} : { pager }), ...(maxBlockSize === undefined ? {} : { maxBlockSize }) }
   return (
     <div ref={roomRef} {...stylex.props(styles.pinned)} data-testid="conversation-alerts">
       <div {...stylex.props(styles.strip)}>
@@ -108,9 +110,9 @@ export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, onOpenDocument 
 
 /** The agent's alerts from the active data source, answered through its ports. */
 export const LiveAgentAlerts = ({ agentRef, ux, onOpenDocument }: { readonly agentRef: string; readonly ux?: UxTelemetry; readonly onOpenDocument?: (ref: string) => void }): React.ReactNode => {
-  const { feed, onAct, onAnswer } = useAlertAnswers(ux)
+  const { feed, onAct, onAnswer, paused } = useAlertAnswers(ux)
   const alerts = React.useMemo(() => (feed._tag === 'Observed' ? conversationAlerts(feed.value, agentRef) : []), [feed, agentRef])
-  return <AgentAlerts alerts={alerts} agentRef={agentRef} {...(onAct === undefined ? {} : { onAct })} {...(onAnswer === undefined ? {} : { onAnswer })} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />
+  return <AgentAlerts alerts={alerts} agentRef={agentRef} paused={paused === true} {...(onAct === undefined ? {} : { onAct })} {...(onAnswer === undefined ? {} : { onAnswer })} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />
 }
 
 const styles = stylex.create({
