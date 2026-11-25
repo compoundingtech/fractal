@@ -456,7 +456,10 @@ pub fn github_rows_from_declarations<'a>(
         if entry.revision != declaration.revision { *entry = Tracked::new(declaration); }
         let Ok(objective) = &entry.objective else { continue; };
         if !objective.declarable() || !matches!(objective.indicator, Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_)) { continue; }
-        let row = github::row(store, state_dir, objective, &declaration.revision, now);
+        let mut row = github::row(store, state_dir, objective, &declaration.revision, now);
+        if let Some(goal) = objective.targets.first().and_then(|target| target.goal) {
+            row["goal"] = json!(goal);
+        }
         entry.ids = if objective.on_breach.is_some() { BTreeSet::from([objective.name.clone()]) } else { BTreeSet::new() };
         rows.push(row);
     }
@@ -943,6 +946,11 @@ impl Tracked {
             count.event,
         );
         let mut row = json!({ "id": id, "kind": "objective", "about": about, "target": target, "window": span });
+        if part.is_none()
+            && let Some(goal) = objective.target("per-hour", false).and_then(|target| target.goal)
+        {
+            row["goal"] = json!(goal);
+        }
         if !self.seen {
             row["current"] = json!("no events yet");
             row["remaining_percent"] = Value::Null;
@@ -1135,6 +1143,11 @@ impl Context<'_> {
             "id": id, "kind": "objective", "about": about, "target": target, "window": window,
         });
         let mut row = base;
+        if let Some(goal) = self.objective.targets.iter()
+            .find(|target| target.percentile() == Some(p)).and_then(|target| target.goal)
+        {
+            row["goal"] = json!(goal);
+        }
         let Some(value) = (n > 0).then(|| nearest_rank(&population, p)) else {
             row["current"] = json!("no samples");
             row["remaining_percent"] = Value::Null;

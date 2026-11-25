@@ -101,6 +101,43 @@ fn a_change_closes_at_its_last_expected_member_and_rows_have_the_base_keys() {
 }
 
 #[test]
+fn display_goal_does_not_change_verdict_burn_budget_or_attention_inputs() {
+    let source = declaration("", "7d", "");
+    let plain = store_with(&source);
+    let aspirational = store_with(&source.replace("within=\"60s\"", "within=\"60s\" goal=1000"));
+    for store in [&plain, &aspirational] {
+        change(store, "a", 10 * MINUTE, &["member"], &[("member", 55)], "routine");
+        change(store, "b", 10 * MINUTE, &["member"], &[("member", 130)], "routine");
+    }
+    let without = evaluate(&plain);
+    let with = evaluate(&aspirational);
+    for (id, mut expected) in without {
+        let mut actual = with[&id].clone();
+        assert!(expected.get("goal").is_none());
+        if id.ends_with("/p50") {
+            assert_eq!(actual.as_object_mut().unwrap().remove("goal"), Some(json!(1000.0)));
+        } else {
+            assert!(actual.get("goal").is_none());
+        }
+        // The declaration revision in the explanation changes, but every decision input,
+        // including verdict and remaining budget (and any burn fields), is identical.
+        expected.as_object_mut().unwrap().remove("explain");
+        actual.as_object_mut().unwrap().remove("explain");
+        assert_eq!(actual, expected, "{id}");
+    }
+}
+
+#[test]
+fn count_goal_is_served_for_the_total_only_even_before_events() {
+    let store = store_with(&count_declaration("    label \"repository\"\n", "1h", "min=5 goal=20", ""));
+    assert_eq!(evaluate(&store)[THROUGHPUT]["goal"], 20.0);
+    merged(&store, "a", 10 * MINUTE, json!({"repository": "example"}));
+    let rows = evaluate(&store);
+    assert_eq!(rows[THROUGHPUT]["goal"], 20.0);
+    assert!(rows["factory/work-throughput{repository=example}"].get("goal").is_none());
+}
+
+#[test]
 fn an_open_change_over_target_counts_at_its_age_and_a_younger_one_is_left_out() {
     let store = store_with(&declaration("", "7d", ""));
     change(&store, "a", 10 * MINUTE, &["hosta", "hostb"], &[("hosta", 40), ("hostb", 55)], "routine");
@@ -1309,6 +1346,37 @@ objective "delivery/selected" {
     assert_ne!(all.revision, selected.revision);
     let Indicator::GithubMergedCount(config) = selected.objective.unwrap().indicator else { panic!() };
     assert_eq!(config.author_logins, ["example-bot"]);
+}
+
+#[test]
+fn native_github_merged_count_goal_is_served_without_changing_the_target_or_verdict() {
+    let source = r#"version 2
+objective "factory/merged-prs" {
+  about "Merged pull requests"
+  indicator "github-merged-count" {
+    source "github-source/example"
+    roster "github-scope/example"
+    timezone "UTC"
+    cut "now"
+    measurement "targeted"
+  }
+  target "per-hour" min=5
+}"#;
+    let state = tempfile::tempdir().unwrap();
+    let plain = store_with(source);
+    let with_goal = store_with(&source.replace("min=5", "min=5 goal=20"));
+    let mut expected = github_rows(&plain, state.path(), *NOW).unwrap().remove(0);
+    let mut actual = github_rows(&with_goal, state.path(), *NOW).unwrap().remove(0);
+    assert_eq!(actual["id"], "factory/merged-prs");
+    assert_eq!(actual.as_object_mut().unwrap().remove("goal"), Some(json!(20.0)));
+    assert!(expected.get("goal").is_none());
+    // Source absence stays unknown; the goal must not manufacture coverage or a verdict.
+    assert_eq!(actual["status"], "no-data");
+    for row in [&mut expected, &mut actual] {
+        row.as_object_mut().unwrap().remove("explain");
+        row.as_object_mut().unwrap().remove("declaration_revision");
+    }
+    assert_eq!(actual, expected);
 }
 
 #[test]

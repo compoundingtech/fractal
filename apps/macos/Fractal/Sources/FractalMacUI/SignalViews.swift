@@ -41,7 +41,8 @@ struct SignalsSection: View {
 }
 
 /// One signal: its status symbol (shape, not only color) and title, then its value large with
-/// the subtitle beside it. A trailing strip shows the worst objective's last 24 hours when that
+/// the subtitle beside it, or `· target X · goal Y` when the worst objective declares a goal.
+/// A trailing strip shows the worst objective's last 24 hours when that
 /// history was read. Opens the signal's objectives.
 private struct SignalTile: View {
   let signal: Signal
@@ -64,15 +65,20 @@ private struct SignalTile: View {
         }
         HStack(alignment: .firstTextBaseline, spacing: 4) {
           Text(signal.value).font(.title3.weight(.semibold)).monospacedDigit()
-          Text(signal.subtitle).font(.subheadline).foregroundStyle(.secondary).truncationMode(.middle)
+          if let goalDetail = signal.goalDetail {
+            Text("· \(goalDetail)").font(.subheadline).foregroundStyle(.secondary).truncationMode(.tail)
+          } else {
+            Text(signal.subtitle).font(.subheadline).foregroundStyle(.secondary).truncationMode(.middle)
+          }
         }
       }
       .lineLimit(1)
     }
     .buttonStyle(.signalTile)
-    .help("\(signal.title): \(signal.value) · \(signal.subtitle)")
+    .help("\(signal.title): \(signal.value) · \(signal.goalDetail.map { "\($0) · " } ?? "")\(signal.subtitle)")
     .accessibilityLabel(signal.title)
-    .accessibilityValue("\(signal.value), \(signal.subtitle), \(SignalTone.word(signal.tone))")
+    .accessibilityValue(
+      "\(signal.value), \(signal.goalDetail.map { "\($0), " } ?? "")\(signal.subtitle), \(SignalTone.word(signal.tone))")
     .accessibilityHint("Opens its objectives")
     .focusOnArrival(model.backFrom == .signal(signal.id))
   }

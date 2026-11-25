@@ -1161,6 +1161,9 @@ pub struct SloRow {
     pub account: Option<String>,
     pub about: String,
     pub target: String,
+    /// An objective's declared numeric goal; absent for budgets and older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<f64>,
     pub current: String,
     pub window: String,
     pub remaining_percent: Option<f64>,

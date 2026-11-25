@@ -338,7 +338,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
       target: row.target, current: row.current, window: row.window, status: row.status,
       explain: row.explain, serverTone: row.tone, remainingPercent: row.remainingPercent,
       measuredAt: row.measuredAtUnixMS.flatMap(date(ms:)), resetsAt: row.resetsAtUnixMS.flatMap(date(ms:)),
-      runsOutAt: row.runsOutAtUnixMS.flatMap(date(ms:)))
+      runsOutAt: row.runsOutAtUnixMS.flatMap(date(ms:)), goal: row.goal)
   }
 
   static func date(ms: UInt64) -> Date? {
