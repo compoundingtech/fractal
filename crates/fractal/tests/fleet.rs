@@ -11033,10 +11033,11 @@ async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_
     // This fixture tests mixed-store reads, not the old reconciler's scheduling decision.
     for (subject, _) in &first {
         let message: Value = a.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
-        let fields = ["from", "to", "content", "status", "title", "in_reply_to", "tags"]
+        let mut fields: BTreeMap<String, Value> = ["from", "to", "content", "title", "in_reply_to", "tags"]
             .into_iter().filter_map(|name| message.get(name)
                 .filter(|value| !value.is_null()).map(|value| (name.to_owned(), value.clone())))
             .collect();
+        fields.insert("status".into(), json!("sent"));
         let _: Value = o.client().post("/v1/claims", &ClaimInput {
             subject: subject.clone(), kind: "message.sent".into(),
             actor: Some(message["from"].as_str().unwrap().to_owned()),
