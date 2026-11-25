@@ -131,7 +131,7 @@ const readHistory = ({
   Effect.result(bounded(source.history(ledgerAccountId))).pipe(
     Effect.map((read): HistoryState => {
       if (read._tag === 'Failure')
-        return { ...state, attempt: { _tag: 'failed', reason: read.failure.reason } }
+        return { ...state, attempt: { _tag: 'failed', kind: read.failure.kind, reason: read.failure.reason } }
       const decoded = decodeHistory(read.success)
       const series =
         decoded._tag === 'ok'
@@ -139,7 +139,7 @@ const readHistory = ({
           : { _tag: 'error' as const, reason: decoded.reason }
       return series._tag === 'series'
         ? { last: { series: series.series, at: Date.now() }, attempt: { _tag: 'ok' } }
-        : { ...state, attempt: { _tag: 'failed', reason: series.reason } }
+        : { ...state, attempt: { _tag: 'failed', kind: 'incompatible', reason: series.reason } }
     }),
   )
 

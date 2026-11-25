@@ -2,6 +2,7 @@
 
 #![allow(unused_imports)]
 
+use crate::MissionsStore;
 use crate::PersonWorkStore;
 use crate::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1107,4 +1108,156 @@ fn one_agent_prompt_change_reduces_one_subject_and_retains_its_sibling() {
     assert_eq!(after.refolded_groups, 0);
     assert_eq!(serde_json::to_value(after.items.iter().find(|item| item.subject == "agent/node.second").unwrap()).unwrap(),
         serde_json::to_value(second).unwrap());
+}
+
+#[test]
+fn source_retention_is_bounded_through_completion_and_eligibility_changes() {
+    let (store, origin, mut request) = fixture();
+    let mut snapshot = store.read_snapshot(|_| {
+        store.attention_source_snapshot(None, None, &BTreeSet::new(), now_ms())
+    }).unwrap();
+    let baseline = snapshot.retained_subjects();
+    let mut asked_subjects = BTreeSet::new();
+    for turn in 0..32 {
+        if turn > 0 {
+            store.work_action(&origin.subject, "claim", &WorkRequest {
+                wait_ms: None, actor: Some(request.actor.clone()), incarnation: request.incarnation.clone(),
+                summary: None, reason: None, evidence: vec![],
+                idempotency_key: format!("retention-reclaim-{turn}"),
+            }).unwrap();
+        }
+        request.idempotency_key = format!("retention-{turn}");
+        // A new key alone reuses an equivalent completed answer; churn needs new questions.
+        request.reason = format!("Choose the release date for retention turn {turn}.");
+        let ask = store.ask_person(&request).unwrap();
+        assert!(asked_subjects.insert(ask.subject.clone()), "each turn creates a distinct ask");
+        assert_eq!(ask.status, "ready", "retention must start with a live candidate");
+        snapshot = store.read_snapshot(|_| store.attention_source_snapshot(
+            Some(&snapshot), Some(&BTreeSet::from([ask.subject.clone()])),
+            &BTreeSet::from(["work.person-asked".into()]), now_ms(),
+        )).unwrap();
+        assert_eq!(snapshot.retained_subjects(), baseline + 1);
+        // An empty live ask must retain its negative requester-declaration dependency.
+        for (kind, visible) in [("stop", false), ("agent", true)] {
+            store.connection.lock().unwrap().execute(
+                /* sqlite-large-value: allow-for-now lv-h739e49aaa3c0 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE desired SET kind=?1 WHERE subject='agent/alder.asker'", [kind],
+            ).unwrap();
+            snapshot = store.read_snapshot(|_| {
+                let now = now_ms();
+                let next = store.attention_source_snapshot(
+                    Some(&snapshot), Some(&BTreeSet::from(["agent/alder.asker".into()])),
+                    &BTreeSet::from(["intent.desired".into()]), now,
+                )?;
+                assert_eq!(next.items, store.attention_collection_snapshot(None, now)?.0);
+                Ok::<_, anyhow::Error>(next)
+            }).unwrap();
+            assert_eq!(snapshot.items.iter().any(|item| item.subject == ask.subject), visible);
+        }
+        answer(&store, &ask.subject, "person/avery", &format!("retention-answer-{turn}"));
+        snapshot = store.read_snapshot(|_| store.attention_source_snapshot(
+            Some(&snapshot), Some(&BTreeSet::from([ask.subject.clone()])),
+            &BTreeSet::from(["work.person-done".into()]), now_ms(),
+        )).unwrap();
+        assert_eq!(snapshot.retained_subjects(), baseline);
+    }
+}
+
+#[test]
+fn source_retention_prunes_non_person_undeclared_and_retired_subjects() {
+    let (store, origin, request) = fixture();
+    let ask = store.ask_person(&request).unwrap();
+    let before = store.read_snapshot(|_| store.attention_source_snapshot(
+        None, None, &BTreeSet::new(), now_ms(),
+    )).unwrap();
+    store.connection.lock().unwrap().execute(
+        /* sqlite-large-value: allow-for-now lv-h55ee5aa1b61d owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE step_runs SET assignee='agent/alder.asker' WHERE subject=?1", [&ask.subject],
+    ).unwrap();
+    store.connection.lock().unwrap().execute(
+        /* sqlite-large-value: allow-for-now lv-ha95729b63172 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE desired SET kind='stop' WHERE subject='agent/alder.asker'", [],
+    ).unwrap();
+    let after = store.read_snapshot(|_| store.attention_source_snapshot(
+        Some(&before),
+        Some(&BTreeSet::from([ask.subject, origin.subject, "agent/alder.asker".into(),
+            "agent/undeclared".into(), "step-run/undeclared".into()])),
+        &BTreeSet::from(["intent.desired".into(), "step-run.updated".into()]), now_ms(),
+    )).unwrap();
+    assert_eq!(after.retained_subjects() + 2, before.retained_subjects());
+    let mut snapshot = after;
+    let bounded = snapshot.retained_subjects();
+    let mut previous_seat = "agent/alder.asker".to_owned();
+    for turn in 0..32 {
+        let seat = format!("agent/alder.retired-{turn}");
+        store.connection.lock().unwrap().execute(
+            /* sqlite-large-value: allow-for-now lv-h4bce0ef03f59 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
+            "UPDATE desired SET subject=?1, kind='agent' WHERE subject=?2",
+            params![seat, previous_seat],
+        ).unwrap();
+        for (kind, retained) in [("agent", bounded + 1), ("stop", bounded)] {
+            store.connection.lock().unwrap().execute(
+                /* sqlite-large-value: allow-for-now lv-h174602194f79 owner=fractal_daemon::store_tests::attention_list TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE desired SET kind=?1 WHERE subject=?2", params![kind, seat],
+            ).unwrap();
+            snapshot = store.read_snapshot(|_| store.attention_source_snapshot(
+                Some(&snapshot), Some(&BTreeSet::from([seat.clone()])),
+                &BTreeSet::from(["intent.desired".into()]), now_ms(),
+            )).unwrap();
+            assert_eq!(snapshot.retained_subjects(), retained);
+        }
+        previous_seat = seat;
+    }
+}
+
+#[test]
+fn a_future_prompt_is_invalidated_by_runtime_stop_before_admission() {
+    let store = Store::open_memory("node").unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+        workspace.path().display().to_string(),
+    );
+    let intent = crate::graph::parse_intent(&source, "node").unwrap();
+    let preview = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, "future-prompt", Some("person/avery")).unwrap();
+    let seat = "agent/node.worker";
+    store.append_claim(&input(seat, "runtime.observed", Some(seat),
+        json!({"status":"running","incarnation_id":"one"}))).unwrap();
+    let admission = now_ms() + 60_000;
+    store.set_write_clock_at(admission).unwrap();
+    {
+        // Claim acceptance time alone does not date a prompt: its observed opening does.
+        let _clock = fractal_store::store::work_summaries_ivm::tests_shared_seats::freeze(admission);
+        store.append_claim(&input(seat, "harness.observed", Some(seat),
+            json!({"state":"working","driver":"claude","incarnation_id":"one",
+                "blocked_on":"human","ask":"permission","reason":"Bash",
+                "ownership_sequence":1,"transition_sequence":1}))).unwrap();
+    } // Restore the early reader clock before publishing, including on unwind.
+    let observed = store.latest_claim(seat, Some("harness.observed")).unwrap().unwrap();
+    assert_eq!(observed.body["fields"]["observed_since_ms"], json!(admission as u64));
+    store.start_attention_list_refresher().unwrap();
+    let before = refresh_and_check(&store);
+    assert_eq!(before.due_at_unix_ms, Some(admission));
+    assert!(before.rows.iter().all(|row| row["attention_kind"] != "harness-prompt"));
+    assert!(before.source_snapshot.as_deref().unwrap().candidate_seats().any(|candidate| candidate == seat));
+    store.append_claim(&input(seat, "runtime.observed", Some(seat),
+        json!({"status":"stopped","incarnation_id":"one"}))).unwrap();
+    store.read_snapshot(|index| {
+        let AttentionDelta::Subjects { subjects, kinds } = store.attention_list_delta(&before, index)? else {
+            panic!("a retained future prompt must invalidate on runtime changes");
+        };
+        assert!(subjects.contains(seat));
+        let stopped = store.attention_source_snapshot(
+            before.source_snapshot.as_deref(), Some(&subjects), &kinds, admission - 1,
+        )?;
+        let due = store.attention_source_snapshot(
+            Some(&stopped), Some(&BTreeSet::new()), &BTreeSet::new(), admission,
+        )?;
+        let (full, deadline) = store.attention_collection_snapshot(None, admission)?;
+        assert_eq!(due.items, full);
+        assert_eq!(due.valid_until, deadline);
+        assert!(due.items.iter().all(|item| item.kind != "harness-prompt"));
+        Ok(())
+    }).unwrap();
 }

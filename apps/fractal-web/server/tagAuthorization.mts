@@ -1,13 +1,12 @@
 import { request } from 'node:http'
 import { Schema } from 'effect'
 import type { GatewayOptions } from './gateway.mts'
+import { nativeEnvelope } from './nativeEnvelope.mts'
 
-const Capabilities = Schema.fromJsonString(Schema.Struct({
-  api_version: Schema.Literals(['st3.client.v0', 'fractal.client.v0']),
-  value: Schema.Struct({ kind: Schema.Literal('capabilities'), capabilities: Schema.Array(Schema.Struct({
-    id: Schema.String, state: Schema.Literals(['granted', 'ungranted', 'unavailable']),
-  })) }),
-}))
+export const NativeCapabilities = nativeEnvelope(Schema.Struct({ kind: Schema.Literal('capabilities'), capabilities: Schema.Array(Schema.Struct({
+  id: Schema.String, state: Schema.Literals(['granted', 'ungranted', 'unavailable']),
+})) }))
+const Capabilities = Schema.fromJsonString(NativeCapabilities)
 
 /** GET /v1/client/capabilities advertises every ALL_SCOPES entry, not only enabled features.
  * Source: crates/fractal-api-core/src/api/client_v0.rs (ALL_SCOPES and capabilities).

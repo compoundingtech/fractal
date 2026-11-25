@@ -4723,8 +4723,7 @@ impl Store {
                 cache_local_apply_receipt_tx(transaction,response,local_receipt,idempotency_key)
             };
         if intent.mission_runs.is_empty() {
-            self.connection.batched(apply)
-                .map_err(|error| FractalError::new("internal", error))?
+            run_fence::execute(&self.graph, None, Some(run_fence::API_TURN_BUDGET), apply)
         } else {
             self.with_all_runs_fenced(apply)
         }
@@ -9364,6 +9363,19 @@ fn resolve_mission_run_inputs(
                             )
                         })?
                 };
+                if let Some(expected) = &declaration.resource_kind {
+                    let actual: Option<String> = transaction.query_row(
+                        "SELECT CASE kind WHEN 'resource.observed' THEN json_extract(body, '$.fields.kind') WHEN 'vcs.item.state' THEN json_extract(body, '$.fields.item_kind') END FROM claims WHERE id=?1 AND subject=?2",
+                        params![claim_id, subject],
+                        |row| row.get(0),
+                    ).map_err(internal)?;
+                    if actual.as_ref() != Some(expected) {
+                        return Err(FractalError::new(
+                            "resource-input-kind-mismatch",
+                            format!("mission input `{name}` requires resource kind `{expected}`, got `{}` at {subject}@{claim_id}", actual.as_deref().unwrap_or("unknown")),
+                        ));
+                    }
+                }
                 MissionRunInput {
                     kind: MissionInputKind::Resource,
                     value: format!("{subject}@{claim_id}"),
