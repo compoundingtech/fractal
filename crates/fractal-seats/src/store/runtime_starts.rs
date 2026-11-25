@@ -1402,6 +1402,52 @@ mod tests {
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
 
     #[test]
+    fn exact_custody_rebind_preserves_capture_but_changed_session_invalidates_it() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/custody-capture";
+        let incarnation = "native-generation";
+        let mut start = operation("custody-capture", subject, None);
+        store.admit_runtime_start(&mut start, 2).unwrap();
+        store.finish_runtime_start(&start.id, &json!({
+            "incarnation": incarnation, "verification": "operation-incarnation",
+        })).unwrap();
+        let mut binding = fractal_store::store::local_sessions::LocalSession {
+            subject: subject.into(), runtime_id: subject.into(),
+            incarnation: incarnation.into(), native_incarnation: incarnation.into(),
+            terminal: true, driver: None, lifecycle: crate::model::MemberLifecycle::Service,
+            custody: fractal_store::store::local_sessions::SessionCustody::Owned,
+            start_operation: Some(start.id.clone()), invocation: None,
+        };
+        store.bind_local_session(&binding).unwrap();
+        let generation = || store.readers.get().query_row(
+            "SELECT value FROM local_runtime_start_observation_generation WHERE id=1",
+            [], |row| row.get::<_, u64>(0)).unwrap();
+        let before = generation();
+        let _capture = store.capture_runtime_observations().unwrap();
+        store.bind_local_session(&binding).unwrap();
+        assert_eq!(generation(), before, "an identical binding must not invalidate physical reads");
+        let marker = ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!(subject)),
+                ("terminal".into(), json!(true)),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("restarting_from".into(), json!(incarnation)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        };
+        assert!(store.append_reconciled_runtime_observation(&marker).unwrap().is_some());
+        assert_eq!(store.latest_actual_value(subject).unwrap().unwrap()["restarting_from"], incarnation);
+        binding.runtime_id = "different-native-session".into();
+        store.bind_local_session(&binding).unwrap();
+        assert!(generation() > before, "a changed binding must still fence captured observations");
+        let mut stale_marker = marker;
+        stale_marker.fields.insert("status".into(), json!("stopping"));
+        assert!(store.append_reconciled_runtime_observation(&stale_marker).unwrap().is_none());
+    }
+
+    #[test]
     fn legacy_native_closure_proofs_release_historical_upgrade_capacity() {
         let store = Store::open_memory("node").unwrap();
         store.connection.write().execute_batch(

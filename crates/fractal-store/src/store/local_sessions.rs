@@ -139,15 +139,17 @@ impl Store {
         }
         tx.execute(/* sqlite-large-value: allow-for-now lv-hdce8a783bfb6 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET active=0 WHERE subject=?1 AND incarnation<>?2 AND active=1",
             params![binding.subject, binding.incarnation])?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h1298428266a6 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)
+        let binding_changed = tx.execute(/* sqlite-large-value: allow-for-now lv-h1298428266a6 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_session_custody(subject,incarnation,body) VALUES(?1,?2,?3)
             ON CONFLICT(subject,incarnation) DO UPDATE SET body=excluded.body,active=1,native_retirement_verified=0
             WHERE local_session_custody.detached_by IS NULL
               AND (local_session_custody.body<>excluded.body OR local_session_custody.active<>1)",
             params![binding.subject, binding.incarnation, serde_json::to_string(binding)?])?;
         if let Some(operation) = binding.start_operation.as_deref() {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-hf7b7bef2f1d8 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h05fb3327e890 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts
                 SET body=json_set(body,'$.custody_bound',json('true'))
-                WHERE id=?1 AND subject=?2", params![operation, binding.subject])?;
+                WHERE id=?1 AND subject=?2
+                  AND (json_extract(body,'$.custody_bound') IS NOT 1 OR ?3)",
+                params![operation, binding.subject, binding_changed != 0])?;
         }
         tx.commit()?;
         Ok(())

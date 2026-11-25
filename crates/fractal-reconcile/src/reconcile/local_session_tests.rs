@@ -102,14 +102,20 @@ fn local_session_probe_releases_only_exact_natural_pty_exit() {
     *runtime.ptys.lock().unwrap() = vec![observation];
     assert!(local_session(&store, &runtime, subject, Some("wrong-expected-generation")).is_err());
     assert!(store.has_current_local_session(subject).unwrap());
+    // runtime.observed is retention class `current`: append_claim persists it
+    // to claims, not local_observations. Fail that exact durable write path.
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h790ae64f7fad owner=fractal_reconcile::reconcile::local_session_tests TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE local_observations RENAME TO unavailable_local_observations;"
+        /* sqlite-large-value: allow-for-now lv-heb59b9ddd162 owner=fractal_reconcile::reconcile::local_session_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER fail_local_session_exit BEFORE INSERT ON claims
+         WHEN NEW.kind='runtime.observed'
+         BEGIN SELECT RAISE(ABORT,'injected-exit-observation-failure'); END;"
     ).unwrap();
-    assert!(local_session(&store, &runtime, subject, None).is_err());
+    let error = local_session(&store, &runtime, subject, None).unwrap_err();
+    assert!(format!("{error:#}").contains("injected-exit-observation-failure"));
     assert!(store.has_current_local_session(subject).unwrap(),
         "an exit cannot release custody when its observation fails to persist");
+    assert!(store.latest_observation(subject, "runtime.observed").unwrap().is_none());
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hf682ac2a591a owner=fractal_reconcile::reconcile::local_session_tests TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE unavailable_local_observations RENAME TO local_observations;"
+        /* sqlite-large-value: allow-for-now lv-hc589ab4bfcab owner=fractal_reconcile::reconcile::local_session_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_local_session_exit;"
     ).unwrap();
     assert!(local_session(&store, &runtime, subject, None).is_err());
     assert!(!store.has_current_local_session(subject).unwrap());
