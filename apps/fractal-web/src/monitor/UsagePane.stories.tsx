@@ -146,7 +146,12 @@ export const Retry: Story = {
 }
 
 const detailOf = (canvas: HTMLElement) => canvas.querySelector<HTMLElement>('[data-usage-detail]')
-const accountRow = (canvas: HTMLElement, id: string) => canvas.querySelector<HTMLElement>(`[data-usage-account="${id}"]`)!
+// The detail paints a commit before the GridList builds its rows; a click on a row not there yet lands on the body.
+const accountRow = (canvas: HTMLElement, id: string) => waitFor(() => {
+  const row = canvas.querySelector<HTMLElement>(`[data-usage-account="${id}"]`)
+  expect(row).not.toBeNull()
+  return row!
+})
 
 /** The worst account opens on top with every limit; picking another row, by pointer or arrow key, changes it. */
 export const QuotaAtLimit: Story = {
@@ -160,7 +165,7 @@ export const QuotaAtLimit: Story = {
     await expect(detail.getByText('12%')).toBeVisible()
     await expect(detail.getByText('1 banked reset · expires in 6d')).toBeVisible()
     await expect(detail.getByText('Reading, 42s old')).toBeVisible()
-    await userEvent.click(accountRow(canvasElement, 'claude/alpha'))
+    await userEvent.click(await accountRow(canvasElement, 'claude/alpha'))
     await waitFor(() => expect(detailOf(canvasElement)).toHaveAttribute('data-usage-detail', 'claude/alpha'))
     await expect(within(detailOf(canvasElement)!).getAllByRole('listitem')).toHaveLength(3)
     await userEvent.keyboard('{ArrowUp}')
@@ -176,7 +181,7 @@ export const QuotaStale: Story = {
   play: async ({ canvasElement }) => {
     const usage = within(canvasElement)
     await expect(await usage.findByText('Last reading, 2h old')).toBeVisible()
-    await userEvent.click(accountRow(canvasElement, 'codex/held'))
+    await userEvent.click(await accountRow(canvasElement, 'codex/held'))
     const detail = within(detailOf(canvasElement)!)
     await expect(detail.getByText('Held reading, 3h old')).toBeVisible()
     await expect(detail.getByText('Last attempt: indeterminate 40s ago: provider answered 401')).toBeVisible()
