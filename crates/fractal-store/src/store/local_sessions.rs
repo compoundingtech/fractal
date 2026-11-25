@@ -79,8 +79,8 @@ fn retain_bound_start_reservations(connection: &Connection) -> Result<()> {
 /// Admit one unsettled custody slot under the exclusive writer, before native entry.
 /// Every start-operation kind must count its unsettled reservations here. Local
 /// dispatched producers reserve capacity until binding or proven producer closure.
-/// Completed legacy successful producers never reserved custody. Legacy unfinished
-/// or unverified producers remain conservative reservations until recovered.
+/// Unmarked legacy producers remain reserved unless positively closed or replaced
+/// by a later verified incarnation of the same subject and native runtime.
 pub fn admit_capacity(connection: &Connection, operation: Option<&str>) -> Result<()> {
     // Backfill retained bindings before reclamation, including pre-marker starts.
     retain_bound_start_reservations(connection)?;
@@ -98,7 +98,18 @@ pub fn admit_capacity(connection: &Connection, operation: Option<&str>) -> Resul
              WHERE dispatched=1 AND (?1 IS NULL OR id<>?1)
                AND json_extract(body,'$.custody_bound') IS NOT 1
                AND (json_extract(body,'$.custody_reserved')=1 OR finished=0
-                    OR json_extract(result,'$.verification') IS NOT 'operation-incarnation')
+                    OR json_extract(result,'$.verification') IS NOT 'operation-incarnation'
+                    OR NOT EXISTS(SELECT 1 FROM local_runtime_starts AS newer
+                        WHERE newer.subject=starts.subject AND newer.dispatched=1
+                          AND json_extract(newer.body,'$.member.runtime_id')
+                              =json_extract(starts.body,'$.member.runtime_id')
+                          AND json_extract(newer.body,'$.member.terminal')
+                              =json_extract(starts.body,'$.member.terminal')
+                          AND CAST(json_extract(newer.body,'$.start_request_position') AS INTEGER)
+                              >CAST(json_extract(starts.body,'$.start_request_position') AS INTEGER)
+                          AND json_extract(newer.result,'$.verification')='operation-incarnation'
+                          AND json_extract(newer.result,'$.incarnation')
+                              <>json_extract(starts.result,'$.incarnation')))
                AND (finished=0 OR (cleanup_verified=0
                     AND json_extract(result,'$.producer_closed') IS NOT 1))
                AND NOT EXISTS(SELECT 1 FROM local_session_custody AS custody

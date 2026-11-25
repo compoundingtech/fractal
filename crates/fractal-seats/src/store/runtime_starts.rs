@@ -1408,8 +1408,9 @@ mod tests {
             "WITH RECURSIVE starts(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM starts WHERE n<5000)
              INSERT INTO local_runtime_starts
                 (id,subject,owner,body,finished,result,applied,dispatched,receipted)
-             SELECT 'legacy-'||n,'agent/legacy/'||n,'old-owner','{}',1,
-                '{\"verification\":\"operation-incarnation\",\"incarnation\":\"old-generation\"}',1,1,1
+             SELECT 'legacy-'||n,'agent/legacy/restarted','old-owner',
+                json_object('member',json_object('runtime_id','legacy-runtime','terminal',json('true')),'start_request_position',n),1,
+                json_object('verification','operation-incarnation','incarnation','generation-'||n),1,1,1
              FROM starts").unwrap();
         let custody_rows: u64 = store.readers.get().query_row(
             "SELECT count(*) FROM local_session_custody", [], |row| row.get(0)).unwrap();
@@ -1418,6 +1419,44 @@ mod tests {
         assert_eq!(store.admit_runtime_start(&mut start, 2).unwrap(), RuntimeStartAdmission::Admitted);
         assert!(store.dispatch_runtime_start(&start.id, 2).unwrap());
         store.enter_runtime_start_backend(&start.id, &start.owner).unwrap();
+    }
+
+    fn legacy_live_capacity_fixture(verification: &str) -> Store {
+        let store = Store::open_memory("node").unwrap();
+        store.connection.write().execute_batch(
+            "WITH RECURSIVE slots(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM slots WHERE n<4095)
+             INSERT INTO local_session_custody(subject,incarnation,body)
+             SELECT 'agent/retained/'||n,'generation','{}' FROM slots").unwrap();
+        let mut start = operation("legacy-live", "agent/legacy/live", None);
+        assert_eq!(store.admit_runtime_start(&mut start, 2).unwrap(), RuntimeStartAdmission::Admitted);
+        assert!(store.dispatch_runtime_start(&start.id, 2).unwrap());
+        store.finish_runtime_start(&start.id, &json!({
+            "verification": verification, "candidate_incarnation": "live-generation",
+            "incarnation": if verification == "operation-incarnation" { Some("live-generation") } else { None },
+        })).unwrap();
+        store.connection.write().execute(
+            "UPDATE local_runtime_starts SET body=json_remove(body,'$.custody_reserved') WHERE id=?1",
+            [&start.id]).unwrap();
+        store
+    }
+
+    #[test]
+    fn live_legacy_generation_without_custody_still_reserves_capacity() {
+        let store = legacy_live_capacity_fixture("operation-incarnation");
+        let error = fractal_store::store::local_sessions::admit_capacity(
+            &store.connection.write(), None).unwrap_err();
+        assert!(error.downcast_ref::<fractal_store::store::local_sessions::SessionCustodyCapacityReached>().is_some());
+    }
+
+    #[test]
+    fn recovering_a_live_legacy_generation_does_not_release_its_reservation() {
+        let store = legacy_live_capacity_fixture("launch-accepted-unverified");
+        assert!(fractal_store::store::local_sessions::admit_capacity(
+            &store.connection.write(), None).is_err());
+        assert!(store.verify_runtime_start("legacy-live", "live-generation").unwrap());
+        let error = fractal_store::store::local_sessions::admit_capacity(
+            &store.connection.write(), None).unwrap_err();
+        assert!(error.downcast_ref::<fractal_store::store::local_sessions::SessionCustodyCapacityReached>().is_some());
     }
 
     #[test]
