@@ -149,6 +149,7 @@
         "scripts/ci-script-tests"
       ],
       "definition_paths": [
+        ".config/nextest.toml",
         ".st",
         "apps/fractal-web/scripts/devnet",
         "apps/ios/modules/fractal-fabric/build.sh",
@@ -163,6 +164,7 @@
       ],
       "tree_inputs": [
         ".config/daily-only.filterset",
+        ".config/nextest.toml",
         ".gitattributes",
         ".github",
         ".gitignore",

@@ -8,7 +8,7 @@
 #      production gateway (`cargo build -p fractal-cli --bin fractal`, refused when it or the CLI library it links carries
 #      test-support or a test profile).
 #   3. The transport isolation VM driver, run with the archive and gateway (all seven native scope tests), then the sekrets VM driver, run with
-#      the gateway. The drivers keep their VM state (a 16 GiB disk image) under XDG_RUNTIME_DIR when it is set, else TMPDIR; they
+#      the gateway. The drivers keep their VM state (sparse disk images) under XDG_RUNTIME_DIR when it is set, else TMPDIR; they
 #      run without XDG_RUNTIME_DIR (a CI runner has none) and with TMPDIR in this run's scratch on disk, so the image never lands
 #      in the small runtime tmpfs and two runs never share it.
 set -euo pipefail

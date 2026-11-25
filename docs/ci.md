@@ -660,7 +660,10 @@ These controls need a real systemd user manager, which Namespace's runner image
 does not boot. They run alongside the two required graph-free remote Start controls
 in `nix/transport-isolation-vm.nix`, through the per-PR `isolation-vm` gate and the
 daily `daily-isolation-vm` job. The guest has four cores and 8 GiB RAM so the real
-finite lane fits without bypassing the production system reserve.
+finite lane fits without bypassing the production system reserve. Its sparse 64 GiB
+ext4 guest disk holds the complete authenticated workspace archive and extracted
+inventory; `/tmp` and test scratch are disk-backed, not charged as tmpfs against
+the finite-lane memory budget.
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks

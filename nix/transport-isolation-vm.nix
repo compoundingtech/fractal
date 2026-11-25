@@ -132,6 +132,7 @@ let
     unset ST2_ALLOW_ISOLATION_SKIP ST2_ALLOW_PTY_SKIP
     export CI_TEST_EXTRACTED="$1" CI_TEST_BUILD_WORKSPACE="$2" CI_TEST_WORKSPACE="$1"
     export CI_TEST_TARGET_TMPDIR=/tmp/ci-test-scratch
+    export TMPDIR="$CI_TEST_TARGET_TMPDIR"
     export CI_TEST_CLI_BINARY=/tmp/isolation-fractal
     mkdir -p "$CI_TEST_TARGET_TMPDIR"
     common=(--archive-file /tmp/isolation.tar.zst --workspace-remap "$1" --extract-to "$1"
@@ -152,9 +153,11 @@ pkgs.testers.runNixOSTest {
     # Native admission retains the production 4 GiB system reserve, in addition
     # to the enforced 512 MiB lane and actual CLI/Bun/test-process working sets.
     virtualisation.memorySize = 8192;
-    # The workspace archive is copied here and expands to the complete prebuilt test inventory.
-    # The former 4 GiB disk held the small legacy archive, but cannot hold both new inputs.
-    virtualisation.diskSize = 16384;
+    # The complete workspace inventory expands beyond 16 GiB alongside its
+    # compressed archive and standalone CLI. Keep sparse ext4 disk headroom for
+    # all prebuilt binaries and native-test scratch, not a RAM-backed root/tmp.
+    virtualisation.diskSize = 65536;
+    boot.tmp.useTmpfs = false;
     users.users.${user} = {
       isNormalUser = true;
       inherit uid;
