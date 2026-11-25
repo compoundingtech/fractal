@@ -1,8 +1,8 @@
 //! The local guard's reply size and digest semantics, on synthetic Plain stores. These are
 //! not CPU profiles, signed-peer qualification or a production idle-hour measurement.
 use rusqlite::params;
+use fractal_wire::ClaimInput;
 use smallclaims::{
-    fractal_wire::ClaimInput,
     replication::ReplicationExchange,
     store::{Store, full_compact_replication_inventory, runtime::Plain},
 };

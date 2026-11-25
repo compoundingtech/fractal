@@ -1,6 +1,6 @@
 //! A first sync settles on claims: it never waits for a peer's projections.
+use fractal_wire::ClaimInput;
 use smallclaims::{
-    fractal_wire::ClaimInput,
     replication::ReplicationInventory,
     store::{Store, runtime::Plain},
 };

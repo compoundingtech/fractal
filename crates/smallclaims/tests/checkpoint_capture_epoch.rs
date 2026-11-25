@@ -1,8 +1,8 @@
 //! Checkpoint page fences persist and follow committed mutations on every connection.
 use rusqlite::Connection;
+use fractal_wire::ClaimInput;
 use smallclaims::{
     Store,
-    fractal_wire::ClaimInput,
     store::{checkpoint_capture_epoch, configure_projection_writer, runtime::Plain},
 };
 use std::{collections::BTreeMap, sync::Arc};
