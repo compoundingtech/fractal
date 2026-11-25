@@ -48,6 +48,7 @@ import {
   workspacePreparationSteps,
   testArchiveConsumerSetup,
   nextestFlakyUpload,
+  isolationVmSteps,
 } from './workspace-ci.ts'
 
 // CI's per-crate rust-tests notes (docs/per-crate-test-signing.md, section 14) are signed from the test shards' own nextest run: each shard
@@ -167,8 +168,8 @@ const baseLinuxStageJob = ({
 // The Linux group. The jobs that are NOT required checks (the build, the test shards, clippy, fleet
 // compatibility) are skipped at the JOB level, so no runner is allocated. A skipped member shows up as
 // `skipped`, which is exactly what the aggregate evidence note producers refuse to sign for, so a skip cannot
-// refresh its own note. `linux-gate` accepts `skipped` members only when its own gate said skip. The VM tests and
-// the mail redelivery canaries run once a day (daily-long.yml), not here.
+// refresh its own note. `linux-gate` accepts `skipped` members only when its own gate said skip.
+// Native scope controls run in the required isolation VM; mail redelivery stays daily-only.
 // An existing step condition may be written as a whole `${{ ... }}`. Combining it with another term as text would
 // leave extra characters around the markers, which GitHub reads as a literal and always-true string (actionlint
 // reports it). Strip the markers first, then combine.
@@ -198,11 +199,12 @@ const jobSkips: Record<string, { gates: string[]; skip: string }> = Object.fromE
   ...testJobs.map((id) => [id, { gates: ['linux-gate', 'rust-tests'], skip: `${gateSkip('linux-gate')} || ${gateSkip('rust-tests')}` }]),
   ['linux-clippy', { gates: ['linux-gate', 'linux-clippy'], skip: `${gateSkip('linux-gate')} || ${gateSkip('linux-clippy')}` }],
   ['linux-fleet-compat', { gates: ['linux-gate', 'linux-fleet-compat'], skip: `${gateSkip('linux-gate')} || ${gateSkip('linux-fleet-compat')}` }],
+  ['isolation-vm', { gates: ['linux-gate'], skip: gateSkip('linux-gate') }],
 ])
 // The aggregate's RESULTS are positional. Exactly the stages skipped at job level may report `skipped` under an
 // evidence skip (derived here from the same list that skips them); every other stage, `upgrade-impact` among them,
 // must succeed. Positions after the base stages are the merge-only shards.
-const aggregateStages = ['linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-clippy', 'linux-fleet-compat']
+const aggregateStages = ['linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm']
 const mergeShards = ['linux-tests-shard-3', 'linux-tests-shard-4']
 const skippablePositions = [...aggregateStages, ...mergeShards].flatMap((id, index) => (id === 'linux-test-build' || jobSkips[id] ? [index + 1] : []))
 // Each skippable position carries the stage's OWN skip rule, evaluated by the workflow: a stage may report `skipped`
@@ -734,9 +736,27 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
       // arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve the checkout layout at execution, not generation.
       env: { CI_KEYED_FLEET_COMPAT_POLICY: 'auto:.st/evidence-skip-policy.json' },
     }),
+    'isolation-vm': {
+      name: 'isolation-vm',
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() }}",
+      'runs-on': linuxRunner,
+      'timeout-minutes': 60,
+      defaults: { run: { shell: 'bash' } },
+      env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
+      steps: [
+        ...isolationVmSteps,
+        {
+          name: 'Retain the VM output',
+          uses: 'actions/upload-artifact@v4',
+          if: 'always()',
+          with: { name: 'isolation-vm-logs', path: '${{ runner.temp }}/vm-out/\n${{ runner.temp }}/sekrets-vm-out/', 'if-no-files-found': 'ignore' },
+        },
+      ],
+    },
     'linux-gate': {
       name: 'linux-gate',
-      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'ci-script-tests', 'evidence-gate-ci-script-tests', 'hm-module-eval', 'bundled-sqlite-packages'],
+      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', ...aggregateStages, ...mergeShards, 'ci-script-tests', 'evidence-gate-ci-script-tests', 'hm-module-eval', 'bundled-sqlite-packages'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
       // Aggregation needs no build caches and no picker output.
@@ -804,7 +824,7 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
     'evidence-note-linux-gate': {
       name: 'evidence-note-linux-gate',
       // The fractal-web jobs and gate are for the web lane's own whole-check note; the linux-gate note leaves them out.
-      needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', ...evidenceStepNames, 'fractal-web-changes', 'fractal-web-execution', 'fractal-web', 'evidence-gate-linux-gate', 'evidence-gate-linux-clippy', 'evidence-gate-linux-fleet-compat', 'evidence-gate-genie-freshness', 'evidence-gate-ci-script-tests', 'evidence-gate-typescript-client', 'evidence-gate-fractal-web', 'evidence-gate-rust-tests'],
+      needs: ['linux-gate', ...aggregateStages, ...mergeShards, ...evidenceStepNames, 'fractal-web-changes', 'fractal-web-execution', 'fractal-web', 'evidence-gate-linux-gate', 'evidence-gate-linux-clippy', 'evidence-gate-linux-fleet-compat', 'evidence-gate-genie-freshness', 'evidence-gate-ci-script-tests', 'evidence-gate-typescript-client', 'evidence-gate-fractal-web', 'evidence-gate-rust-tests'],
       // The merge queue, main and pull requests from this repository sign; a fork never gets the key.
       if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}",
       'runs-on': 'ubuntu-latest',
