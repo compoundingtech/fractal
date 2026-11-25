@@ -226,6 +226,117 @@ reads, while preserving workspace leases, launch-freeze, kernel/capacity and nat
 producer/cleanup custody. This Observe/Stop slice does not weaken those start gates.
 
 
+## Production custody transfer: proposed export-only slice
+
+**Design under product review, not implemented transfer tooling.** The proposed
+first slice is durable old-owner quiesce/fencing and a versioned complete
+transfer-cut export. It does not import custody, select or activate an agent,
+switch callers, retire membership, or establish whole-node cutover acceptance.
+The separate authenticated import and both-end acknowledgement slice must land
+before an exported record can authorize any new physical owner.
+
+### Old-owner fence and recovery
+
+One stable operation ID binds the physical host, existing owner identity and
+requested destination selection. Repeating that operation resumes its durable
+state; reusing its ID for different contents is refused. A service stop, quiet
+process list, ordinary graph claim or expiring launch-freeze lease is not this
+fence. The fence must survive process death, login/service restart and passage of
+time without reopening planning or dispatch.
+
+Fence installation must linearize with native admission and resource control,
+not merely pause the planner loop. Enumerate queued, dispatch-fenced and
+backend-entered launches, program/shell and finite-resource operations before
+reporting quiescence. A backend that has already been entered retains its exact
+producer obligation; uncertainty cannot be converted into stopped or
+never-launched evidence. Existing shared-capacity reservations release only on
+positive `cleanup_verified` or `producer_closed` proof.
+
+After the fence, graph planning, graph-originated physical effects and obsolete
+publication/replication workers cannot acquire fresh authority. Restart checks
+the durable fence before constructing supervisors or recovering predecessor
+resource authority: recovery itself must not retire a healthy exported native
+generation. Local attachment, reads and exact-generation emergency controls
+remain available, including borrowed detach without killing the person's shell.
+Such controls append retained post-cut changes; they do not reopen planning.
+
+The authoritative fence needs explicit compatible readers and startup admission.
+An older executable that does not understand it is **not** made safe by a new
+database row or disabled service definition. Historical-reader exclusion and the
+minimum supported recovery build are pre-activation gates, not assumed behavior.
+No unsupported downgrade or automatic unfence is introduced by this slice.
+
+### Complete cut, not a configuration inventory
+
+Reuse canonical persisted records and native identities rather than inventing a
+parallel session model. The versioned export manifest must bind its immutable
+contents to the operation, source authority, graph decision cut and individual
+durable source positions. Inventory at least:
+
+- Owned and borrowed sessions, logical and native incarnations, process-birth,
+  PTY and borrowed-invocation fences, and exact original start-operation identity.
+- Queued, entered and unresolved native producers; cancellation/revocation
+  revisions; program/helper lifetimes; finite membership/root and reservation
+  ownership; positive cleanup/closure witnesses and pending finalization.
+- Credential issuance/revocation and outstanding request authority, without
+  turning hashes into bearer secrets or exporting execution private keys.
+- Pending commands, watched input frontiers, mail/input acceptance, unaccepted
+  output, invocation receipts and durable publication/outbox positions.
+
+Native registries, SQL custody and receipt journals are distinct durable domains.
+The export must state which source position and exact-generation witness supports
+each obligation; one SQL transaction cannot freeze a physical process. Capture
+late completion, exit, revocation, emergency-control and output changes in a
+retained ordered continuation. Missing or unsupported source state refuses a
+complete-cut result rather than emitting an apparently complete empty inventory.
+An unresolved producer is exported as unresolved custody, never as released
+capacity or permission to replace it.
+
+Publish a complete immutable manifest only after its payloads and completion
+receipt are durable. An interrupted export remains incomplete and resumes the
+same operation; a lost response returns the retained identical receipt. Bind
+content hashes to a canonical versioned representation, not paths or mutable
+display labels. Keep source records, receipt identities and continuation floors
+until the later import protocol proves both ends accepted the exact cut and all
+referenced obligations; export success alone permits no reclamation.
+
+An export is sensitive authority material. Operator access must use the existing
+guarded local administration boundary and private physical files; configuration
+bytes, subject names and a manifest hash alone are not authentication or native
+adoption proof. This design deliberately leaves public command/schema choices
+uncommitted until the reviewed slice boundary and reader contract are approved.
+
+### Failing-test plan before implementation
+
+These are planned negative controls, **not reported executions**. Use real
+SQLite journals, pinned PTY/exec backends and authenticated endpoints where
+applicable; inject interruption at durable boundaries, not mock success.
+
+| Case | Required failing behavior before the fix and positive assertion after it |
+|---|---|
+| Dispatch races fence installation | Pause immediately before backend entry; exactly one ordering wins. A committed fence prevents later entry, and prior entry stays inventoried. |
+| Service/daemon restart after fencing | Reopen real state before worker initialization; no planner dispatch, predecessor native retirement or obsolete publisher restart. |
+| Lease expiry or clock jump | Advance the ordinary freeze lease boundary; the durable ownership fence stays closed independently of that lease. |
+| Historical unaware reader | Run the supported previous executable against fenced state; startup admission must refuse before any physical effect. If it cannot, activation stays blocked. |
+| Unknown backend result | Interrupt after entered custody and before the native result; export keeps the producer/reservation unresolved and never respawns it. |
+| Owned and borrowed native continuity | Fence/export/reopen with live real generations; attach still works, owned processes survive, and emergency borrowed detach never kills the shell. |
+| Reused runtime ID or PID | Replace a generation during capture; no successor inherits predecessor custody, cancellation or cleanup proof. |
+| Ordinary versus remote producer | Retain both real operation kinds; export their actual provenance without requiring an absent remote Start envelope. |
+| Concurrent cancellation and credentials | Commit withdrawal while a launch/output is pending; the cut plus continuation preserves its revision and no obsolete credential gains new authority. |
+| Mail and output acceptance | Interrupt around send, receipt and explicit consumer acceptance; each obligation remains retained exactly once at its original identity/frontier. |
+| Export interruption and lost response | Kill at payload/manifest/receipt boundaries; no partial export is labeled complete, and retry recovers identical contents under the same operation ID. |
+| Mutated operation or manifest | Retry an ID with altered destination, payload or source cut; refuse rather than mint a second transfer or accept a forged completion. |
+| Missing authority source | Remove a required source witness in an isolated fixture; completeness fails explicitly, with no empty-state or graph-copy fallback. |
+| Export-only safety | Complete the export; no agent import/activation, new home dispatch, caller switch, retirement or source reclamation occurs. |
+
+Run the relevant real native, restart, historical-reader and crash/race controls
+in Linux/hosted lanes and obtain exact-head independent reviews. A later import
+slice must additionally prove authenticated higher-epoch selection, both-end
+durable acknowledgement, retained-output drain and old-owner exclusion before
+admission can reopen. Rollback still requires a current authoritative fenced
+graph cut; an archived graph plus this export is not a resumed planner.
+
+
 ## Phases and exit gates
 
 | Phase | Deliverable | Exit evidence |
