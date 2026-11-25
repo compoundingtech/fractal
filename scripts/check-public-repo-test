@@ -278,6 +278,26 @@ class PublicHistoryCheck(unittest.TestCase):
             self.repo, "origin", [f"refs/tags/example {tag} refs/tags/example {'0' * 40}"]))
         self.assertTrue(any(":tag:" in error for error in errors))
 
+    def test_existing_ref_merge_excludes_published_history_but_checks_new_commits(self):
+        self.git("checkout", "-b", "topic")
+        old = self.commit("topic.txt", "clean topic\n")
+        self.git("update-ref", "refs/remotes/origin/topic", old)
+        self.git("checkout", "main")
+        self.commit("main.txt", "person" + "/unknown-fixture\n")
+        published = self.commit("main.txt", "clean main\n")
+        self.git("update-ref", "refs/remotes/origin/main", published)
+        self.git("checkout", "topic")
+        self.git("merge", "--no-ff", "main", "-m", "Merge public main")
+        head = self.git("rev-parse", "HEAD")
+        line = f"refs/heads/topic {head} refs/heads/topic {old}"
+        self.assertEqual(list(CHECK["outgoing_findings"](self.repo, "origin", [line])), [])
+
+        dirty = self.commit("new.txt", "person" + "/unknown-fixture\n")
+        head = self.commit("new.txt", "clean again\n")
+        line = f"refs/heads/topic {head} refs/heads/topic {old}"
+        errors = list(CHECK["outgoing_findings"](self.repo, "origin", [line]))
+        self.assertTrue(any(error.startswith(dirty + ":new.txt:") for error in errors))
+
     def test_binary_attribute_cannot_hide_content(self):
         self.commit(".gitattributes", "*.txt -diff\n")
         self.commit("example.txt", "\0person" + "/unknown-fixture\n")

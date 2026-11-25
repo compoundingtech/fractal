@@ -390,6 +390,12 @@ pub use migration::{
     SignatureMigration, SignatureResume, SignatureResumeRequest, transient_storage_error,
 };
 
+/// Where the prune of settled judging rows has got (`judging::prune_settled_page_tx`): none
+/// before its first page, `done`, or the last claim it passed. One meta read.
+pub(super) fn settled_judging_cursor(connection: &Connection) -> Result<Option<String>> {
+    super::fleet_meta(connection, judging::PRUNE_CURSOR)
+}
+
 /// Keep a signature a device made for the claim this node is about to write on `subject`, so the
 /// write stores it in its own transaction.
 pub fn attach_expected_signature_tx(
@@ -1786,7 +1792,10 @@ impl Store {
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let (examined, deleted, finished) = judging::prune_settled_page_tx(&transaction)?;
         transaction.commit()?;
-        Ok(JudgingPrune { examined, deleted, finished })
+        drop(connection);
+        let page = JudgingPrune { examined, deleted, finished };
+        self.retention.settled_judging(&page);
+        Ok(page)
     }
 
     /// Milliseconds until the next orphan verdict-link sweep may start; none when one is due or
