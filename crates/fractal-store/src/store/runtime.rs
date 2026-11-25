@@ -310,6 +310,7 @@ impl Runtime for FractalRuntime {
         kind: &str,
         subject: &str,
     ) -> Result<(), FractalError> {
+        super::run_credentials::request_context::admit_tx(transaction)?;
         // A document a run binds is decided by its run authority, as its claims are.
         super::run_authority::admit_tx(transaction, origin, Some(writer), kind, subject, &BTreeMap::new())
     }
