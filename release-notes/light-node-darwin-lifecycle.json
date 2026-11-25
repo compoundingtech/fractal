@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No home or executor grant scope, planner or graph effect authority changes."},
   "compatibility": {"status": "none", "detail": "Existing Linux service behavior remains unchanged; Darwin service actions are explicit GUI-user opt-in and refuse conflicting definitions."},
   "downtime": {"status": "none", "detail": "Installing this change performs no production activation. Explicit service stop or restart unloads only the owned agent and preserves native processes."},
-  "manual": {"status": "required", "detail": "Operators separately provision private configuration and choose service installation/start or opt-in Home Manager activation; no TCC grants or whole-node migration are performed."},
+  "manual": {"status": "changed", "detail": "Operators separately provision private configuration and choose service installation/start or opt-in Home Manager activation; no TCC grants or whole-node migration are performed."},
   "recovery": {"status": "none", "detail": "Stop and uninstall preserve native state and the durable journal. Restart resumes existing custody; foreign or mismatched launchd jobs require explicit operator resolution."}
 }
