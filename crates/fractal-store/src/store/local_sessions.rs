@@ -27,7 +27,8 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         detached_by TEXT, detach_receipted INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(subject,incarnation)
     ) WITHOUT ROWID;
-    CREATE UNIQUE INDEX IF NOT EXISTS local_session_current ON local_session_custody(subject) WHERE active=1;")?;
+    CREATE UNIQUE INDEX IF NOT EXISTS local_session_current ON local_session_custody(subject) WHERE active=1;
+    CREATE INDEX IF NOT EXISTS local_session_checkpoint_subject_kind ON checkpoint_claims(subject,kind);")?;
     let has_retirement_proof: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_session_custody') WHERE name='native_retirement_verified')",
         [], |row| row.get(0))?;
@@ -92,28 +93,69 @@ pub fn admit_capacity(connection: &Connection, operation: Option<&str>) -> Resul
               AND (?1 IS NULL OR starts.id<>?1) AND
               (finished=0 OR applied=0 OR receipted=0
                OR (revoked_by IS NOT NULL AND cleanup_verified=0)))", [operation])?;
+    // Only positive retained evidence closes an unbound legacy reservation.
+    // In particular, an empty desired projection is normal on a light node.
+    // Custody itself is counted independently, even for retired subjects.
+    let retired_admitted = smallclaims::store::record_bytes::admitted_claim_sql("retired");
+    let observed_admitted = smallclaims::store::record_bytes::admitted_claim_sql("observed");
+    let removed_admitted = smallclaims::store::record_bytes::admitted_claim_sql("removed");
     let count: u64 = connection.query_row(
-        "SELECT (SELECT count(*) FROM local_session_custody WHERE custody_settled=0)
+        &format!("SELECT (SELECT count(*) FROM local_session_custody WHERE custody_settled=0)
           + (SELECT count(*) FROM local_runtime_starts AS starts
              WHERE dispatched=1 AND (?1 IS NULL OR id<>?1)
                AND json_extract(body,'$.custody_bound') IS NOT 1
                AND (json_extract(body,'$.custody_reserved')=1 OR finished=0
-                    OR json_extract(result,'$.verification') IS NOT 'operation-incarnation'
-                    OR NOT EXISTS(SELECT 1 FROM local_runtime_starts AS newer
-                        WHERE newer.subject=starts.subject AND newer.dispatched=1
-                          AND json_extract(newer.body,'$.member.runtime_id')
-                              =json_extract(starts.body,'$.member.runtime_id')
-                          AND json_extract(newer.body,'$.member.terminal')
-                              =json_extract(starts.body,'$.member.terminal')
-                          AND CAST(json_extract(newer.body,'$.start_request_position') AS INTEGER)
-                              >CAST(json_extract(starts.body,'$.start_request_position') AS INTEGER)
-                          AND json_extract(newer.result,'$.verification')='operation-incarnation'
-                          AND json_extract(newer.result,'$.incarnation')
-                              <>json_extract(starts.result,'$.incarnation')))
+                    OR NOT COALESCE((
+                      EXISTS(SELECT 1 FROM claims AS retired
+                        WHERE retired.subject=starts.subject AND retired.kind='agent.retired'
+                          AND {retired_admitted})
+                      OR EXISTS(SELECT 1 FROM desired AS removed_subject
+                        JOIN claims AS removed ON removed.id=removed_subject.claim_id
+                        WHERE removed_subject.subject=starts.subject AND removed_subject.kind='stop'
+                          AND removed.kind='intent.desired' AND {removed_admitted})
+                      OR EXISTS(SELECT 1 FROM checkpoint_claims AS retired
+                        WHERE retired.subject=starts.subject AND retired.kind='agent.retired'
+                          AND NOT EXISTS(SELECT 1 FROM replica_records
+                            WHERE claim_id=retired.id AND state<>'valid'))
+                      OR (json_type(starts.result,'$.incarnation')='text'
+                        AND json_extract(starts.result,'$.incarnation')<>''
+                        AND json_type(starts.body,'$.member.runtime_id')='text'
+                        AND json_type(starts.body,'$.member.terminal') IN ('true','false')
+                        AND (
+                          json_extract(starts.result,'$.verification') IN ('operation-ended','operation-retired')
+                          OR EXISTS(SELECT 1 FROM local_observations AS observed
+                            WHERE observed.subject=starts.subject AND observed.kind='runtime.observed'
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.status') IN ('stopped','exited','absent')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.runtime_id')=json_extract(starts.body,'$.member.runtime_id')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.terminal')=json_extract(starts.body,'$.member.terminal')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.incarnation_id')=json_extract(starts.result,'$.incarnation'))
+                          OR EXISTS(SELECT 1 FROM claims AS observed
+                            WHERE observed.subject=starts.subject AND observed.kind='runtime.observed'
+                              AND {observed_admitted}
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.status') IN ('stopped','exited','absent')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.runtime_id')=json_extract(starts.body,'$.member.runtime_id')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.terminal')=json_extract(starts.body,'$.member.terminal')
+                              AND json_extract(COALESCE(json_extract(observed.body,'$.fields'),observed.body),'$.incarnation_id')=json_extract(starts.result,'$.incarnation'))))
+                      OR (json_extract(starts.body,'$.subject.kind')='exec'
+                        AND EXISTS(SELECT 1 FROM step_runs AS step
+                          WHERE step.subject=json_extract(starts.body,'$.subject.owner_step')
+                            AND step.status IN ('completed','failed','cancelled')))
+                      OR (json_extract(starts.result,'$.verification')='operation-incarnation'
+                        AND EXISTS(SELECT 1 FROM local_runtime_starts AS newer
+                          WHERE newer.subject=starts.subject AND newer.dispatched=1
+                            AND json_extract(newer.body,'$.member.runtime_id')
+                                =json_extract(starts.body,'$.member.runtime_id')
+                            AND json_extract(newer.body,'$.member.terminal')
+                                =json_extract(starts.body,'$.member.terminal')
+                            AND CAST(json_extract(newer.body,'$.start_request_position') AS INTEGER)
+                                >CAST(json_extract(starts.body,'$.start_request_position') AS INTEGER)
+                            AND json_extract(newer.result,'$.verification')='operation-incarnation'
+                            AND json_extract(newer.result,'$.incarnation')
+                                <>json_extract(starts.result,'$.incarnation')))),0))
                AND (finished=0 OR (cleanup_verified=0
                     AND json_extract(result,'$.producer_closed') IS NOT 1))
                AND NOT EXISTS(SELECT 1 FROM local_session_custody AS custody
-                 WHERE json_extract(custody.body,'$.start_operation')=starts.id))",
+                 WHERE json_extract(custody.body,'$.start_operation')=starts.id))"),
         [operation], |row| row.get(0))?;
     if count >= 4096 { return Err(SessionCustodyCapacityReached.into()); }
     Ok(())
