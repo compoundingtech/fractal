@@ -884,6 +884,7 @@ async fn graph_free_start_refuses_shared_custody_capacity_before_native_backend(
     // Retained, inactive and still-unsettled custody is not free capacity.
     // It is deliberately not exposed as live native bindings or closure evidence.
     pair.store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h5594515eecb4 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */
         "WITH RECURSIVE slots(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM slots WHERE n<4096)
          INSERT INTO local_session_custody(subject,incarnation,body,active)
          SELECT 'agent/retained/'||n,'retained-generation','{}',0 FROM slots").unwrap();
