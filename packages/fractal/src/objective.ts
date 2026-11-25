@@ -117,6 +117,7 @@ export type Indicator =
   | ({ readonly kind: 'github-ready-to-merged' } & GithubMeasurement)
   | ({ readonly kind: 'ratio' } & Ratio)
   | ({ readonly kind: 'gauge' } & Gauge)
+  | { readonly kind: 'disk-free'; readonly host: string; readonly path: string; readonly floorBytes: number }
   | { readonly kind: 'native'; readonly objective: string }
 
 type IndicatorOf<K extends Indicator['kind']> = Extract<Indicator, { readonly kind: K }>
@@ -174,6 +175,9 @@ export const indicator = {
     freeze({ kind: 'github-ready-to-merged', ...input }),
   ratio: (input: Ratio): IndicatorOf<'ratio'> => freeze({ kind: 'ratio', ...input }),
   gauge: (input: Gauge): IndicatorOf<'gauge'> => freeze({ kind: 'gauge', ...input }),
+  /** Daemon-local statvfs available bytes; path and admission floor are authored policy. */
+  diskFree: (input: { readonly host: string; readonly path: string; readonly floorBytes: number }): IndicatorOf<'disk-free'> =>
+    freeze({ kind: 'disk-free', ...input }),
   native: (input: { readonly objective: string }): IndicatorOf<'native'> => freeze({ kind: 'native', ...input }),
   /** Daemon routes, stream first snapshots, publications or phone reports, by `METHOD /route`. */
   latency: ({ paths }: { readonly paths: readonly string[] }): IndicatorOf<'latency'> =>
@@ -526,6 +530,12 @@ const parseIndicator = ({ value, fail }: { readonly value: unknown; readonly fai
     case 'ratio':
     case 'gauge':
       return parseNumeric({ value, fail })
+    case 'disk-free':
+      allow(['host', 'path', 'floorBytes'])
+      if (typeof value.host !== 'string' || value.host.includes('/') || !validNativeName(value.host)) return fail('disk-free needs a canonical host name')
+      if (typeof value.path !== 'string' || !value.path.startsWith('/') || value.path.includes('\0')) return fail('disk-free path must be absolute and contain no NUL')
+      if (typeof value.floorBytes !== 'number' || !Number.isSafeInteger(value.floorBytes) || value.floorBytes <= 0) return fail('disk-free floorBytes must be a positive safe integer')
+      return freeze({ kind, host: value.host, path: value.path, floorBytes: value.floorBytes })
     case 'native':
       allow(['objective'])
       if (typeof value.objective !== 'string' || !validNativeName(value.objective)) return fail('native objective must name a well-formed built-in row')
@@ -626,6 +636,7 @@ const statBound = ({ indicator, checked }: { readonly indicator: Indicator; read
       return percentile(target.stat) !== undefined && within
     case 'ratio':
     case 'gauge':
+    case 'disk-free':
     case 'native':
       return false
   }
@@ -646,6 +657,7 @@ const requiredStats: Readonly<Record<Indicator['kind'], readonly string[]>> = {
   'github-ready-to-merged': [],
   ratio: [],
   gauge: [],
+  'disk-free': [],
   native: [],
 }
 
@@ -685,7 +697,7 @@ const checkTargets = ({
   if (wrong !== undefined) fail(`a \`${indicator.kind}\` indicator has no target \`${wrong.target.stat}\` with that bound`)
   const missing = requiredStats[indicator.kind].find((stat) => local(stat) === undefined)
   if (missing !== undefined) fail(`a \`${indicator.kind}\` indicator needs target \`${missing}\``)
-  const numeric = indicator.kind === 'ratio' || indicator.kind === 'gauge'
+  const numeric = indicator.kind === 'ratio' || indicator.kind === 'gauge' || indicator.kind === 'disk-free'
   if (targets.length === 0 && !numeric && indicator.kind !== 'native') fail('has no `target`')
   const remote = targets.find(({ target }) => target.stat === 'p99' && target.scope === 'remote')
   if (remote !== undefined && remote.ms! < (local('p99')?.ms ?? 0)) fail('its remote latency is below its own')
@@ -737,18 +749,24 @@ export const objective = <const I extends ObjectiveInput>(input: I): Objective &
     }
   }
   const rawTargets = input.targets === undefined && (
-    indicator.kind === 'native' || indicator.kind === 'ratio' || indicator.kind === 'gauge' ||
+    indicator.kind === 'native' || indicator.kind === 'ratio' || indicator.kind === 'gauge' || indicator.kind === 'disk-free' ||
     ((indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') && indicator.measurement === 'only')
   ) ? [] : input.targets
   if (Array.isArray(rawTargets) === false) fail('has no `target`')
   const targets = rawTargets!.map((value) => parseTarget({ value, fail }))
   const onBreach = input.onBreach === undefined ? undefined : parseBreach({ value: input.onBreach, fail })
   const budget = input.budget === undefined ? undefined : parseBudget({ value: input.budget, fail })
-  const numeric = indicator.kind === 'ratio' || indicator.kind === 'gauge'
+  const numeric = indicator.kind === 'ratio' || indicator.kind === 'gauge' || indicator.kind === 'disk-free'
   if (numeric && (budget === undefined || targets.length !== 0 || window !== undefined)) fail('ratio and gauge need budget and take no diagnostic target or window')
   if (budget !== undefined && (indicator.kind === 'interval' || indicator.kind === 'count')) fail('interval and count take window and targets, not budget')
   if (budget !== undefined && (indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged')) fail('GitHub measurements do not take claim budgets')
   if (indicator.kind === 'native' && (budget !== undefined || window !== undefined || targets.length !== 0)) fail('a native binding inherits targets, window and budget; none may be overridden')
+  if (indicator.kind === 'disk-free') {
+    if (typeof name === 'string' && !name.startsWith(`disk/${indicator.host}/`)) fail('disk-free objective name must be disk/HOST/NAME for its authored host')
+    const supported = new Set([300_000, 1_800_000, 3_600_000, 7_200_000, 21_600_000, 2_592_000_000])
+    if (budget !== undefined && [budget.horizon, budget.fast.long, budget.fast.short, budget.slow.long, budget.slow.short]
+      .some((value) => !supported.has(durationMs({ value, fail })))) fail('disk-free budget windows must be native ledger windows: 5m, 30m, 1h, 2h, 6h or 30d')
+  }
   checkTargets({ indicator, targets, hasWindow: window !== undefined, hasBreach: onBreach !== undefined, fail })
   if (indicator.kind === 'count' && input.window?.minSamples !== undefined) {
     fail("a count's window takes no `minSamples`: an empty window is a real 0")
@@ -824,6 +842,12 @@ const indicatorChildren = (indicator: Indicator): Node[] => {
       ]
     case 'interval':
       return intervalChildren(indicator)
+    case 'disk-free':
+      return [
+        node({ name: 'host', args: [indicator.host] }),
+        node({ name: 'path', args: [indicator.path] }),
+        node({ name: 'floor-bytes', args: [indicator.floorBytes] }),
+      ]
     case 'native':
       return [node({ name: 'objective', args: [indicator.objective] })]
     case 'ratio':

@@ -41,6 +41,10 @@ pub(crate) use budget::{BudgetEvidence, classify_budget};
 #[path = "declared_github_objectives.rs"]
 mod github;
 
+#[path = "disk_objectives.rs"]
+mod disk;
+pub(crate) use disk::sample as sample_disk;
+
 /// Claims read per page while catching up.
 const PAGE: usize = 1_000;
 /// Open samples over target an explanation names; the rest are counted.
@@ -317,6 +321,15 @@ fn rows_selected<'a>(
             continue;
         }
         if let Ok(objective) = &entry.objective
+            && matches!(objective.indicator, Indicator::DiskFree { .. })
+        {
+            let produced = disk::row(store, objective, now);
+            entry.ids = produced.as_ref().and_then(|row| row["id"].as_str())
+                .map(|id| BTreeSet::from([id.to_owned()])).unwrap_or_default();
+            rows.extend(produced);
+            continue;
+        }
+        if let Ok(objective) = &entry.objective
             && let Indicator::Native { objective: source } = &objective.indicator
         {
             let response = objective.on_breach.as_ref().map_or_else(
@@ -496,7 +509,7 @@ fn check_selected(store: &Store, rows: &[Value], native_scope: Option<&str>) -> 
                     && !matches!(&objective.indicator, Indicator::Native { objective: source } if native_owns(scope, source)) {
                     return None;
                 }
-                let native = matches!(objective.indicator, Indicator::Native { .. });
+                let native = matches!(objective.indicator, Indicator::Native { .. } | Indicator::DiskFree { .. });
                 Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone(), native))
             })
             .collect()

@@ -129,7 +129,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
 
 /// The diagnostic target remains visible, but only retained evidence spends the operational
 /// budget. A process restart or a missing minute never supplies an invented good observation.
-fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, evidence: &Value, cadence_ms: u64) -> Value {
+pub(crate) fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, evidence: &Value, cadence_ms: u64) -> Value {
     use crate::declared_objectives::{BudgetEvidence, classify_budget};
     let window = |width: u64| {
         evidence["windows"].as_object().and_then(|windows| windows.values().find(|window| window["window_ms"].as_u64() == Some(width)))
@@ -208,7 +208,7 @@ fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, eviden
         "{} Operational budget: {:.1}% bad {unit}, {coverage_text} over {}. Fast pair {}/{} (>{:.1}×); slow pair {}/{} (>{:.1}×). Both windows of a pair must burn; short spikes alone are diagnostic. Missing coverage is unknown, not recovery. Diagnostic aspiration: {diagnostic_target}; {diagnostic_current}.{}",
         row["about"].as_str().unwrap_or_default(), policy.allowance * 100.0, duration(policy.horizon_ms),
         burn(fast.0), burn(fast.1), policy.fast.burn_rate, burn(slow.0), burn(slow.1), policy.slow.burn_rate,
-        if cadence_ms == 0 { "" } else { " Hourly evidence uses cadence-aware pairs: 2h+1h and 6h+1h." },
+        if cadence_ms >= 3_600_000 { " Hourly evidence uses cadence-aware pairs: 2h+1h and 6h+1h." } else { "" },
     ));
     row
 }

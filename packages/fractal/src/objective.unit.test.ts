@@ -541,7 +541,7 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
       files: {
         'ops/x/objective.ts': `${header}export default Fractal.objective({ about: 'a', indicator: Fractal.indicator.statement(), targets: [{ stat: 'p99', within: '10ms' }, { stat: 'max', within: '100ms' }] })`,
       },
-      message: 'A declared objective is an interval, count, ratio, gauge, GitHub measurement or native binding named NAMESPACE/NAME; objective/ops/x is not',
+      message: 'A declared objective is an interval, count, ratio, gauge, disk-free, GitHub measurement or native binding named NAMESPACE/NAME; objective/ops/x is not',
     },
     {
       name: 'a one-segment name',
@@ -824,5 +824,49 @@ describe('GitHub author cohorts', () => {
     for (const authorLogins of [[], [''], ['two words'], ['ümlaut'], ['example/name']]) {
       expect(() => render({ ...input, indicator: { ...input.indicator, authorLogins } })).toThrow('authorLogins')
     }
+  })
+})
+
+describe('native disk-free objectives', () => {
+  const disk = {
+    name: 'disk/worker/free',
+    about: 'Available bytes above the admission floor',
+    indicator: Fractal.indicator.diskFree({ host: 'worker', path: '/', floorBytes: 1_000_000_000 }),
+    budget: {
+      allowance: 0.05, horizon: '30d', minCoverage: 0.9, minSamples: 1,
+      fast: { burnRate: 14.4, long: '1h', short: '5m' },
+      slow: { burnRate: 6, long: '6h', short: '30m' },
+    },
+  } satisfies ObjectiveInput & { readonly name: string }
+
+  it('lowers authored host, path, floor and capacity-time budget', () => {
+    const kdl = render(disk)
+    expect(kdl).toContain('indicator "disk-free"')
+    expect(kdl).toContain('host "worker"')
+    expect(kdl).toContain('path "/"')
+    expect(kdl).toContain('floor-bytes 1000000000')
+    expect(kdl).toContain('allowance=0.05')
+  })
+
+  it.effect('loads host-scoped disk objectives from the declaration tree', () =>
+    Effect.gen(function* () {
+      const root = fixture({
+        'disk/worker/free/objective.ts': `${header}export default Fractal.objective(${JSON.stringify(disk)})`,
+        'disk/worker/other/objective.kdl': render({ ...disk, name: 'disk/worker/other' }),
+      })
+      const subjects = (yield* load(root)).filter(({ kind }) => kind === 'objective')
+      expect(subjects.map(({ id }) => id)).toEqual(['disk/worker/free', 'disk/worker/other'])
+    }),
+  )
+
+  it('rejects unusable paths, floors and mismatched host identities', () => {
+    for (const indicator of [
+      { ...disk.indicator, path: 'relative' },
+      { ...disk.indicator, floorBytes: 0 },
+      { ...disk.indicator, floorBytes: 1.5 },
+      { ...disk.indicator, host: 'other' },
+    ]) expect(() => render({ ...disk, indicator })).toThrow()
+    expect(() => render({ ...disk, budget: { ...disk.budget, fast: { ...disk.budget.fast, long: '3h' } } })).toThrow()
+    expect(() => render({ ...disk, targets: [{ stat: 'free-bytes', min: 1 }] })).toThrow()
   })
 })

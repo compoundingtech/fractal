@@ -1863,7 +1863,13 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
                 .cpu_minutes()
                 .settle(check, busy);
         }
-        match tokio::task::spawn_blocking(crate::slo::checkpoint_budgets).await {
+        let disk_store = Arc::clone(&store);
+        match tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::declared_objectives::sample_disk(&disk_store) {
+                tracing::error!(%error, "native disk objective sampling failed");
+            }
+            crate::slo::checkpoint_budgets()
+        }).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => eprintln!("fractal: native SLO accounting checkpoint failed: {error:#}"),
             Err(error) => eprintln!("fractal: native SLO accounting checkpoint task failed: {error}"),
