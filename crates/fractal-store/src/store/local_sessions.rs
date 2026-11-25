@@ -251,7 +251,7 @@ mod tests {
             subject: "agent/example/exit-stop".into(), runtime_id: "exit-stop".into(),
             incarnation: "generation".into(), native_incarnation: "generation".into(),
             terminal: true, driver: None,
-            lifecycle: crate::model::MemberLifecycle::Service,
+            lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service,
             custody: SessionCustody::Owned, start_operation: None, invocation: None,
         };
         store.bind_local_session(&binding).unwrap();
@@ -286,7 +286,7 @@ mod tests {
             subject: "agent/example/live".into(), runtime_id: "live".into(),
             incarnation: "0".into(), native_incarnation: "0".into(),
             terminal: true, driver: None,
-            lifecycle: crate::model::MemberLifecycle::Service,
+            lifecycle: fractal_light_node_core::custody::MemberLifecycle::Service,
             custody: SessionCustody::Owned, start_operation: None, invocation: None,
         };
         for generation in 0..4100 {

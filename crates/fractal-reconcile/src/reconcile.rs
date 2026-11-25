@@ -795,7 +795,7 @@ pub fn local_session<R: RuntimeControl>(
         found
     } else { runtime.observe_exec(&binding.runtime_id)? };
     if binding.terminal
-        && binding.custody == crate::store::local_sessions::SessionCustody::Owned
+        && binding.custody == fractal_light_node_core::custody::SessionCustody::Owned
         && let Some(observed) = observed.as_ref().filter(|o| o.status == "exited"
             && o.terminal && o.incarnation_id.as_deref() == Some(binding.native_incarnation.as_str()))
     {
