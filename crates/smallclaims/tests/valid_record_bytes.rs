@@ -32,7 +32,7 @@ fn sync(source: &Store, peer: &Store) {
         if exchange.envelopes.is_empty() {
             break;
         }
-        peer.receive_replication_exchange("alder", FLEET, &exchange)
+        peer.receive_replication_exchange(source.origin(), FLEET, &exchange)
             .unwrap();
         peer.validate_replication_backlog().unwrap();
         peer.project_replication_backlog().unwrap();
@@ -229,6 +229,32 @@ fn record_rows(store: &Store) -> Vec<(String, i64, String, i64, String, Option<S
 
 fn user_version(store: &Store) -> u32 {
     store.connection.write().query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn first_deletion_preserves_the_privacy_fence_and_marks_records_gone() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("privacy.sqlite3");
+    let store = Store::open(&path, "privacy", Arc::new(Plain)).unwrap();
+    for n in 0..300 {
+        note(&store, n);
+    }
+    let peer = Store::open_memory("peer", Arc::new(Plain)).unwrap();
+    sync(&store, &peer);
+    store.connection.write().pragma_update(None, "user_version", 28).unwrap();
+    assert!(smallclaims::store::record_bytes::valid_records_kept(&store.connection.write()).unwrap());
+
+    let released = store.release_valid_records(0).unwrap();
+    assert!(released.deleted > 0);
+    assert_eq!(user_version(&store), 28);
+    assert_eq!(store.connection.write().query_row(
+        "SELECT value FROM meta WHERE key='valid_records_gone'", [], |row| row.get::<_, String>(0),
+    ).unwrap(), "1");
+    assert!(!smallclaims::store::record_bytes::valid_records_kept(&store.connection.write()).unwrap());
+    drop(store);
+    let reopened = Store::open(&path, "privacy", Arc::new(Plain)).unwrap();
+    assert_eq!(user_version(&reopened), 28);
+    assert!(!smallclaims::store::record_bytes::valid_records_kept(&reopened.connection.write()).unwrap());
 }
 
 #[test]

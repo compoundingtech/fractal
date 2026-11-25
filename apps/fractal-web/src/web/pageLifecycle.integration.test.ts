@@ -41,7 +41,7 @@ it('pagehide sends 1001 synchronously and persisted pageshow resubscribes withou
     uninstall()
   }).pipe(Effect.provide(FractalLive({
     baseUrl: 'http://gateway.test', maxFollows: 4,
-    fetch: async () => new Response(JSON.stringify({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/proof', created_at: '2026-10-08T00:00:00Z', host_id: 'host/proof', projection_version: 'client-projection.v0', store_index: 1 }, value: {} })),
+    fetch: async () => new Response(JSON.stringify({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/proof', created_at: '2026-10-08T00:00:00Z', host_id: 'host/proof', projection_version: 'client-projection.v0', store_index: 1 }, value: { capabilities: [] } })),
     socket: () => {
       const commands: string[] = [], closes: number[] = []
       const socket: CollectionSocket = { onopen: null, onmessage: null, onclose: null, onerror: null, send: (command) => { commands.push(command) }, close: (code = 1000) => { closes.push(code) } }

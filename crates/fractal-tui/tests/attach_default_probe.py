@@ -8,10 +8,10 @@ Python 3 and `pty` (CI provides both). Only the graph is invented: no real agent
 or person's state; every case gets its own XDG_STATE_HOME.
 
 Cases, each one TUI:
-  default        no saved choice: opening an agent attaches its terminal
-  migration      a device's old saved choice (terminal_first true or false) still attaches
-  opt-in         conversation_first saved: the agent opens on its conversation; the palette
-                 entry "Conversation first" turns it off
+  default        no saved choice: opening an agent shows its conversation
+  migration      an old terminal-first opt-in still attaches; old default opens conversation
+  opt-in         saved terminal-first opens the terminal; the palette entry
+                 "Conversation first" turns conversation-first back on
   no-terminal    an agent without a terminal opens its conversation, with no error
   alert          an alert arriving while attached shows on top of the terminal; typed keys
                  still reach the program; a click shows it, a click answers it, and its "open
@@ -236,21 +236,21 @@ def attached(tui):
                     and status["attached"] and READY in screen(status), "attached terminal")
 
 
-def stays_on_conversation(tui, pane=f"agent:{AGENT}"):
+def stays_on_conversation(tui, pane=f"agent:{AGENT}", opened=0):
     # Longer than the dwell before attaching, so an attach would have happened.
     time.sleep(1.0)
     status = tui.status()
     assert status["pane"] == pane, status["pane"]
-    assert status["opened"] == 0, "a terminal was opened"
+    assert status["opened"] == opened, "an additional terminal was opened"
     return status
 
 
 def case_default(tui):
     status = tui.status()
-    assert not status["conversation_first"], "attaching is the default"
+    assert status["conversation_first"], "conversation is the default"
     tui.action("open")
-    attached(tui)
-    print("default: no saved choice, opening an agent attaches its terminal")
+    stays_on_conversation(tui)
+    print("default: no saved choice, opening an agent shows its conversation")
 
 
 def case_migration(worker):
@@ -260,24 +260,29 @@ def case_migration(worker):
             try:
                 tui.start()
                 tui.action("open")
-                attached(tui)
+                if prefs["terminal_first"]:
+                    attached(tui)
+                else:
+                    stays_on_conversation(tui)
             finally:
                 tui.close()
-    print("migration: an old saved terminal_first, true or false, still attaches")
+    print("migration: old terminal-first opt-in attaches; old default shows conversation")
 
 
 def case_opt_in(tui):
-    status = wait_for(tui.status, lambda status: status["conversation_first"], "saved choice read")
+    wait_for(tui.status, lambda status: not status["conversation_first"], "saved choice read")
     tui.action("open")
-    stays_on_conversation(tui)
+    opened = attached(tui)["opened"]
     # The palette's setting, by name.
     tui.send(b"\x0b")
     time.sleep(0.2)
     tui.send(b"conversation first")
     wait_for(tui.status, lambda status: "Conversation first" in screen(status), "palette entry shown")
     tui.send(b"\r")
-    wait_for(tui.status, lambda status: not status["conversation_first"], "palette turned it off")
-    print("opt-in: conversation first opens the conversation; its palette entry turns it off")
+    wait_for(tui.status, lambda status: status["conversation_first"], "palette turned it on")
+    tui.action("open")
+    stays_on_conversation(tui, opened=opened)
+    print("opt-in: terminal-first attaches; its palette entry restores conversation-first")
 
 
 def case_no_terminal(tui):
@@ -358,10 +363,10 @@ def case_reconnect(tui):
 
 CASES = {
     "default": (None, case_default),
-    "opt-in": ({"conversation_first": True}, case_opt_in),
-    "no-terminal": (None, case_no_terminal),
-    "alert": (None, case_alert),
-    "reconnect": (None, case_reconnect),
+    "opt-in": ({"conversation_first": False}, case_opt_in),
+    "no-terminal": ({"conversation_first": False}, case_no_terminal),
+    "alert": ({"conversation_first": False}, case_alert),
+    "reconnect": ({"conversation_first": False}, case_reconnect),
 }
 
 

@@ -2,23 +2,26 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars, radiusVars as r, spaceVars, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import type { PairingStore, PairingView } from './browserPairingState.ts'
+import { pairingStoreFor, type PairingStore, type PairingView } from './browserPairingState.ts'
+import { useDataSource, useGrants } from '../data/react.tsx'
 
-/**
- * Pairing for this browser, above the composer in the reading lane. It asks only where sending is not
- * already granted or Fractal refused a send, shows the code to approve in Fractal while it waits, and
- * offers to forget a paired browser. Hosts without browser pairing render nothing, leaving the composer as it was.
- */
-export function BrowserPairing({ store, messageSend }: { readonly store: PairingStore; readonly messageSend: 'granted' | 'ungranted' }) {
+/** Shared workspace discovery and Settings management use the same browser-scoped store. */
+export function BrowserPairingControl({ context = 'workspace', hidden = false }: { readonly context?: 'workspace' | 'settings'; readonly hidden?: boolean }) {
+  const source = useDataSource()
+  const grants = useGrants()
+  return source.pairing === undefined ? null : <BrowserPairing store={pairingStoreFor(source.pairing)} messageSend={grants.messageSend} context={context} hidden={hidden} />
+}
+
+export function BrowserPairing({ store, messageSend, context = 'workspace', hidden = false }: { readonly store: PairingStore; readonly messageSend: 'granted' | 'ungranted'; readonly context?: 'workspace' | 'settings'; readonly hidden?: boolean }) {
   const subscribe = React.useCallback((listener: () => void) => {
     const unsubscribe = store.subscribe(listener)
     const release = store.acquire()
     return () => { unsubscribe(); release() }
   }, [store])
   const view = React.useSyncExternalStore(subscribe, store.snapshot, store.snapshot)
-  const content = notice(view, messageSend, store)
+  const content = notice(view, messageSend, store, context)
   if (content === undefined) return null
-  return <div {...stylex.props(styles.lane)}>
+  return <div hidden={hidden} {...stylex.props(styles.lane, context === 'settings' && styles.settings)}>
     <section aria-label="Browser pairing" data-testid="browser-pairing" data-pairing-state={view._tag} {...stylex.props(styles.notice)}>
       {/* One live region: a code appearing or a refusal arriving is announced without moving focus. */}
       <p role="status" {...stylex.props(styles.text)}>
@@ -40,8 +43,8 @@ interface Notice {
   readonly action?: { readonly label: string; readonly run: () => void; readonly primary?: boolean; readonly busy?: boolean }
 }
 
-const notice = (view: PairingView, messageSend: 'granted' | 'ungranted', store: PairingStore): Notice | undefined => {
-  const request = { label: 'Enable sending on this browser', run: () => { void store.start() }, primary: true }
+const notice = (view: PairingView, messageSend: 'granted' | 'ungranted', store: PairingStore, context: 'workspace' | 'settings'): Notice | undefined => {
+  const request = { label: 'Pair this browser', run: () => { void store.start() }, primary: true }
   const retry = { label: 'Try again', run: () => { void store.start() } }
   switch (view._tag) {
     case 'Checking':
@@ -51,8 +54,8 @@ const notice = (view: PairingView, messageSend: 'granted' | 'ungranted', store: 
       // Another credential may already allow sending; only a browser that cannot send is asked to pair.
       if (view.error !== undefined) return { title: view.error, danger: true, action: request }
       // A refused send outranks the grants read at load: they no longer show whether this browser can send.
-      if (view.sendRefused === true) return { title: 'Fractal did not accept sending from this browser.', danger: true, detail: 'Approve it in Fractal to send messages from here.', action: request }
-      return messageSend === 'granted' ? undefined : { title: 'This browser can read but not send.', detail: 'Approve it in Fractal to send messages from here.', action: request }
+      if (view.sendRefused === true) return { title: 'Fractal did not accept sending from this browser.', danger: true, detail: 'Compare the code and approve it in Fractal.', action: request }
+      return messageSend === 'granted' ? undefined : { title: 'Pair this browser to request access.', detail: 'Compare the code and approve it in Fractal.', action: request }
     case 'Requesting':
       return { title: 'Requesting a pairing code…', action: { ...request, label: 'Requesting code…', busy: true } }
     case 'Pending':
@@ -64,12 +67,14 @@ const notice = (view: PairingView, messageSend: 'granted' | 'ungranted', store: 
         ? { title: 'Fractal declined this browser.', danger: true, detail: 'Request a new code if this was a mistake.', action: retry }
         : { title: 'The pairing code expired before it was approved.', detail: 'Request a new code and approve it in Fractal.', action: retry }
     case 'Paired':
+      if (context === 'workspace') return undefined
       return {
         title: view.error ?? 'This browser is paired.',
         ...(view.error === undefined ? {} : { danger: true }),
         action: { label: 'Forget this browser', run: () => { void store.forget() } },
       }
     case 'Forgetting':
+      if (context === 'workspace') return undefined
       return { title: 'Forgetting this browser…', action: { label: 'Forget this browser', run: () => {}, busy: true } }
     case 'Reloading':
       return { title: 'Reloading with this browser’s new access…' }
@@ -79,6 +84,7 @@ const notice = (view: PairingView, messageSend: 'granted' | 'ungranted', store: 
 const focusRing = { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
 const styles = stylex.create({
   lane: { width: '100%', maxWidth: geometryVars.lane, boxSizing: 'border-box', paddingInline: spaceVars.lg, paddingBottom: spaceVars.sm, marginInline: 'auto', flexShrink: 0 },
+  settings: { maxWidth: 'none', paddingInline: spaceVars.zero, paddingBottom: spaceVars.zero },
   notice: { display: 'flex', alignItems: 'center', gap: spaceVars.md, minWidth: 0 },
   text: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: spaceVars.sm, rowGap: spaceVars.xs2, flex: '1 1 0', minWidth: 0, margin: 0, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   title: { color: ink.fg, fontWeight: t.weightMedium },

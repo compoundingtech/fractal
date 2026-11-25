@@ -22,6 +22,7 @@ fn st3() -> &'static str {
 mod process;
 use process::DaemonProcess;
 mod service_grants;
+mod thread_storage_floor;
 
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";
@@ -334,6 +335,11 @@ PY
     }
 
     pub(super) async fn start(&mut self) {
+        self.start_with_schema_refusal(None).await;
+    }
+
+    // Only explicit previous-release probes may accept the daemon's schema-floor refusal.
+    async fn start_with_schema_refusal(&mut self, upgraded_schema: Option<u32>) -> bool {
         let pty = self.root.join("bin/pty");
         let log = |name: &str| fs::File::create(self.root.join(name)).unwrap();
         // No browser UI: its default address (127.0.0.1:7410) is a fixed port, and a host that already
@@ -368,6 +374,12 @@ PY
                 Err(_) => "health request timed out after 3 seconds".into(),
             };
             if let Some(status) = self.daemon.as_mut().unwrap().try_wait().unwrap() {
+                if upgraded_schema.is_some_and(|version| {
+                    refuses_newer_schema(status, &fs::read(self.root.join("daemon.stderr.log")).unwrap(), version)
+                }) {
+                    self.daemon.take();
+                    return false;
+                }
                 panic!(
                     "{} daemon exited with {status} (last health probe: {health_error}):\n{}",
                     self.name,
@@ -387,6 +399,7 @@ PY
         if legacy || self.state_dir().join("fleet/fleet.toml").exists() {
             self.start_worker();
         }
+        true
     }
 
     fn start_worker(&mut self) {
@@ -636,7 +649,7 @@ impl Drop for Node {
     }
 }
 
-async fn wait_until<F, Fut>(what: &str, seconds: u64, mut check: F)
+async fn wait_until<F, Fut>(what: impl std::fmt::Display, seconds: u64, mut check: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
@@ -3753,14 +3766,12 @@ async fn keyed_note(node: &Node, text: &str, key: &str) -> String {
     claim["id"].as_str().unwrap().to_owned()
 }
 
-/// A release member upgrades in place, and this build empties its valid records' bytes while it
-/// keeps replicating with a release peer in both directions. Rolled back over those emptied
-/// records, the release still reads every note, answers a retried request with the same claim,
-/// writes its next sequence and exchanges with an upgraded member to equal digests. Upgraded
-/// again, this build empties the bytes the release wrote meanwhile.
+/// A release member upgrades in place, and this build empties its valid records' bytes while
+/// replicating with a release peer in both directions. The obsolete reader refuses the
+/// upgraded store without changing it; the current build recovers its history and replication.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
-async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_bytes() {
+async fn previous_release_replicates_over_emptied_valid_record_bytes_and_refuses_rollback() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -3811,13 +3822,50 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
         wait_for_notes(node, &expected, 90, &[&o, &r, &n]).await;
     }
 
-    // Roll back over the emptied records.
+    // The privacy floor is one-way: rollback requires restoring a pre-upgrade backup.
     o.stop();
+    let database = o.state_dir().join("claims.sqlite3");
+    // Checkpoint crash-stop WAL before establishing the physical baseline, not as an
+    // exemption for obsolete-reader mutations. This tests a checkpointed baseline,
+    // not unchanged physical bytes during crash recovery.
+    {
+        let candidate = rusqlite::Connection::open_with_flags(
+            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        ).unwrap();
+        let (busy, log_frames, checkpointed_frames): (i32, i32, i32) = candidate.query_row(
+            "PRAGMA wal_checkpoint(TRUNCATE)", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(busy, 0, "the candidate must complete the baseline checkpoint");
+        // TRUNCATE leaves zero frames; SQLite reports -1/-1 when there is no WAL.
+        assert!(matches!((log_frames, checkpointed_frames), (0, 0) | (-1, -1)),
+            "baseline checkpoint left WAL frames: log={log_frames}, checkpointed={checkpointed_frames}");
+    }
+    let storage_state = || {
+        let reader = rusqlite::Connection::open_with_flags(
+            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap();
+        let version: u32 = reader.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        let gone: u32 = reader.query_row(
+            "SELECT COUNT(*) FROM meta WHERE key='valid_records_gone' AND value='1'",
+            [], |row| row.get(0),
+        ).unwrap();
+        (version, gone)
+    };
+    let state_before = storage_state();
+    assert_eq!(state_before.0, fractal_schema::STORAGE_VERSION);
+    let file_before = fs::read(&database).unwrap();
     o.binary = old;
+    assert!(!o.start_with_schema_refusal(Some(fractal_schema::STORAGE_VERSION)).await,
+        "the previous reader must refuse the privacy-fenced store");
+    assert_eq!(storage_state(), state_before, "refusal preserves both the floor and records-gone marker");
+    assert_eq!(fs::read(&database).unwrap(), file_before, "refusal must not change the store file");
+
+    o.binary = PathBuf::from(st3());
     o.start().await;
     wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
     assert_eq!(keyed_note(&o, "o-keyed", "o-keyed-note").await, retried, "a retried request is answered with its claim");
-    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-1")] {
+    for (node, text) in [(&o, "o-recovered"), (&n, "n-1")] {
         node.note(text).await;
         expected.insert(format!("custom/fleet-test/{text}"));
     }
@@ -3834,16 +3882,9 @@ async fn previous_release_replicates_and_rolls_back_over_emptied_valid_record_by
         assert_eq!(status["invalid_records"], 0, "{status}");
         assert_eq!(status["unsigned_envelopes"], 0, "{status}");
     }
-    // The release stored bytes for what it admitted and wrote; upgraded again, this build
-    // empties those too.
-    assert!(valid_record_bytes(&o).1 > 0, "the rolled-back release kept the bytes it wrote");
-    o.stop();
-    o.binary = PathBuf::from(st3());
-    o.start().await;
-    wait_until("the re-upgraded member empties the bytes the release wrote", 60, || async {
+    wait_until("the recovered current member keeps valid record bytes empty", 60, || async {
         valid_record_bytes(&o).1 == 0
-    })
-    .await;
+    }).await;
     wait_for_notes(&o, &expected, 30, &[&o, &r, &n]).await;
 }
 
@@ -6573,9 +6614,83 @@ async fn readers_find_stream_items_and_record_their_lifecycle_on_the_member() {
     assert_eq!(sent.status, "sent");
 }
 
+/// Match a real old reader's schema ceiling, including the exact version it refused.
+fn refuses_newer_schema(status: std::process::ExitStatus, stderr: &[u8], version: u32) -> bool {
+    let prefix = format!(
+        "fractal: this database uses unsupported st schema version {version}; this build supports storage schema versions "
+    );
+    status.code() == Some(2) && String::from_utf8_lossy(stderr).lines().any(|line| {
+        line.strip_prefix(&prefix).and_then(|range| range.split_once(" through "))
+            .and_then(|(min, max)| Some((min.parse::<u32>().ok()?, max.parse::<u32>().ok()?)))
+            .is_some_and(|(min, max)| min <= max && max < version)
+    })
+}
+
+#[test]
+fn schema_floor_probe_accepts_only_the_exact_old_reader_refusal() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let refusal = |version, minimum, maximum| format!(
+        "fractal: this database uses unsupported st schema version {version}; this build supports storage schema versions {minimum} through {maximum}\n"
+    );
+    let status = std::process::ExitStatus::from_raw(2 << 8);
+    assert!(refuses_newer_schema(status, refusal(23, 1, 20).as_bytes(), 23));
+    assert!(refuses_newer_schema(status, refusal(23, 1, 22).as_bytes(), 23));
+    for stderr in [
+        refusal(22, 1, 20),
+        refusal(23, 1, 23),
+        refusal(23, 21, 20),
+        "fractal: database is locked\n".into(),
+        "fractal: this database uses unsupported st schema version 23; this build supports storage schema versions unknown\n".into(),
+    ] {
+        assert!(!refuses_newer_schema(status, stderr.as_bytes(), 23), "{stderr}");
+    }
+    assert!(!refuses_newer_schema(
+        std::process::ExitStatus::from_raw(1 << 8),
+        refusal(23, 1, 20).as_bytes(),
+        23,
+    ));
+    assert!(!refuses_newer_schema(
+        std::process::ExitStatus::from_raw(0),
+        refusal(23, 1, 20).as_bytes(),
+        23,
+    ));
+}
+
+fn database_schema(database: &Path) -> u32 {
+    rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap().query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap()
+}
+
+/// Take the recovery archive while the previous release still owns the running store.
+fn previous_release_archive(node: &Node, parent: &Path) -> PathBuf {
+    let archive = parent.join("pre-upgrade.jsonl");
+    let result = node.command(&["backup", "create", archive.to_str().unwrap()]).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    archive
+}
+
+/// Try the real in-place downgrade. At a schema floor, restore the old archive separately
+/// so the upgraded state is still available to reopen with the current binary.
+async fn previous_release_rollback(node: &mut Node, old: &Path, archive: &Path) -> Option<Node> {
+    let database = node.state_dir().join("claims.sqlite3");
+    let version = database_schema(&database);
+    node.stop();
+    node.binary = old.into();
+    if node.start_with_schema_refusal(Some(version)).await {
+        return None;
+    }
+    assert_eq!(database_schema(&database), version, "the refusal changed the upgraded schema");
+    let (restored, _) = restored_node_with_binary(
+        node.root.parent().unwrap(), "rollback-from-archive", archive, old,
+    ).await;
+    assert!(database_schema(&restored.state_dir().join("claims.sqlite3")) < version);
+    Some(restored)
+}
+
 /// Mail the previous release wrote is read the same after an upgrade in place, and pages list it
-/// before the member's stream items. Rolling back to the release keeps every graph receipt either
-/// build wrote and leaves the stream's local records for the next upgrade.
+/// before the member's stream items. A compatible in-place downgrade keeps every graph receipt.
+/// When the previous release refuses the upgraded store, its own archive remains recoverable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_rollback() {
@@ -6645,6 +6760,7 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
         [(first.clone(), "read".to_owned()), (second.clone(), "sent".to_owned())]
     );
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place: the release's mail reads the same, and a stream item follows it.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -6666,31 +6782,35 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     assert_eq!(listed(&o).await, merged);
     assert!(o.claims().await.iter().all(|claim| claim["subject"] != stream));
 
-    // Roll back: the release reads every graph receipt. One that reads stream items also lists the
-    // stream item, read from its local receipt, after its graph mail; an older one ignores the
-    // shard beside it.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    let third = if release_reads_stream {
+    // In-place downgrade keeps graph receipts and stream state where the old schema permits it.
+    // The archive branch instead verifies the mail that existed before the upgrade.
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    let third = if let Some(restored) = &restored {
+        assert_eq!(listed(restored).await, before, "the recovery archive restores pre-upgrade mail");
+        let third = send(restored, "restored-before-upgrade").await;
+        assert_eq!(listed(restored).await.last(), Some(&(third, "sent".into())));
+        None
+    } else if release_reads_stream {
         assert_eq!(listed(&o).await, merged);
         let third = send(&o, "rolled-back").await;
         let mut expected = merged.clone();
         expected.insert(2, (third.clone(), "sent".to_owned()));
         assert_eq!(listed(&o).await, expected);
-        third
+        Some(third)
     } else {
         assert_eq!(listed(&o).await, merged[..2]);
         let third = send(&o, "rolled-back").await;
         assert_eq!(listed(&o).await.last(), Some(&(third.clone(), "sent".to_owned())));
-        third
+        Some(third)
     };
 
-    // Upgrade again: the stream item kept its local receipt and follows the newer graph mail.
+    // Reopen with the current reader: the upgraded store retains its stream and local receipts.
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
-    merged.insert(2, (third, "sent".to_owned()));
+    if let Some(third) = third {
+        merged.insert(2, (third, "sent".into()));
+    }
     assert_eq!(listed(&o).await, merged);
     // Pages by sender, and without a recipient, list the release's mail before the stream's.
     let page = |query: &'static str| {
@@ -6703,13 +6823,13 @@ async fn previous_release_mail_reads_beside_stream_items_across_upgrade_and_roll
     let subjects = merged.iter().map(|(subject, _)| subject.clone()).collect::<Vec<_>>();
     assert_eq!(page("include_closed=true").await, subjects);
     assert_eq!(page("from=agent/fleet-sender&include_closed=true").await, [stream]);
-    assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..3]);
+    assert_eq!(page("from=person/fleet-tester&include_closed=true").await, subjects[..subjects.len() - 1]);
 }
 
 /// Signature verdicts through the settled-judging prune: a previous-release member and a new
-/// one replicate signed claims both ways; the previous release upgraded in place drops the
-/// judging rows it kept without changing a verdict or the replicated set; rolled back, it reads
-/// and writes verdicts as before, and upgraded again it prunes what it wrote meanwhile.
+/// one replicate signed claims both ways; upgrading the release prunes settled judging rows
+/// without changing verdicts. The obsolete reader refuses upgraded state and recovers only
+/// its pre-upgrade archive; current-build recovery preserves post-upgrade verdicts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_and_rollback() {
@@ -6731,6 +6851,25 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
     n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
     o.start().await;
     n.start().await;
+    // Enroll the existing legacy identities through supported migration before archiving.
+    // A fresh restore writer must recover trust from membership, not the original node key.
+    o.stop();
+    o.migrate(&["--anchor"]);
+    o.start().await;
+    o.wait_listening().await;
+    let code = o.invite("n", &["--migrate"]);
+    n.stop();
+    n.migrate(&[&code, "--via", &format!("http://127.0.0.1:{}", o.port)]);
+    n.start().await;
+    for node in [&o, &n] {
+        wait_until("both legacy identities have authenticated membership", 90, || async {
+            let status = node.st_json(&["fleet", "status"]);
+            status["view"]["members"].as_array().is_some_and(|members| {
+                ["o", "n"].iter().all(|name| members.iter()
+                    .any(|member| member["name"] == *name && member["state"] == "current"))
+            })
+        }).await;
+    }
     let rows = |node: &Node, sql: &str| -> i64 {
         rusqlite::Connection::open_with_flags(
             node.state_dir().join("claims.sqlite3"),
@@ -6740,8 +6879,7 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
     };
-    // Every signed claim's verdict. A peer's claims read held here, since the legacy fleet does not
-    // enroll node keys; what matters is that no verdict changes across upgrade and rollback.
+    // Every signed claim's verdict must survive upgrade and fresh-writer archive recovery.
     let verdicts = |node: &Node| -> BTreeMap<String, String> {
         let connection = rusqlite::Connection::open_with_flags(
             node.state_dir().join("claims.sqlite3"),
@@ -6821,6 +6959,8 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
     // The new member keeps no row for a settled verdict; the previous release keeps one each.
     assert_eq!(rows(&n, "SELECT COUNT(*) FROM claim_signature_judging"), 0);
     assert!(rows(&o, "SELECT COUNT(*) FROM claim_signature_judging") > 0);
+    let release_judged = verdicts(&o);
+    let recovery = previous_release_archive(&o, root.path());
 
     // Upgrade in place: the prune drops the release's rows, verdicts and the set stay.
     let judged = verdicts(&o);
@@ -6854,10 +6994,26 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
 
-    // Roll back: the release reads every verdict, signs and replicates as before.
+    // Old readers do not consume post-upgrade state: recover their pre-upgrade archive.
     let judged = verdicts(&o);
-    o.stop();
-    o.binary = old;
+    let mut restored = previous_release_rollback(&mut o, &old, &recovery).await
+        .expect("the pinned release must refuse the privacy floor");
+    settle!(&restored);
+    kept(&release_judged, &verdicts(&restored), "release archive");
+    note(&restored, "restored-release-write").await;
+    settle!(&restored);
+    assert!(rows(&restored, "SELECT COUNT(*) FROM claim_signature_judging") > 0);
+    let restored_judged = verdicts(&restored);
+    restored.stop();
+    restored.binary = PathBuf::from(st3());
+    restored.start().await;
+    wait_until("the restored release's settled judging rows are pruned on upgrade", 120, || async {
+        rows(&restored, "SELECT COUNT(*) FROM claim_signature_judging") == 0
+    }).await;
+    settle!(&restored);
+    kept(&restored_judged, &verdicts(&restored), "restored release upgrade");
+
+    o.binary = PathBuf::from(st3());
     o.start().await;
     // A legacy member dials its static peers and announces no endpoint: wait for its port.
     wait_until("the restarted member listens", 30, || async {
@@ -6865,8 +7021,8 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
     })
     .await;
     settle!(&o);
-    kept(&judged, &verdicts(&o), "rollback");
-    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-after-rollback")] {
+    kept(&judged, &verdicts(&o), "current recovery after refusal");
+    for (node, text) in [(&o, "o-recovered"), (&n, "n-after-recovery")] {
         note(node, text).await;
         expected.insert(format!("custom/fleet-test/{text}"));
     }
@@ -6875,7 +7031,7 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
         settle!(node);
     }
 
-    // Upgrade again: what the release kept meanwhile is pruned too.
+    // Reopening current state keeps verdicts settled and pruned.
     let judged = verdicts(&o);
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -6895,8 +7051,8 @@ async fn previous_release_verdicts_survive_settled_judging_prune_across_upgrade_
 
 /// Verdict links without their index by claim: a previous-release member and a new one
 /// replicate signed claims both ways; the previous release upgraded in place drops the index
-/// without changing a verdict or the replicated set; rolled back, it rebuilds the index at open
-/// and reads, signs and replicates as before; upgraded again, the index goes again.
+/// without changing a verdict or the replicated set. The obsolete reader restores only its
+/// pre-upgrade archive, where its derived index exists; current recovery keeps upgraded state.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_across_upgrade_and_rollback() {
@@ -6919,6 +7075,25 @@ async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_acros
     n.legacy_config(fleet_id, &secret, &[("o", o.port)]);
     o.start().await;
     n.start().await;
+    // Enroll the existing legacy identities through supported migration before archiving.
+    // A fresh restore writer must recover trust from membership, not the original node key.
+    o.stop();
+    o.migrate(&["--anchor"]);
+    o.start().await;
+    o.wait_listening().await;
+    let code = o.invite("n", &["--migrate"]);
+    n.stop();
+    n.migrate(&[&code, "--via", &format!("http://127.0.0.1:{}", o.port)]);
+    n.start().await;
+    for node in [&o, &n] {
+        wait_until("both legacy identities have authenticated membership", 90, || async {
+            let status = node.st_json(&["fleet", "status"]);
+            status["view"]["members"].as_array().is_some_and(|members| {
+                ["o", "n"].iter().all(|name| members.iter()
+                    .any(|member| member["name"] == *name && member["state"] == "current"))
+            })
+        }).await;
+    }
     let rows = |node: &Node, sql: &str| -> i64 {
         rusqlite::Connection::open_with_flags(
             node.state_dir().join("claims.sqlite3"),
@@ -6928,8 +7103,7 @@ async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_acros
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
     };
-    // Every signed claim's verdict. A peer's claims read held here, since the legacy fleet does not
-    // enroll node keys; what matters is that no verdict changes across upgrade and rollback.
+    // Every signed claim's verdict must survive upgrade and fresh-writer archive recovery.
     let verdicts = |node: &Node| -> BTreeMap<String, String> {
         let connection = rusqlite::Connection::open_with_flags(
             node.state_dir().join("claims.sqlite3"),
@@ -7010,6 +7184,8 @@ async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_acros
     assert_eq!(rows(&n, INDEXED), 0);
     assert_eq!(rows(&o, INDEXED), 1);
     assert!(rows(&n, "SELECT COUNT(*) FROM claim_verdict_links") > 0);
+    let release_judged = verdicts(&o);
+    let recovery = previous_release_archive(&o, root.path());
 
     // Upgrade in place: the open drops the release's index, verdicts and the set stay.
     let judged = verdicts(&o);
@@ -7040,21 +7216,34 @@ async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_acros
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
 
-    // Roll back: the release rebuilds its index at open, then reads every verdict, signs and
-    // replicates as before.
+    // Old readers do not consume post-upgrade state: restore their pre-upgrade archive.
     let judged = verdicts(&o);
-    o.stop();
-    o.binary = old;
+    let mut restored = previous_release_rollback(&mut o, &old, &recovery).await
+        .expect("the pinned release must refuse the privacy floor");
+    assert_eq!(rows(&restored, INDEXED), 1);
+    settle!(&restored);
+    kept(&release_judged, &verdicts(&restored), "release archive");
+    note(&restored, "restored-release-write").await;
+    settle!(&restored);
+    let restored_judged = verdicts(&restored);
+    restored.stop();
+    restored.binary = PathBuf::from(st3());
+    restored.start().await;
+    assert_eq!(rows(&restored, INDEXED), 0);
+    settle!(&restored);
+    kept(&restored_judged, &verdicts(&restored), "restored release upgrade");
+
+    o.binary = PathBuf::from(st3());
     o.start().await;
     // A legacy member dials its static peers and announces no endpoint: wait for its port.
     wait_until("the restarted member listens", 30, || async {
         tokio::net::TcpStream::connect(("127.0.0.1", o.port)).await.is_ok()
     })
     .await;
-    assert_eq!(rows(&o, INDEXED), 1);
+    assert_eq!(rows(&o, INDEXED), 0, "current recovery must not recreate the obsolete index");
     settle!(&o);
-    kept(&judged, &verdicts(&o), "rollback");
-    for (node, text) in [(&o, "o-rolled-back"), (&n, "n-after-rollback")] {
+    kept(&judged, &verdicts(&o), "current recovery after refusal");
+    for (node, text) in [(&o, "o-recovered"), (&n, "n-after-recovery")] {
         note(node, text).await;
         expected.insert(format!("custom/fleet-test/{text}"));
     }
@@ -7063,7 +7252,7 @@ async fn previous_release_verdicts_survive_dropping_the_verdict_link_index_acros
         settle!(node);
     }
 
-    // Upgrade again: the index goes again.
+    // Reopening current state keeps the obsolete index absent.
     let judged = verdicts(&o);
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -7163,6 +7352,7 @@ async fn previous_release_refuses_a_stream_cursor_and_lists_each_subject_once_ac
     let release_cursor = first.next_cursor.expect("the release's first page has more");
     assert!(decoded(&release_cursor)["after"].as_u64().is_some_and(|after| after < base));
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place, then the stream: three items, and two under subjects the graph holds,
     // one between them and one last.
     o.stop();
@@ -7210,23 +7400,35 @@ async fn previous_release_refuses_a_stream_cursor_and_lists_each_subject_once_ac
     assert_eq!(subjects(&walk(&o, Some(release_cursor.clone())).await), expected[2..]);
 
     // Roll back: the release answers the stream cursor as invalid (422), and the listing starts over.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    let rolled_back = walk(&o, None).await;
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    let rollback = restored.as_ref().unwrap_or(&o);
+    let rolled_back = walk(rollback, None).await;
     let listed = subjects(&rolled_back);
     // v0.3.25 then lists the stream, with the graph's subjects again among it; this build's guard
     // is what lists each once.
-    assert_eq!(listed[..5], graph, "the release lists its mail first: {rolled_back:?}");
+    assert_eq!(listed[..graph.len()], graph, "the release lists its mail first: {rolled_back:?}");
+    if restored.is_some() {
+        assert_eq!(listed, graph, "the recovery archive predates the stream");
+        assert_eq!(subjects(&walk(rollback, Some(release_cursor.clone())).await), graph[2..]);
+    }
     let release_cursors = rolled_back.iter().filter_map(|(_, cursor)| cursor.as_deref()).map(decoded).collect::<Vec<_>>();
-    if release_cursors.iter().any(|cursor| cursor.get("stream_after").is_some()) {
+    if restored.is_none() && release_cursors.iter().any(|cursor| cursor.get("stream_after").is_some()) {
         // A release with stream_after cursors reads this build's.
-        assert_eq!(subjects(&walk(&o, Some(stream_cursor.clone())).await), expected[6..]);
+        assert_eq!(subjects(&walk(rollback, Some(stream_cursor.clone())).await), expected[6..]);
     } else {
-        let refused = page(&o, Some(stream_cursor.clone())).await.unwrap_err();
-        let (status, code, message, _) =
-            fractal_daemon::client::api_error_parts(&refused).unwrap_or_else(|| panic!("{refused:#}"));
-        assert_eq!((status, code, message), (422, "validation-failed", "invalid message cursor"));
+        match page(rollback, Some(stream_cursor.clone())).await {
+            // A restored archive has no stream data. A reader that knows the cursor can
+            // report an exhausted stream, and must never replay graph mail from it.
+            Ok(page) if restored.is_some() => {
+                assert!(page.items.is_empty() && !page.has_more && page.next_cursor.is_none(), "{page:?}");
+            }
+            Err(refused) => {
+                let (status, code, message, _) =
+                    fractal_daemon::client::api_error_parts(&refused).unwrap_or_else(|| panic!("{refused:#}"));
+                assert_eq!((status, code, message), (422, "validation-failed", "invalid message cursor"));
+            }
+            Ok(page) => panic!("the release unexpectedly accepted the stream cursor: {page:?}"),
+        }
     }
     // A cursor the release gives into the stream, if it lists the stream, names it in `after`.
     let release_stream_cursor = rolled_back
@@ -7325,6 +7527,7 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
     let before = listed(&o).await;
     assert_eq!(state(&before), ["read", "sent", "sent"]);
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place: the release's claims read the same; marks count beside them.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -7370,22 +7573,25 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
 
     // Roll back: the release runs on this store. One that reads marks sees the marked message as
     // read; an older one reads its own claims only, and sees it as sent, as the release note says.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    let marked = if release_reads_marks { "read" } else { "sent" };
-    assert_eq!(state(&listed(&o).await), ["read", marked, "sent"]);
-    read(&o, &third, "rolled-back-read").await;
-    let fourth = send(&o, "rolled-back-send").await;
-    assert_eq!(state(&listed(&o).await), ["read", marked, "read", "sent"]);
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    let rollback = restored.as_ref().unwrap_or(&o);
+    let marked = if restored.is_none() && release_reads_marks { "read" } else { "sent" };
+    assert_eq!(state(&listed(rollback).await), ["read", marked, "sent"]);
+    read(rollback, &third, "rolled-back-read").await;
+    let fourth = send(rollback, "rolled-back-send").await;
+    assert_eq!(state(&listed(rollback).await), ["read", marked, "read", "sent"]);
 
     // Upgrade again: the mark still counts beside every claim either build wrote.
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
     let after = listed(&o).await;
-    assert_eq!(state(&after), ["read", "read", "read", "sent"]);
-    assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
+    if restored.is_some() {
+        assert_eq!(state(&after), ["read", "read", "sent"]);
+    } else {
+        assert_eq!(state(&after), ["read", "read", "read", "sent"]);
+        assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
+    }
 }
 
 /// Each record of the archive at `path`, as JSON.
@@ -7396,7 +7602,12 @@ fn archive_records(path: &Path) -> Vec<Value> {
 /// A standalone node started by this build on `archive`, restored with this build's CLI into its
 /// state directory and named for the restored writer, as the restore says to.
 async fn restored_node(parent: &Path, directory: &str, archive: &Path) -> (Node, Value) {
+    restored_node_with_binary(parent, directory, archive, Path::new(st3())).await
+}
+
+async fn restored_node_with_binary(parent: &Path, directory: &str, archive: &Path, binary: &Path) -> (Node, Value) {
     let mut node = Node::named(parent, directory, "restoring");
+    node.binary = binary.into();
     let database = node.state_dir().join("claims.sqlite3");
     let restored = node
         .command(&["--json", "backup", "restore", "--database", database.to_str().unwrap(), archive.to_str().unwrap()])
@@ -7412,9 +7623,10 @@ async fn restored_node(parent: &Path, directory: &str, archive: &Path) -> (Node,
 }
 
 /// Backups across the messages shard (db break-up step 4c-1). While the shard holds nothing, the
-/// previous release and this build restore each other's archives, and this build writes what the
-/// release writes from the same database: its version and every record but the build that wrote
-/// it. Once the shard holds a stream item the archive is version 5: a release predating the
+/// previous release and this build restore each other's archives. If the release supports the
+/// upgraded SQLite schema, both export equivalent records from that database. Otherwise, the
+/// previous release rejects the database but can still recover its own archive.
+/// Once the shard holds a stream item the archive is version 5: a release predating the
 /// shard refuses it, naming the format, and this build restores it with the item and its read
 /// on the member. Releases already opening the shard skip only the refusal expectations.
 #[tokio::test(flavor = "multi_thread")]
@@ -7496,6 +7708,7 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     assert_eq!(before, [(first.clone(), "read".to_owned()), (second.clone(), "sent".to_owned())]);
 
     // The release's archive: this build restores it, and reads the same mail on it.
+    let release_schema = database_schema(&o.state_dir().join("claims.sqlite3"));
     let release_archive = root.path().join("release.jsonl");
     let release_records = backup(&o, &release_archive, None);
     let release_digest = release_records[0]["data"]["registry_digest"].clone();
@@ -7516,6 +7729,7 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     assert_eq!(listed(&o).await, before, "upgrade changed the release's mail");
     o.stop();
     let database = o.state_dir().join("claims.sqlite3");
+    assert_eq!(database_schema(&database), fractal_schema::STORAGE_VERSION, "the current reader must advance the local floor");
     let copy = root.path().join("release-export/claims.sqlite3");
     fs::create_dir_all(copy.parent().unwrap()).unwrap();
     rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -7525,12 +7739,36 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     let empty_shard_archive = root.path().join("empty-shard.jsonl");
     let ours = backup(&o, &empty_shard_archive, Some(&database));
     o.binary = old.clone();
-    let theirs = backup(&o, &root.path().join("release-of-upgraded.jsonl"), Some(&copy));
+    let release_of_upgraded = root.path().join("release-of-upgraded.jsonl");
+    let old_export = o.command(&[
+        "backup", "create", release_of_upgraded.to_str().unwrap(), "--database", copy.to_str().unwrap(),
+    ]).output().unwrap();
+    if release_schema < fractal_schema::STORAGE_VERSION {
+        assert!(
+            !old_export.status.success(),
+            "a storage-{release_schema} reader opened the storage-{} database", fractal_schema::STORAGE_VERSION,
+        );
+    }
+    let theirs = if old_export.status.success() {
+        Some(archive_records(&release_of_upgraded))
+    } else {
+        assert!(
+            refuses_newer_schema(old_export.status, &old_export.stderr, database_schema(&database)),
+            "{}",
+            String::from_utf8_lossy(&old_export.stderr),
+        );
+        assert!(!release_of_upgraded.exists(), "a refused export published an archive");
+        let (recovered, report) = restored_node_with_binary(
+            root.path(), "release-from-pre-upgrade-archive", &release_archive, &old,
+        ).await;
+        assert_eq!(report["graph_digest"], release_records[0]["data"]["graph_digest"]);
+        assert_eq!(listed(&recovered).await, before, "old-reader recovery changed the release's mail");
+        None
+    };
     o.binary = PathBuf::from(st3());
     let current_digest = fractal_daemon::store::Store::open_memory("archive-writer").unwrap()
         .backup_header().unwrap().registry_digest;
     assert_eq!(ours[0]["data"]["registry_digest"], current_digest);
-    assert_eq!(theirs[0]["data"]["registry_digest"], release_digest);
     let without_build = |records: &[Value]| {
         let mut header = records[0].clone();
         header["data"].as_object_mut().unwrap().remove("source_build");
@@ -7548,8 +7786,11 @@ async fn previous_release_and_this_build_restore_each_others_archives_until_the_
     assert!(ours[0]["data"]["version"].as_u64().unwrap() < 5, "{}", ours[0]);
     assert!(ours[0]["data"].get("shards").is_none(), "{}", ours[0]);
     assert!(ours.iter().all(|record| !record["record"].as_str().unwrap().starts_with("shard-")));
-    assert_eq!(without_build(&ours), without_build(&theirs), "an empty shard changed the archive");
-    // The release restores it.
+    if let Some(theirs) = theirs {
+        assert_eq!(theirs[0]["data"]["registry_digest"], release_digest);
+        assert_eq!(without_build(&ours), without_build(&theirs), "an empty shard changed the archive");
+    }
+    // The logical archive is distinct from opening the upgraded SQLite database.
     let restored = release_restore(&mut o, &empty_shard_archive, &root.path().join("release-restored/claims.sqlite3"));
     assert!(restored.status.success(), "{}", String::from_utf8_lossy(&restored.stderr));
     let report: Value = serde_json::from_slice(&restored.stdout).unwrap();
@@ -7923,6 +8164,7 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     assert_eq!(claimed, if release_staged_reads { 0 } else if release_marks { 2 } else { 3 });
     let release_reads_marks = reads_seat_freshness(&o).await;
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, alone: marks are on at once.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -7981,11 +8223,15 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     // Rolled back. A release that reads marks reads every message as this build left it, in the
     // reads the mailbox offers from too, so a restart offers nothing again; an older release reads
     // its own claims only.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    let rolled_back = [status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await];
-    if release_marks {
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    let rollback = restored.as_ref().unwrap_or(&o);
+    let rolled_back = [status(rollback, &delivered).await, status(rollback, &staged).await, status(rollback, &unsent).await];
+    if restored.is_some() {
+        // The archive's fresh writer cannot act as the original seat host. A replicated
+        // staging claim remains visible, while a host-local mark needs the original member.
+        let archived_stage = if release_staged_reads { "sent" } else { "staged" };
+        assert_eq!(rolled_back, ["delivered", archived_stage, "sent"]);
+    } else if release_marks {
         assert_eq!(rolled_back, upgraded, "rolled back to a release that reads staging marks, mail went back");
         assert_eq!(listed(&o).await, before_rollback, "rolled back, the mailbox's reads changed");
     } else if release_reads_marks {
@@ -8379,6 +8625,10 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     }
     assert_eq!(lifecycle(&h, &before, "delivered").await.starts_with("offset-receipt/"), release_marks);
 
+    wait_until("the previous reader holds the original mail before backup", 90, || async {
+        graph_sent_claims(&o, &before).await == 1
+    }).await;
+    let recovery = previous_release_archive(&o, root.path());
     // Both upgrade: marks turn on, and the host's read is a mark that `o` reads from `h`.
     for node in [&mut o, &mut h] {
         node.stop();
@@ -8451,9 +8701,17 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     .await;
 
     // `o` rolls back: the host stops recording marks, and its next lifecycle write is a claim.
-    o.stop();
-    o.binary = old.clone();
-    o.start().await;
+    if let Some(restored) = previous_release_rollback(&mut o, &old, &recovery).await {
+        assert!(view(&restored, &before).await.is_some(), "recovery lost the release's mail");
+        assert!(view(&restored, &winner).await.is_none(), "recovery contains post-upgrade mail");
+        o.binary = PathBuf::from(st3());
+        o.start().await;
+        wait_until("the current member still reads the host's marks after reopening", 90, || async {
+            view(&o, &marked).await.is_some_and(|mail| mail["status"] == "read")
+                && view(&o, &staged).await.is_some_and(|mail| mail["status"] == "staged")
+        }).await;
+        return;
+    }
     // The release never reads the kept close: its table and trigger are inert, and it lists the
     // reminders from its own records.
     let listed: Value = o.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
@@ -8635,6 +8893,7 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     assert_eq!(listed.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), std::slice::from_ref(&first));
     let first_sequence = listed[0].1;
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place: the release's cursor resumes, and a stream item joins the conversation
     // after the graph claim it arrived behind.
     o.stop();
@@ -8673,13 +8932,33 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
         assert_eq!(release["reply"], false, "{release}");
     }
 
-    // Roll back. Stream support alone does not imply support for a newer cursor: #6948 added
-    // the stream-receipt position as a sixth field. An older format must request a full read.
+    // Roll back. An older release asks for a full read on this build's cursor; one that reads
+    // stream items resumes it, with the stream and graph mail since. The release's mail and the
+    // graph reply read as before.
+    if let Some(restored) = previous_release_rollback(&mut o, &old, &recovery).await {
+        let page: MessagePage = restored.client()
+            .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true").await.unwrap();
+        let archived = page.items.iter().map(|item| item.subject.as_str()).collect::<Vec<_>>();
+        assert_eq!(archived, [first.as_str()], "the archive contains the pre-upgrade conversation mail");
+        let unavailable = person(&restored).get::<Value>(&changes_path(None)).await.unwrap_err();
+        let (status, code, message, _) =
+            fractal_daemon::client::api_error_parts(&unavailable).unwrap_or_else(|| panic!("{unavailable:#}"));
+        assert_eq!((status, code), (503, "remote-unavailable"));
+        assert!(message.contains("host/o"), "{message}");
+
+        o.binary = new;
+        o.start().await;
+        let (resumed_cursor, resumed) = changes(&o, Some(upgraded_cursor)).await;
+        assert_eq!(resumed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            [this_reply, graph_reply.as_str(), release_reply, unseen.as_str()]);
+        let later = send(&o, "after-reader-reopen", PERSON, reader).await;
+        let (_, after_reopen) = changes(&o, Some(resumed_cursor)).await;
+        assert_eq!(after_reopen.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), [later.as_str()]);
+        return;
+    }
+    // Stream support alone does not imply the newer six-field cursor format.
     let cursor_fields = |cursor: &str| cursor.rsplit('/').next().unwrap().split('.').count();
     let release_accepts_cursor = cursor_fields(&upgraded_cursor) <= cursor_fields(&release_cursor);
-    o.stop();
-    o.binary = old.clone();
-    o.start().await;
     if release_accepts_cursor {
         let (_, resumed) = changes(&o, Some(upgraded_cursor.clone())).await;
         assert_eq!(
@@ -8859,6 +9138,7 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     let mut before = listed(&o).await;
     assert_eq!(before, [(first, "read".to_owned()), (second, "sent".to_owned())]);
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place: the mail reads the same, and the outbox is there and empty.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -8883,37 +9163,42 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     o.stop();
     let left = "message/0000000000000e01";
     leave_in_outbox(&o, left, "agent/fleet-sender", "agent/fleet-reader", 0);
-    o.start().await;
-    let mut rolled_back = before.clone();
     let mut release_drains_to_graph = false;
-    if release_drains_outbox {
-        // v0.3.31 rechecks recipient routing: this undeclared seat has no host,
-        // so the queued item goes to the graph rather than the shard.
-        // Older outbox baselines appended directly to the shard.
-        wait_until("the baseline drains its outbox", 60, || async { outbox(&o).is_empty() }).await;
-        release_drains_to_graph = graph_messages(&o, left).await == 1;
-        if release_drains_to_graph {
-            assert_eq!(shard_file_claims(&o, left), 0, "the routed fallback must not duplicate mail in the shard");
-            before.push((left.to_owned(), "sent".to_owned()));
-            eprintln!(
-                "baseline release already reroutes outbox mail without a recipient host to the graph; \
-                 skipping only the historical shard-drain assertions"
-            );
-        } else {
-            assert_eq!(shard_file_claims(&o, left), 1, "the release drained the queued item to its shard");
-            assert_eq!(graph_messages(&o, left).await, 0, "the release drained to one store only");
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    if let Some(restored) = &restored {
+        assert_eq!(listed(restored).await, before, "recovery changed the old reader's mail");
+        assert_eq!(outbox(&o), [left], "the refused downgrade changed the pending outbox");
+    } else {
+        let mut rolled_back = before.clone();
+        if release_drains_outbox {
+            // v0.3.31 rechecks recipient routing: this undeclared seat has no host,
+            // so the queued item goes to the graph rather than the shard.
+            // Older outbox baselines appended directly to the shard.
+            wait_until("the baseline drains its outbox", 60, || async { outbox(&o).is_empty() }).await;
+            release_drains_to_graph = graph_messages(&o, left).await == 1;
+            if release_drains_to_graph {
+                assert_eq!(shard_file_claims(&o, left), 0, "the routed fallback must not duplicate mail in the shard");
+                before.push((left.to_owned(), "sent".to_owned()));
+                eprintln!(
+                    "baseline release already reroutes outbox mail without a recipient host to the graph; \
+                     skipping only the historical shard-drain assertions"
+                );
+            } else {
+                assert_eq!(shard_file_claims(&o, left), 1, "the release drained the queued item to its shard");
+                assert_eq!(graph_messages(&o, left).await, 0, "the release drained to one store only");
+            }
+            rolled_back.push((left.to_owned(), "sent".to_owned()));
         }
-        rolled_back.push((left.to_owned(), "sent".to_owned()));
+        assert_eq!(listed(&o).await, rolled_back, "rollback changed the mail");
+        let third = send(&o, "rolled-back").await;
+        before.push((third, "sent".to_owned()));
+        rolled_back = before.clone();
+        if release_drains_outbox && !release_drains_to_graph {
+            rolled_back.push((left.to_owned(), "sent".to_owned()));
+        }
+        assert_eq!(listed(&o).await, rolled_back);
+        assert_eq!(outbox(&o), if release_drains_outbox { Vec::<String>::new() } else { vec![left.to_owned()] });
     }
-    assert_eq!(listed(&o).await, rolled_back, "rollback changed the mail");
-    let third = send(&o, "rolled-back").await;
-    before.push((third, "sent".to_owned()));
-    rolled_back = before.clone();
-    if release_drains_outbox && !release_drains_to_graph {
-        rolled_back.push((left.to_owned(), "sent".to_owned()));
-    }
-    assert_eq!(listed(&o).await, rolled_back);
-    assert_eq!(outbox(&o), if release_drains_outbox { Vec::<String>::new() } else { vec![left.to_owned()] });
 
     // Upgrade again: an existing copy stays in its one store. If the baseline left
     // it queued, the candidate routes this undeclared recipient to the graph.
@@ -8921,7 +9206,7 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     o.binary = PathBuf::from(st3());
     o.start().await;
     wait_until("the upgraded member drains the outbox", 60, || async { outbox(&o).is_empty() }).await;
-    let left_in_graph = !release_drains_outbox || release_drains_to_graph;
+    let left_in_graph = restored.is_some() || !release_drains_outbox || release_drains_to_graph;
     assert_eq!(stream_items(&o, left).await, if left_in_graph { 0 } else { 1 });
     assert_eq!(graph_messages(&o, left).await, if left_in_graph { 1 } else { 0 });
     if !release_drains_to_graph {
@@ -9088,6 +9373,7 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
 
     // Upgrade the release in place: its store opens with the shard beside it.
     let retained: BTreeSet<String> = o.notes().await;
+    let recovery = previous_release_archive(&o, root.path());
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
@@ -9095,11 +9381,18 @@ async fn previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in
     wait_for_stream_peers(&n1, &["o"], 90).await;
     wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
 
-    // Roll back in place; a release predating the shard leaves it alone and stops advertising it.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    if !release_opens_shard {
+    // A release predating the shard leaves it alone and stops advertising it. A schema floor
+    // instead leaves the upgraded member intact and the old release starts on its own archive.
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    if let Some(restored) = restored {
+        assert!(retained.is_subset(&restored.notes().await), "recovery lost release history");
+        restored.note("restored-before-upgrade").await;
+        assert!(restored.notes().await.contains("custom/fleet-test/restored-before-upgrade"));
+        o.binary = PathBuf::from(st3());
+        o.start().await;
+        wait_for_stream_peers(&n1, &["o"], 90).await;
+        wait_for_stream_item(&o, "message/0000000000000b01", 90).await;
+    } else if !release_opens_shard {
         assert!(o.state_dir().join("shards/messages/claims.sqlite3").exists());
         wait_for_stream_peers(&n1, &[], 90).await;
     }
@@ -9242,6 +9535,7 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, the release's member counts the stream mail it already held.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -9249,19 +9543,32 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
     wait_until("the upgraded member mirrors what its shard held", 60, || async { agent_mail_counted(&o).await == 3 }).await;
 
     // Rolled back, it keeps those counts and counts nothing new; upgraded again it catches up.
-    o.stop();
-    o.binary = old;
-    o.start().await;
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    if let Some(restored) = &restored {
+        let last_count = std::cell::Cell::new(None);
+        wait_until(format_args!(
+            "the restored release counts what it mirrored (expected {release_counts}, last observed count {last_count:?})"
+        ), 60, || async {
+            let count = agent_mail_counted(restored).await;
+            last_count.set(Some(count));
+            count == release_counts
+        }).await;
+        assert_eq!(agent_mail_counted(restored).await, release_counts);
+    }
     let late = "message/0000000000000c04";
     assert!(append_keyed_stream_item(&b, late, "agent/fleet-other", late).await);
-    wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    if restored.is_none() {
+        wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    }
     for node in [&a, &b] {
         wait_until("each member of this build counts the late item", 60, || async { agent_mail_counted(node).await == 4 }).await;
     }
-    wait_until("the rolled-back member counts what it mirrors", 60, || async {
-        agent_mail_counted(&o).await == if release_mirrors { 4 } else { 3 }
-    }).await;
-    assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
+    if restored.is_none() {
+        wait_until("the rolled-back member counts what it mirrors", 60, || async {
+            agent_mail_counted(&o).await == if release_mirrors { 4 } else { 3 }
+        }).await;
+        assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
+    }
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
@@ -9296,6 +9603,34 @@ async fn client_listed(node: &Node, history: bool, limit: usize) -> Vec<String> 
 async fn client_item(node: &Node, subject: &str) -> Option<Value> {
     let page: Value = node.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
     page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).cloned()
+}
+
+/// Read the recovery layers independently: retained claims are not necessarily admitted,
+/// projected into the shard, or mirrored into the graph's local selector indexes yet.
+fn restored_stream_diagnostics(node: &Node) -> String {
+    let graph = node.state_dir().join("claims.sqlite3");
+    let shard = node.state_dir().join("shards/messages/claims.sqlite3");
+    let read = |database: &Path, sql: &str| {
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|connection| connection.query_row(sql, [], |row| row.get::<_, String>(0)))
+            .unwrap_or_else(|error| format!("unavailable: {error}"))
+    };
+    let raw = read(&shard, "SELECT json_group_array(json_object(
+        'subject',subject,'total',total,'sealed',sealed,'unsealed',total-sealed))
+        FROM (SELECT claims.subject,COUNT(*) AS total,
+            SUM(EXISTS(SELECT 1 FROM replica_envelopes
+                WHERE replica_envelopes.batch_id=claims.batch_id)) AS sealed
+            FROM claims WHERE kind='message.sent' GROUP BY claims.subject ORDER BY claims.subject)");
+    let admission = read(&shard, "SELECT json_group_array(json_object(
+        'writer',writer,'sequence',sequence,'state',receipt_state,'batch_id',batch_id))
+        FROM replica_envelopes");
+    let projection = read(&shard, "SELECT json_group_array(json_object(
+        'subject',subject,'store_index',store_index)) FROM stream_messages");
+    let mirror = read(&graph, "SELECT json_group_array(json_object(
+        'subject',subject,'stream_index',stream_index)) FROM local_stream_sent");
+    let cursor = read(&graph, "SELECT json_group_array(json_object('key',key,'value',value))
+        FROM meta WHERE key IN ('stream_mirror_sent_through','stream_mirror_lifecycle_through')");
+    format!("raw={raw}; admission={admission}; stream_messages={projection}; mirror={mirror}; cursor={cursor}")
 }
 
 /// Stream mail reaches the phone's message list (`GET /v1/client/messages`) on every member of
@@ -9387,6 +9722,8 @@ async fn previous_release_beside_members_that_list_stream_mail_to_the_phone() {
     );
     assert!(client_listed(&b, false, 200).await.iter().any(|subject| subject == closed), "b keeps its own lifecycle");
 
+    let pre_upgrade = client_listed(&o, false, 200).await;
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, the release's member lists the stream mail it already held.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -9397,12 +9734,37 @@ async fn previous_release_beside_members_that_list_stream_mail_to_the_phone() {
     .await;
 
     // Rolled back, then upgraded again, it lists what arrived meanwhile as well.
-    o.stop();
-    o.binary = old;
-    o.start().await;
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    if let Some(restored) = &restored {
+        // Restore rebuilds the release's local stream mirror asynchronously; health alone
+        // does not mean its selectors have reached the archived source cut.
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(60);
+        let mut previous = String::new();
+        loop {
+            let listed = client_listed(restored, false, 200).await;
+            let diagnostics = format!("listed={listed:?}; {}", restored_stream_diagnostics(restored));
+            if diagnostics != previous {
+                eprintln!("restored release after {:?}: expected={pre_upgrade:?}; {diagnostics}", started.elapsed());
+                previous = diagnostics;
+            }
+            if listed == pre_upgrade {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the restored release did not reach the archived source cut {pre_upgrade:?}: {previous}\n{}",
+                restored.logs()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(client_listed(restored, false, 200).await, pre_upgrade);
+    }
     let late = "message/0000000000000d03";
     assert!(append_keyed_stream_item(&b, late, "agent/fleet-reader", late).await);
-    wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    if restored.is_none() {
+        wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    }
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
@@ -9524,6 +9886,7 @@ async fn previous_release_beside_members_that_send_each_message_once_across_stor
     }
     assert_eq!(claim["subject"], legacy);
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, the release's member advertises its inbox; rolled back, it stops.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -9532,10 +9895,13 @@ async fn previous_release_beside_members_that_send_each_message_once_across_stor
         newest_start_advertises(&a, "o", "messages_stream_inbox").await
     })
     .await;
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    if !release_inbox {
+    if let Some(restored) = previous_release_rollback(&mut o, &old, &recovery).await {
+        assert_eq!(graph_sent_claims(&restored, legacy).await, 1);
+        assert_eq!(graph_sent_claims(&restored, streamed).await, 0);
+        o.binary = PathBuf::from(st3());
+        o.start().await;
+        assert!(newest_start_advertises(&o, "o", "messages_stream_inbox").await);
+    } else if !release_inbox {
         wait_until("the rolled-back member's start no longer advertises it", 90, || async {
             !newest_start_advertises(&a, "o", "messages_stream_inbox").await
         })
@@ -9666,6 +10032,7 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
         .await;
     }
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, the release routes its sends too.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -9676,24 +10043,51 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
     .await;
     let upgraded = agent_send(&o, b_seat, "route-from-upgraded-o").await;
     assert!(upgraded["created_index"].as_u64().unwrap() > base, "{upgraded}");
-    // Rollback restores the release's observed routing capability, not an older
-    // release's graph-only behavior, while retaining every stream item.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    let rolled_back = agent_send(&o, b_seat, "route-from-rolled-back-o").await;
-    assert_eq!(rolled_back["created_index"].as_u64().unwrap() > base, release_routes_stream, "{rolled_back}");
-    let rolled_back_subject = rolled_back["subject"].as_str().unwrap().to_owned();
-    for node in [&a, &b, &o] {
-        wait_until("the rolled-back send reaches exactly its routed store", 90, || async {
-            held(node, &rolled_back_subject).await == release_sent_store
-        }).await;
+    // Rollback restores the baseline's observed send routing, including a baseline
+    // that already writes stream mail. Its archive keeps the original routing inputs.
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    let rollback = restored.as_ref().unwrap_or(&o);
+    assert!(newest_start_advertises(rollback, "b", "messages_stream_inbox").await);
+    let rolled_back = agent_send(rollback, b_seat, "route-from-rolled-back-o").await;
+    let rolled_back_subject = rolled_back["subject"].as_str().unwrap();
+    if release_routes_stream {
+        assert!(rolled_back["created_index"].as_u64().unwrap() > base, "{rolled_back}");
+    } else {
+        assert!(rolled_back["created_index"].as_u64().unwrap() < base, "{rolled_back}");
+    }
+    assert_eq!(rolled_back["to"], b_seat, "{rolled_back}");
+    assert_eq!(held(rollback, rolled_back_subject).await, release_sent_store);
+    let again = agent_send(rollback, b_seat, "route-from-rolled-back-o").await;
+    assert_eq!(again["already_sent"], true, "{again}");
+    assert_eq!(again["subject"], rolled_back_subject, "{again}");
+    assert_eq!(again["created_index"], rolled_back["created_index"], "{again}");
+    assert_eq!(held(rollback, rolled_back_subject).await, release_sent_store);
+    let page: Value = rollback.client().get(&format!("/v1/messages?to={b_seat}")).await.unwrap();
+    let listed = page.as_array().unwrap().iter()
+        .filter(|item| item["subject"] == rolled_back_subject).collect::<Vec<_>>();
+    assert_eq!(listed.len(), 1, "{page}");
+    assert_eq!(listed[0]["to"], b_seat);
+    assert_eq!(listed[0]["content"], "routed mail route-from-rolled-back-o");
+    for (subject, expected) in [
+        (&to_b_subject, (0, 1)), (&to_o_subject, o_held),
+        (&nowhere_subject, (1, 0)), (&from_o_subject, release_sent_store),
+    ] {
+        assert_eq!(held(rollback, subject).await, expected, "rollback lost {subject}");
     }
     if release_inbox {
         wait_until("the rolled-back member still lists the stream mail it holds", 60, || async {
-            client_listed(&o, false, 200).await.contains(&to_o_subject)
+            client_listed(rollback, false, 200).await.contains(&to_o_subject)
         })
         .await;
+    }
+    assert!(rollback.st_json(&["replication", "status"]).get("stream_fallbacks").is_none());
+    if restored.is_some() {
+        o.binary = PathBuf::from(st3());
+        o.start().await;
+        assert_eq!(held(&o, upgraded["subject"].as_str().unwrap()).await, (0, 1));
+        let status = o.st_json(&["replication", "status"]);
+        assert_eq!(status["stream_fallbacks"], json!({}), "{}: {status}", o.name);
+        assert!(o.st_ok(&["replication", "status"]).contains("\nstream-fallbacks\tnone since start\n"));
     }
     for node in [&a, &b, &o] {
         let status = node.st_json(&["replication", "status"]);
@@ -9706,7 +10100,6 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
         assert_eq!(status["stream_fallbacks"], json!({}), "{}: {status}", node.name);
         assert!(node.st_ok(&["replication", "status"]).contains("\nstream-fallbacks\tnone since start\n"));
     }
-    assert!(o.st_json(&["replication", "status"]).get("stream_fallbacks").is_none());
 }
 
 /// The replication records `node` holds for a newer build: claims of a kind it does not know.
@@ -10284,8 +10677,8 @@ async fn thread_kinds(node: &Node, subject: &str) -> Vec<String> {
 
 /// A member upgraded from the release moves its blob bytes to its blob file once the window
 /// passes, beside a release member that keeps its own. Replication and documents read the same.
-/// The release refuses the moved store rather than serve empty bytes, and opens it again after
-/// `store restore-blob-bytes`.
+/// The obsolete reader refuses the privacy-fenced store even after blob restoration and
+/// recovers only its pre-upgrade archive; current recovery preserves the restored bytes.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_rollback() {
@@ -10320,6 +10713,7 @@ async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_roll
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
+    let recovery = previous_release_archive(&n1, root.path());
 
     // Upgrade the member in place; past the window its blob bytes move to the blob file.
     n1.stop();
@@ -10355,44 +10749,31 @@ async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_roll
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
 
-    // The release refuses the moved store instead of serving empty bytes.
+    // The release refuses the moved store at the privacy floor, not merely the blob fence.
     n1.stop();
-    // Through the node's own command, so the release runs on this node's isolated state.
-    n1.binary = old.clone();
-    let mut refused = n1
-        .command(&["up", "--web-listen", "off"])
-        .stdin(Stdio::null())
-        .stdout(fs::File::create(n1.root.join("refused.log")).unwrap())
-        .stderr(fs::File::create(n1.root.join("refused.stderr.log")).unwrap())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(90);
-    let status = loop {
-        if let Some(status) = refused.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            refused.kill().ok();
-            panic!("the release opened a store whose blob bytes moved");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    };
-    assert!(!status.success());
-    let stderr = fs::read_to_string(n1.root.join("refused.stderr.log")).unwrap()
-        + &fs::read_to_string(n1.root.join("refused.log")).unwrap();
-    assert!(stderr.contains("schema version 25"), "{stderr}");
-
-    // Restore the bytes with this build, then the release opens the store and reads the same.
     let store = n1.state_dir().join("claims.sqlite3");
+    assert_eq!(database_schema(&store), fractal_schema::STORAGE_VERSION);
+    n1.binary = old.clone();
+    assert!(!n1.start_with_schema_refusal(Some(fractal_schema::STORAGE_VERSION)).await,
+        "the pinned release must refuse the moved privacy store");
+    assert_eq!(database_schema(&store), fractal_schema::STORAGE_VERSION);
+
+    // Restoring blob bytes must never lower the independent privacy floor.
     n1.binary = PathBuf::from(st3());
     let restored = n1.st_ok(&["store", "restore-blob-bytes", "--store", store.to_str().unwrap()]);
     assert!(restored.contains("restored"), "{restored}");
-    n1.binary = old;
+    assert_eq!(database_schema(&store), fractal_schema::STORAGE_VERSION,
+        "restoring blob bytes must not lower the privacy fence");
+    let recovered = previous_release_rollback(&mut n1, &old, &recovery).await
+        .expect("the pinned release must still refuse after blob restoration");
+    assert_eq!(recovered.st(&["documents", "get", "doc/fleet-test/blob"]).stdout, body.as_bytes(),
+        "the release recovers its own pre-upgrade document");
+    n1.binary = PathBuf::from(st3());
     n1.start().await;
     assert_eq!(n1.st(&["documents", "get", "doc/fleet-test/blob"]).stdout, body.as_bytes());
-    o.note("o-after-rollback").await;
-    n1.note("n1-after-rollback").await;
-    expected.extend(["custom/fleet-test/o-after-rollback".to_owned(), "custom/fleet-test/n1-after-rollback".to_owned()]);
+    o.note("o-after-recovery").await;
+    n1.note("n1-after-recovery").await;
+    expected.extend(["custom/fleet-test/o-after-recovery".to_owned(), "custom/fleet-test/n1-after-recovery".to_owned()]);
     for node in [&o, &n1] {
         wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
         let status = node.st_json(&["replication", "status"]);
@@ -10403,7 +10784,8 @@ async fn previous_release_beside_a_member_that_moves_its_blob_bytes_and_its_roll
 /// Closed agent mail retires a week after it closes on a member that trims locally, which was
 /// upgraded in place from the previous release with that mail in its store. Its person mail
 /// stays. The release beside it keeps its own copies and never sends a retired one back, and
-/// replication stays whole. Rolled back to the release, the member keeps what it retired retired.
+/// replication stays whole. H3 prevents the pinned release from restoring a local-trim archive;
+/// this build recovers that same pre-upgrade mail and preserves post-upgrade retirement state.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollback() {
@@ -10445,6 +10827,16 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
             }
         }
     }
+    // Match trim_status's persisted completion condition before exporting the local cut.
+    wait_until("the release member completed its local checkpoint trim", 90, || async {
+        rusqlite::Connection::open_with_flags(
+            n1.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE state='trimmed')",
+            [], |row| row.get::<_, bool>(0),
+        ).unwrap()
+    }).await;
+    let recovery = previous_release_archive(&n1, root.path());
 
     // Upgrade the member in place and opt it in; a week later its closed agent thread retires.
     n1.stop();
@@ -10486,28 +10878,53 @@ async fn previous_release_beside_a_member_that_retires_closed_mail_and_its_rollb
     }
     assert!(thread_kinds(&n1, &agent).await.is_empty(), "a retired claim came back");
 
-    // Roll the member back in place, without the key the release doesn't know: it reads the
-    // trimmed store and still refuses them.
+    // H3: a307411d exports local cuts but requires a certificate when restoring them.
+    // The rollback release (a307411d plus the restore-shape check from 9ee2529f)
+    // will turn this restore refusal into a success assertion.
     n1.stop();
     fs::write(&config, &text).unwrap();
-    n1.binary = old;
+    let database = n1.state_dir().join("claims.sqlite3");
+    let version = database_schema(&database);
+    n1.binary = old.clone();
+    assert!(!n1.start_with_schema_refusal(Some(version)).await,
+        "the pinned release must refuse the privacy floor");
+    assert_eq!(database_schema(&database), version, "the refusal changed the upgraded schema");
+    let mut release_restore = Node::named(root.path(), "local-trim-release-refusal", "restoring");
+    release_restore.binary = old.clone();
+    let target = release_restore.state_dir().join("claims.sqlite3");
+    let refusal = release_restore.command(&[
+        "--json", "backup", "restore", "--database", target.to_str().unwrap(),
+        recovery.to_str().unwrap(),
+    ]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert!(!refusal.status.success(), "H3: a307411d must refuse its local-trim archive");
+    let code = stderr.lines().rev().find_map(|line| line.strip_prefix("fractal: "))
+        .and_then(|message| message.split_once(':'))
+        .map(|(code, _)| code);
+    assert_eq!(code, Some("checkpoint-not-stable"), "unexpected restore refusal: {stderr}");
+    // Current recovery reads the identical release-owned archive, not post-upgrade state.
+    let (recovered, _) = restored_node(root.path(), "local-trim-current-recovery", &recovery).await;
+    assert_eq!(thread_kinds(&recovered, &agent).await, whole);
+    assert_eq!(thread_kinds(&recovered, &person).await, whole);
+    fs::write(&config, format!("{text}mail = true\n")).unwrap();
+    n1.binary = PathBuf::from(st3());
     n1.start().await;
-    o.note("o-after-rollback").await;
-    n1.note("n1-after-rollback").await;
-    expected.extend(["custom/fleet-test/o-after-rollback".to_owned(), "custom/fleet-test/n1-after-rollback".to_owned()]);
+    o.note("o-after-recovery").await;
+    n1.note("n1-after-recovery").await;
+    expected.extend(["custom/fleet-test/o-after-recovery".to_owned(), "custom/fleet-test/n1-after-recovery".to_owned()]);
     for node in [&o, &n1] {
         wait_for_notes(node, &expected, 90, &[&o, &n1]).await;
         let status = node.st_json(&["replication", "status"]);
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
-    assert!(thread_kinds(&n1, &agent).await.is_empty(), "rolled back, a retired claim came back");
+    assert!(thread_kinds(&n1, &agent).await.is_empty(), "current recovery resurrected a retired claim");
     assert_eq!(thread_kinds(&n1, &person).await, whole);
 }
 
 /// A work wake for a seat on this member is a stream item (4c-3, part b), beside the previous
-/// release, which replicates the stream as it already does. Rolled back, the member's release
-/// reconciler reads wakes from the graph alone, so it wakes the seat once more there; upgraded
-/// again, this build reads both stores, with the graph winning for a shared subject.
+/// release, which replicates the stream as it already does. A legacy graph copy authored via
+/// the release peer's native claims API replicates beside the stream wake: the current reader
+/// lists it once, with graph precedence. This does not test legacy reconciler wake scheduling.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_its_rollback() {
@@ -10611,25 +11028,48 @@ async fn previous_release_beside_a_member_whose_work_wakes_go_to_the_stream_and_
     let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
     assert!(shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1, "{shown}");
 
-    // Rolled back, the release reads wakes from the graph alone: it wakes the seat once more,
-    // through the graph, and the stream wake stays in the member's shard.
-    a.stop();
-    a.binary = old.clone();
-    a.start().await;
-    wait_until("the release wakes the seat again through the graph", 120, || async {
-        wakes(&a).await.iter().any(|(_, stream)| !stream)
-    })
-    .await;
-    // The release can reuse the first attempt's deterministic subject: it cannot see the
-    // stream attempt, and the harness incarnation can survive the daemon restart. Such a
-    // message is listed once, as the graph's, rather than once from each store.
-    let mut expected: BTreeMap<_, _> = first.iter().cloned().collect();
-    expected.extend(wakes(&a).await.into_iter().filter(|(_, stream)| !stream));
+    // Author a legacy graph representation through the actual release's native API, using
+    // the stream wake's real subject, fields and tags. Normal fleet transport imports it.
+    // This fixture tests mixed-store reads, not the old reconciler's scheduling decision.
     for (subject, _) in &first {
+        let message: Value = a.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+        let fields = ["from", "to", "content", "status", "title", "in_reply_to", "tags"]
+            .into_iter().filter_map(|name| message.get(name)
+                .filter(|value| !value.is_null()).map(|value| (name.to_owned(), value.clone())))
+            .collect();
+        let _: Value = o.client().post("/v1/claims", &ClaimInput {
+            subject: subject.clone(), kind: "message.sent".into(),
+            actor: Some(message["from"].as_str().unwrap().to_owned()),
+            fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).await.unwrap();
+        assert_eq!(graph_sent_claims(&o, subject).await, 1, "the release must author the graph copy");
+        wait_until("the real fleet imports the release's legacy graph wake", 90, || async {
+            graph_sent_claims(&a, subject).await == 1
+        }).await;
+        assert_eq!(held(&a, subject).await, (1, 1), "{subject}");
         assert_eq!(shard_file_claims(&a, subject), 1, "{subject}");
+        let visible = wakes(&a).await;
+        assert_eq!(visible.iter().filter(|(candidate, _)| candidate == subject).count(), 1);
+        assert!(visible.iter().any(|(candidate, stream)| candidate == subject && !stream),
+            "the legacy graph copy wins over the same-subject stream wake: {visible:?}");
+    }
+    let shown: Value = a.client().get(&format!("/v1/work-items/{step}")).await.unwrap();
+    assert!(shown["wake"]["attempts"].as_u64().unwrap_or(0) >= 1, "{shown}");
+    let expected: BTreeMap<_, _> = wakes(&a).await.into_iter().collect();
+
+    // The archive belongs to the still-release-owned peer o, not the current anchor a.
+    // Old readers refuse a's floor28 state and recover the release archive independently.
+    let recovery = previous_release_archive(&o, root.path());
+    let recovered = previous_release_rollback(&mut a, &old, &recovery).await
+        .expect("the pinned release must refuse the current anchor's privacy floor");
+    for (subject, _) in &first {
+        assert_eq!(graph_sent_claims(&recovered, subject).await, 1);
+        let visible = wakes(&recovered).await;
+        assert!(visible.iter().any(|(candidate, stream)| candidate == subject && !stream),
+            "the release archive retains its native graph wake: {visible:?}");
     }
 
-    // Upgraded again, retain every wake, applying the shared-subject graph precedence.
+    // Current recovery retains both forms and the same shared-subject graph precedence.
     a.stop();
     a.binary = PathBuf::from(st3());
     a.start().await;

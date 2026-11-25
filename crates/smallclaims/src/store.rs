@@ -1081,7 +1081,7 @@ impl Store {
         let connection = crate::sqlite::open_immutable_read_connection(path)?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         anyhow::ensure!(
-            (CURRENT_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+            (CURRENT_SCHEMA_VERSION..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) && !matches!(version, 23 | 24),
             "read-only backup requires schema version {CURRENT_SCHEMA_VERSION} through {MAX_SUPPORTED_SCHEMA_VERSION}; source has schema version {version}; migrate with a compatible daemon before exporting"
         );
         let path = crate::sqlite::opened_database_path(&connection, path)?;
@@ -2327,11 +2327,11 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     anyhow::ensure!(
-        table_count == 0 || (10..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+        table_count == 0 || ((10..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) && !matches!(version, 23 | 24)),
         "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {MAX_SUPPORTED_SCHEMA_VERSION}"
     );
     anyhow::ensure!(
-        version == 0 || (10..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version),
+        version == 0 || ((10..=MAX_SUPPORTED_SCHEMA_VERSION).contains(&version) && !matches!(version, 23 | 24)),
         "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {MAX_SUPPORTED_SCHEMA_VERSION}"
     );
     Ok(())
