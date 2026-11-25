@@ -228,6 +228,12 @@ producer/cleanup custody. This Observe/Stop slice does not weaken those start ga
 
 ## Phases and exit gates
 
+The [whole-Mac cutover runbook](light-node-cutover.md) is the Phase 4 delivery
+documentation slice. It specifies readiness, the single fenced ownership/routing
+window, rollback and three settled 600-second CPU acceptance windows. That
+delivery label does not renumber the architectural phases below, authorize a
+deployment or claim the remaining production migration tooling exists.
+
 | Phase | Deliverable | Exit evidence |
 |---|---|---|
 | **0 — Baseline** | Continue reactive/incremental fixes and resolve mixed-version compatibility. Establish a same-build baseline before attributing offload savings. | Settled 600-second census of counted background processes at normal seat load; UI closed and visible-client cases separately, normal write/mail rates, sleep/wake behavior and deterministic work counters. |
