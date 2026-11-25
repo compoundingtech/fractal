@@ -29,7 +29,7 @@ pub struct Controller {
 #[derive(Clone, Copy)]
 pub struct LaneHost {
     pub room: fractal_runtime::Capacity,
-    pub outside: fn() -> Option<fractal_runtime::host::HostMemoryObservation>,
+    pub outside: fn(&fractal_runtime::resource_pressure::Policy) -> Option<fractal_runtime::host::HostMemoryObservation>,
     /// The lane a burst raises a seat to: admission keeps room for one such raise from starts
     /// ([`BURST_LANE`]; none keeps none).
     pub burst_lane: Option<fractal_runtime::Capacity>,
@@ -135,7 +135,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.incremental.touch("host-lane-pressure");
         }
         if let Some(host) = admission.lanes {
-            let observation = (host.outside)();
+            let observation = (host.outside)(&admission.finite_policy.psi_brake);
             let mut previous = admission.outside_observation.lock().unwrap_or_else(PoisonError::into_inner);
             if *previous != Some(observation) {
                 *previous = Some(observation);

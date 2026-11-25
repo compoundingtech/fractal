@@ -59,7 +59,12 @@ pub(super) fn present(
                     && live_launch_report(raw, heard_at, now))
             && let Some(driver) = raw["driver"].as_str().filter(|driver| matches!(*driver, "claude" | "codex" | "opencode" | "pi" | "omp")) {
             Some(delivery_presence::assess_current_semantic(id, driver, raw["incarnation_id"].as_str()))
-        } else { None };
+        } else {
+            if cache.cards.get(id).is_some_and(|old| old.delivery_revision.is_some()) {
+                delivery_presence::forget_current_semantic(id);
+            }
+            None
+        };
         let delivery_revision = delivery.as_ref().map(|delivery| delivery.revision);
         let subagents = by_agent.remove(id).unwrap_or_default();
         let clock_state = clock_state(raw, heard_at, now);
@@ -93,7 +98,14 @@ pub(super) fn present(
         if let Some(at) = card.deadline { earliest(&mut deadline, at, now); }
         rows.push(card.row.clone());
     }
-    cache.cards.retain(|id, _| subjects.contains(&id.as_str()));
+    // Release only seats owned by this roster, not other stores' semantic projections.
+    cache.cards.retain(|id, card| {
+        if subjects.contains(&id.as_str()) { return true; }
+        if card.delivery_revision.is_some() {
+            delivery_presence::forget_current_semantic(id);
+        }
+        false
+    });
     Ok((rows, deadline))
 }
 
@@ -149,4 +161,48 @@ fn presentation_deadline(
         earliest(&mut deadline, u128::from(subagent.lease_expires_at_unix_ms), now);
     }
     deadline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaving_eligible_local_roster_forgets_semantic_delivery_rows() {
+        let _clock = smallclaims::store::clock_snapshot();
+        let root = tempfile::tempdir().unwrap();
+        let app = crate::api::tests_shared::state(root.path());
+        let host = client_host_id(app.store.origin());
+        let now = client_now_ms();
+        let unrelated = "agent/roster-retention-unrelated";
+        delivery_presence::assess_current_semantic(unrelated, "claude", Some("one"));
+        let unrelated_revision =
+            delivery_presence::assess_current_semantic(unrelated, "omp", Some("one")).revision;
+
+        for departure in ["retired", "stopped", "desired", "starting", "remote", "custom", "removed"] {
+            let subject = format!("agent/roster-retention-{departure}");
+            let row = json!({"id":subject, "state":"running", "driver":"omp",
+                "incarnation_id":"one", "host_id":host});
+            // A noninitial revision lets the public assessment prove that cleanup happened.
+            delivery_presence::assess_current_semantic(&subject, "claude", Some("one"));
+            present(&app.store, std::slice::from_ref(&row), vec![], now).unwrap();
+            assert!(app.store.extension::<Presentation>().0.lock().unwrap()
+                .cards[&subject].delivery_revision.unwrap() > 1);
+
+            let mut departed = row;
+            match departure {
+                "remote" => departed["host_id"] = json!("other-host"),
+                "custom" => departed["driver"] = json!("custom"),
+                state => departed["state"] = json!(state),
+            }
+            let source = if departure == "removed" { vec![] } else { vec![departed] };
+            present(&app.store, &source, vec![], now).unwrap();
+            assert_eq!(delivery_presence::assess_current_semantic(&subject, "omp", Some("one")).revision,
+                1, "{departure} must release semantic bookkeeping");
+            delivery_presence::forget_current_semantic(&subject);
+            assert_eq!(delivery_presence::assess_current_semantic(unrelated, "omp", Some("one")).revision,
+                unrelated_revision, "one roster must not prune unrelated recipients");
+        }
+        delivery_presence::forget_current_semantic(unrelated);
+    }
 }

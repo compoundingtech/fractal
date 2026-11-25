@@ -26,6 +26,20 @@ pub struct AttentionSourceSnapshot {
     entries: BTreeMap<String, Arc<SourceEntry>>,
 }
 
+impl AttentionSourceSnapshot {
+    /// Runtime-derived candidates include rows whose admission time is still in the future.
+    pub fn candidate_seats(&self) -> impl Iterator<Item = &str> {
+        self.entries.values().flat_map(|entry| entry.rows.iter())
+            .filter(|(item, _, _)| matches!(item.kind.as_str(), "harness-login" | "harness-prompt" | "model-drift"))
+            .flat_map(|(item, _, _)| std::iter::once(item.subject.as_str()).chain(item.targets.iter().map(String::as_str)))
+    }
+
+    /// Number of subject candidates, excluding the fixed shared reducer groups.
+    pub fn retained_subjects(&self) -> usize {
+        self.entries.keys().filter(|key| key.starts_with("subject:")).count()
+    }
+}
+
 impl Store {
     /// `changed=None` is a full reset (initial publication, checkpoint, or projection reset).
     /// Otherwise `changed` contains claim subjects and activity actors and `kinds` their kinds.
@@ -99,7 +113,19 @@ impl Store {
                 "SELECT body, requested_at FROM custom_sources WHERE subject=?1 AND active=1",
             )?.query_row(/* sqlite-large-value: allow-for-now lv-h2acf43c6c302 owner=fractal_store::store::attention_sources TODO=trace-statement-and-value-representation */ [&subject], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
             let key = format!("subject:{subject}");
-            if !is_agent && !is_step && custom.is_none() && !snapshot.entries.contains_key(&key) {
+            // Keep empty live candidates: their negative reads discover newly eligible rows.
+            // Historical/undeclared subjects cannot contribute until their own state changes.
+            let step_candidate = if is_step {
+                person_work::step(&connection, &subject)?.is_some_and(|view| {
+                    matches!(view.status.as_str(), "pending" | "ready")
+                        && view.assigned_to.as_deref().is_some_and(|assignee| {
+                            assignee.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("person/"))
+                        })
+                })
+            } else { false };
+            let agent_candidate = is_agent && person_work::requester_declared(&connection, &subject)?;
+            if !step_candidate && !agent_candidate && custom.is_none() {
+                snapshot.entries.remove(&key);
                 continue;
             }
             let mut contexts = DiscussionContexts::new();
@@ -107,10 +133,10 @@ impl Store {
             let mut refresh_at = None;
             let (rows, mut reads) = smallclaims::touched::record(|| -> Result<Vec<AttentionItemView>> {
                 let mut rows = Vec::new();
-                if is_step {
+                if step_candidate {
                     rows.extend(person_attention_item(&connection, &subject, i64::MAX as u128)?);
                 }
-                if is_agent {
+                if agent_candidate {
                     let (prompts, due) = self.harness_prompt_attention_items_with_deadline(
                         None, now, Some(&BTreeSet::from([subject.clone()])),
                     )?;

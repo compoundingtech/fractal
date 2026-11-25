@@ -1,5 +1,5 @@
 // The sidebar's bottom Usage section: one worst-quota line when collapsed, worst-first rows with meters when open.
-import { useAtom, useAtomValue } from '@effect/atom-react'
+import { useAtom, useAtomValue, useAtomSet } from '@effect/atom-react'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -10,7 +10,8 @@ import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assista
 import { ResizableSplit } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Shell.tsx'
 import { colorVars as c, geometryNumbers, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
-import { quotaStateAtom } from './state.ts'
+import type { QuotaState } from './model.ts'
+import { quotaStateAtom, selectionAtom } from './state.ts'
 import { usageSectionView, type UsageLevel, type UsageRowView, type UsageSectionView } from './usageSectionView.ts'
 import { usageSectionHeight, usageSectionOpen } from './usageSectionState.ts'
 
@@ -27,13 +28,16 @@ const Meter = ({ row, muted }: { readonly row: UsageRowView; readonly muted: boo
     {row.fill === undefined ? null : <span style={{ inlineSize: `${row.fill}%` }} {...stylex.props(styles.fill, muted || row.old !== undefined ? fills.old : fills[row.level])} />}
   </span>
 
-const Row = ({ row, muted, onOpenUsage }: { readonly row: UsageRowView; readonly muted: boolean; readonly onOpenUsage: () => void }) => {
+/** Opens the Usage pane; a row names the account it should show. */
+type OpenUsage = (accountId?: string) => void
+
+const Row = ({ row, muted, onOpenUsage }: { readonly row: UsageRowView; readonly muted: boolean; readonly onOpenUsage: OpenUsage }) => {
   const narrow = React.useContext(NarrowLayoutContext)
   const wordsId = React.useId()
   // The name is what the row shows, so speech input can say it; the description carries the reading in words.
   return <li>
     <span id={wordsId} hidden>{row.words}</span>
-    <Aria.Button aria-describedby={wordsId} onPress={onOpenUsage} data-usage-row={row.id} data-usage-level={row.level} {...stylex.props(styles.row, narrow && styles.touch)}>
+    <Aria.Button aria-describedby={wordsId} onPress={() => onOpenUsage(row.id)} data-usage-row={row.id} data-usage-level={row.level} {...stylex.props(styles.row, narrow && styles.touch)}>
       <span {...stylex.props(styles.rowName)}>{row.name}</span>
       <Percent row={row} muted={muted} />
       <span {...stylex.props(styles.rowWindow)}>{row.window}</span>
@@ -76,7 +80,7 @@ const summaryWords = (view: UsageSectionView): string => {
   }
 }
 
-const FAILED: Readonly<Record<Extract<UsageSectionView, { _tag: 'failed' }>['kind'], string>> = {
+export const QUOTA_FAILED: Readonly<Record<Extract<UsageSectionView, { _tag: 'failed' }>['kind'], string>> = {
   unreachable: 'The quota source can’t be reached. Trying again.',
   timeout: 'The quota source didn’t answer in time. Trying again.',
   http: 'The quota source returned an error. Trying again.',
@@ -84,11 +88,11 @@ const FAILED: Readonly<Record<Extract<UsageSectionView, { _tag: 'failed' }>['kin
   incompatible: 'This Fractal can’t read the quota source’s format.',
 }
 
-const Body = ({ view, onOpenUsage }: { readonly view: UsageSectionView; readonly onOpenUsage: () => void }) => {
+const Body = ({ view, onOpenUsage }: { readonly view: UsageSectionView; readonly onOpenUsage: OpenUsage }) => {
   switch (view._tag) {
     case 'loading': return <p role="status" {...stylex.props(styles.note)}>Reading quota…</p>
     case 'not-configured': return <p {...stylex.props(styles.note)}>No quota source configured on this Fractal.</p>
-    case 'failed': return <p role="status" {...stylex.props(styles.note)}>{FAILED[view.kind]}</p>
+    case 'failed': return <p role="status" {...stylex.props(styles.note)}>{QUOTA_FAILED[view.kind]}</p>
     case 'empty': return <p {...stylex.props(styles.note)}>The quota source reports no accounts.{view.old === undefined ? '' : ` Reading ${view.old}.`}</p>
     case 'ready': return <>
       {view.old === undefined ? null : <p role="status" {...stylex.props(styles.oldNote)}>Last reading, {view.old}</p>}
@@ -100,7 +104,7 @@ const Body = ({ view, onOpenUsage }: { readonly view: UsageSectionView; readonly
 
 export const UsageSection = ({ view, onOpenUsage }: {
   readonly view: UsageSectionView
-  readonly onOpenUsage: () => void
+  readonly onOpenUsage: OpenUsage
 }): React.ReactNode => {
   const narrow = React.useContext(NarrowLayoutContext)
   const [open, toggle] = useAtom(usageSectionOpen)
@@ -121,7 +125,7 @@ export const UsageSection = ({ view, onOpenUsage }: {
           <span {...stylex.props(styles.title)}>Usage</span>
           <Summary view={view} open={open} />
         </Aria.Button>
-        <ChromeControl icon="gauge" label="Open Usage" onPress={onOpenUsage} />
+        <ChromeControl icon="gauge" label="Open Usage" onPress={() => onOpenUsage()} />
       </div>
       <Aria.DisclosurePanel style={narrow ? undefined : { maxBlockSize: height }} {...stylex.props(styles.panel, narrow && styles.panelNarrow)}>
         <Body view={view} onOpenUsage={onOpenUsage} />
@@ -130,19 +134,26 @@ export const UsageSection = ({ view, onOpenUsage }: {
   )
 }
 
-/** The section over the source's quota poll, which runs only while this is mounted and the page is visible. */
-export const LiveUsageSection = ({ onOpenUsage }: { readonly onOpenUsage: () => void }): React.ReactNode => {
+/**
+ * The section's view over the source's quota poll, which runs only while a reader is mounted and the page is visible.
+ * Each poll passes through in-flight, which carries no result; only a first read shows as loading.
+ * A slow read doesn't overturn a daemon's answer that it has no source, which only a real answer changes.
+ */
+export const useUsageSectionView = (): { readonly state: QuotaState; readonly view: UsageSectionView } => {
   const state = useAtomValue(quotaStateAtom(useDataSource().usage))
-  const now = useNow()
-  const view = usageSectionView({ state, now })
-  // Each poll passes through in-flight, which carries no result; only a first read shows as loading.
-  // A slow read doesn't overturn a daemon's answer that it has no source, which only a real answer changes.
+  const view = usageSectionView({ state, now: useNow() })
   const settled = React.useRef<UsageSectionView>(view)
   if (view._tag !== 'loading' && !(view._tag === 'failed' && settled.current._tag === 'not-configured')) settled.current = view
-  return <UsageSection view={settled.current} onOpenUsage={onOpenUsage} />
+  return { state, view: settled.current }
 }
 
-const levels: Readonly<Record<UsageLevel, stylex.StyleXStyles>> = stylex.create({
+/** A row press selects its account in the Usage pane before opening it; Open Usage keeps the selection. */
+export const LiveUsageSection = ({ onOpenUsage }: { readonly onOpenUsage: () => void }): React.ReactNode => {
+  const select = useAtomSet(selectionAtom(useDataSource().usage))
+  return <UsageSection view={useUsageSectionView().view} onOpenUsage={accountId => { if (accountId !== undefined) select(accountId); onOpenUsage() }} />
+}
+
+export const levels: Readonly<Record<UsageLevel, stylex.StyleXStyles>> = stylex.create({
   ok: { color: c.fgSoft },
   warn: { color: c.attention },
   high: { color: c.dangerFg },
@@ -150,7 +161,7 @@ const levels: Readonly<Record<UsageLevel, stylex.StyleXStyles>> = stylex.create(
   unknown: { color: c.fgMuted },
 })
 
-const fills: Readonly<Record<UsageLevel | 'old', stylex.StyleXStyles>> = stylex.create({
+export const fills: Readonly<Record<UsageLevel | 'old', stylex.StyleXStyles>> = stylex.create({
   ok: { backgroundColor: c.fgSoft },
   warn: { backgroundColor: c.attention },
   high: { backgroundColor: c.dangerFg },
