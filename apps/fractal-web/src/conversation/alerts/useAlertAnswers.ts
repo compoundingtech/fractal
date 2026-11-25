@@ -15,12 +15,15 @@ export type Answer = (alert: Native.Attention, answer: string, sent: string) => 
 /**
  * The one way an alert is answered: the active source's feed with in-flight answers hidden, and its answer ports with
  * `alert_landed` timing. The ports are absent when the source serves none or this device holds no action grant.
+ * `paused`: the feed is retained from before a disconnect, or this device's grants are not read yet; an answer
+ * waits for the connection rather than reading as a read-only device.
  */
 export const useAlertAnswers = (ux?: UxTelemetry): {
   /** The feed as the source sent it. */
   readonly feed: Feed<readonly Native.Attention[]>
   readonly onAct?: Act
   readonly onAnswer?: Answer
+  readonly paused?: true
 } => {
   const source = useDataSource()
   const grants = useGrants()
@@ -28,7 +31,9 @@ export const useAlertAnswers = (ux?: UxTelemetry): {
   const store = useAlertAnswersStore()
   // Every mount reports the same frames: the store settles each answer once.
   React.useLayoutEffect(() => { if (feed._tag === 'Observed') store.observe(feed.value) }, [feed, store])
-  const answerable = grants.actions === 'granted'
+  // A device observed to hold no action grant stays read-only; one that may answer waits for the connection.
+  const paused = grants.unread === true || (grants.actions === 'granted' && feed._tag === 'Observed' && feed.freshness === 'stale')
+  const answerable = grants.actions === 'granted' && !paused
   const actions = source.alertActions
   const onAct: Act | undefined = actions === undefined || !answerable ? undefined : (alert, action) => {
     const operation = ux?.beginAlertAnswer()
@@ -47,7 +52,7 @@ export const useAlertAnswers = (ux?: UxTelemetry): {
       ? Promise.resolve({ _tag: 'Refused', detail: 'This prompt is answered in the seat\'s terminal.' })
       : prompts.respond({ alert: { id: alert.id, revision: alert.revision, source_id: alert.source_id, target_id: prompt.target_id, episode: prompt.episode }, answer: sent })
   }
-  return { feed, ...(onAct === undefined ? {} : { onAct }), ...(onAnswer === undefined ? {} : { onAnswer }) }
+  return { feed, ...(onAct === undefined ? {} : { onAct }), ...(onAnswer === undefined ? {} : { onAnswer }), ...(paused ? { paused: true as const } : {}) }
 }
 
 /** The attention feed without alerts whose answer is on its way, for anything that counts or lists them. */

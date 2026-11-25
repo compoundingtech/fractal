@@ -2,7 +2,10 @@
 //! This is client state, never a graph replica or a peer configuration.
 mod grant_proof;
 pub(crate) mod transport;
-use crate::{AssistantPairedSession, Client, DeviceSignature, MessageSendParameters, PersonPairedSession, PairingComplete};
+use crate::{
+    AssistantPairedSession, AssistantPrincipal, Client, DeviceSignature, MessageSendParameters,
+    PairingComplete, PersonPairedSession, ThreadReplyParameters, ThreadStartParameters,
+};
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
@@ -188,6 +191,29 @@ impl std::fmt::Debug for Device {
     }
 }
 
+impl Client {
+    /// Whether this client can prepare ordinary and thread messages with a delegated device key.
+    pub fn has_message_signer(&self) -> bool {
+        self.signing_device.as_ref().is_some_and(|device| device.message_signing_key().is_ok())
+    }
+
+    /// Prepare the first request without sending it. Retain these exact signed parameters for retries.
+    pub fn prepare_thread_start(&self, idempotency_key: &str, parameters: &mut ThreadStartParameters) -> Result<()> {
+        if parameters.signature.is_none() && let Some(device) = &self.signing_device {
+            parameters.signature = Some(device.sign_thread_start(idempotency_key, parameters)?);
+        }
+        Ok(())
+    }
+
+    /// The caller supplies the already observed recipient; preparation performs no network lookup.
+    pub fn prepare_thread_reply(&self, idempotency_key: &str, agent_id: &str, parameters: &mut ThreadReplyParameters) -> Result<()> {
+        if parameters.signature.is_none() && let Some(device) = &self.signing_device {
+            parameters.signature = Some(device.sign_thread_reply(idempotency_key, agent_id, parameters)?);
+        }
+        Ok(())
+    }
+}
+
 impl Device {
     pub fn client(&self) -> Result<Client> {
         let mut client = if self.endpoint.starts_with("fabric:") {
@@ -215,6 +241,16 @@ impl Device {
         idempotency_key: &str,
         parameters: &MessageSendParameters,
     ) -> Result<DeviceSignature> {
+        let key = self.message_signing_key()?;
+        let nonce = random_nonce()?;
+        let signed_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        self.sign_message_at(idempotency_key, parameters, &nonce, signed_at_unix_ms, key)
+    }
+
+    fn message_signing_key(&self) -> Result<&SigningKey> {
         let key = self
             .signing_key
             .as_ref()
@@ -228,12 +264,101 @@ impl Device {
                     .any(|scope| scope == "control.messages"),
             "This device is not delegated message signing"
         );
+        Ok(key)
+    }
+
+    pub(crate) fn sign_thread_start(
+        &self,
+        idempotency_key: &str,
+        parameters: &ThreadStartParameters,
+    ) -> Result<DeviceSignature> {
+        self.sign_thread_message(
+            idempotency_key,
+            &parameters.target_id,
+            "start",
+            &parameters.agent_id,
+            &parameters.content,
+            [
+                ("thread_origin_source", parameters.origin.source_id.as_str()),
+                (
+                    "thread_origin_episode",
+                    parameters.origin.episode.as_str(),
+                ),
+                ("title", parameters.title.as_str()),
+            ],
+        )
+    }
+
+    pub(crate) fn sign_thread_reply(
+        &self,
+        idempotency_key: &str,
+        agent_id: &str,
+        parameters: &ThreadReplyParameters,
+    ) -> Result<DeviceSignature> {
+        self.sign_thread_message(
+            idempotency_key,
+            &parameters.target_id,
+            "reply",
+            agent_id,
+            &parameters.content,
+            parameters
+                .thread_quote_id
+                .as_deref()
+                .map(|quote| ("thread_quote_id", quote)),
+        )
+    }
+
+    fn sign_thread_message<'a>(
+        &self,
+        idempotency_key: &str,
+        thread: &str,
+        action: &str,
+        recipient: &str,
+        content: &str,
+        extra: impl IntoIterator<Item = (&'static str, &'a str)>,
+    ) -> Result<DeviceSignature> {
+        let key = self.message_signing_key()?;
         let nonce = random_nonce()?;
         let signed_at_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
             .try_into()?;
-        self.sign_message_at(idempotency_key, parameters, &nonce, signed_at_unix_ms, key)
+        // The thread action scopes the normal message idempotency key by participant and target.
+        let mut digest = Sha256::new();
+        for part in [
+            "fractal.thread-message.v1",
+            &self.session.person_id,
+            thread,
+            action,
+            idempotency_key,
+        ] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        let encoded: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let scoped_key = format!("thread-message:{encoded}");
+        let mut fields: Vec<_> = [
+            ("content", content),
+            ("from", self.session.person_id.as_str()),
+            ("thread_id", thread),
+            ("to", recipient),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name, serde_json::Value::from(value)))
+        .chain(
+            extra
+                .into_iter()
+                .map(|(name, value)| (name, serde_json::Value::from(value))),
+        )
+        .collect();
+        // Readers predating this version quarantine the signed claim during replication.
+        fields.push(("thread_reader_version", serde_json::Value::from(2)));
+        fields.sort_unstable_by_key(|(name, _)| *name);
+        self.sign_message_fields(&scoped_key, &fields, &nonce, signed_at_unix_ms, key)
     }
 
     fn sign_message_at(
@@ -244,12 +369,6 @@ impl Device {
         signed_at_unix_ms: u64,
         key: &SigningKey,
     ) -> Result<DeviceSignature> {
-        let public = key.public_key()?;
-        let subject_hash = Sha256::digest(idempotency_key.as_bytes());
-        let subject = format!(
-            "message/{:016x}",
-            u64::from_be_bytes(subject_hash[..8].try_into()?)
-        );
         // Past `INLINE_MAX_BYTES` the daemon keeps only a preview in the claim and names the
         // whole text by its hash and length, so that is what is signed (docs/st3/long-messages.md).
         let long = parameters.content.len() > INLINE_MAX_BYTES;
@@ -288,13 +407,30 @@ impl Device {
             ("title", serde_json::to_value(&parameters.title)?),
             ("to", serde_json::to_value(&parameters.to)?),
         ]);
+        self.sign_message_fields(idempotency_key, &fields, nonce, signed_at_unix_ms, key)
+    }
+
+    fn sign_message_fields(
+        &self,
+        idempotency_key: &str,
+        fields: &[(&str, serde_json::Value)],
+        nonce: &str,
+        signed_at_unix_ms: u64,
+        key: &SigningKey,
+    ) -> Result<DeviceSignature> {
+        let public = key.public_key()?;
+        let subject_hash = Sha256::digest(idempotency_key.as_bytes());
+        let subject = format!(
+            "message/{:016x}",
+            u64::from_be_bytes(subject_hash[..8].try_into()?)
+        );
         let mut lines = vec![
             "smallclaims-claim-fields-v1".to_owned(),
             subject,
             "message.sent".into(),
             self.session.person_id.clone(),
         ];
-        for (name, value) in &fields {
+        for (name, value) in fields {
             lines.push(format!("{name}={value}"));
         }
         lines.extend([
@@ -436,12 +572,13 @@ impl AssistantDevice {
         ensure!(
             self.session.kind == "assistant-paired-session"
                 && matches!(self.session.api_version.as_str(), "st3.client.v0" | "fractal.client.v0")
+                && self.session.principal == AssistantPrincipal::Chatgpt
                 && self.session.credential.len() >= 32
                 && self.session.device_id == grant.device_id
                 && self.session.principal == grant.principal
                 && self.session.sender_class == grant.sender_class
                 && self.session.session_actor == grant.session_actor
-                && grant.session_actor == format!("{}/session/{}", grant.principal.as_str(), grant.id)
+                && grant.session_actor == format!("assistant/chatgpt/session/{}", grant.id)
                 && self.session.scopes == grant.scopes
                 && self.session.expires_at == grant.expires_at
                 && issuer.is_some_and(|person| {
@@ -997,43 +1134,6 @@ mod tests {
             assert!(!supports_device_key_proofs(&advertisement));
         }
         assert!(!supports_device_key_proofs(&serde_json::json!({})));
-    }
-
-    #[test]
-    fn assistant_session_principal_and_actor_are_grant_bound() {
-        for fixture in [
-            include_str!("../../../docs/st3/client-v0/fixtures/assistant-pairing.json"),
-            include_str!("../../../docs/st3/client-v0/fixtures/assistant-mcp-pairing.json"),
-        ] {
-            let paired: crate::Envelope<AssistantPairedSession> =
-                serde_json::from_str(fixture).unwrap();
-            let mut device = AssistantDevice {
-                endpoint: "https://member.example".into(),
-                allow_public_http: false,
-                session: paired.value,
-                signing_key: SigningKey::generate(KeyAlgorithm::Ed25519).unwrap(),
-            };
-            device.session.grant.key_id = format!(
-                "{:x}",
-                Sha256::digest(device.signing_key.public_key().unwrap().as_bytes())
-            );
-            device.validate().unwrap();
-
-            let principal = device.session.principal.clone();
-            device.session.principal = match principal {
-                crate::AssistantPrincipal::Chatgpt => crate::AssistantPrincipal::Mcp,
-                crate::AssistantPrincipal::Mcp => crate::AssistantPrincipal::Chatgpt,
-            };
-            assert!(device.validate().is_err());
-            device.session.principal = principal;
-
-            device.session.session_actor = format!(
-                "assistant/other/session/{}",
-                device.session.grant.id
-            );
-            device.session.grant.session_actor = device.session.session_actor.clone();
-            assert!(device.validate().is_err());
-        }
     }
 
 

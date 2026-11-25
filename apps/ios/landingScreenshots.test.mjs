@@ -71,3 +71,25 @@ test('landing capture accepts distinct PNG bytes for both views', t => {
   assert.ok(result.stdout.includes(`Screenshots saved to ${result.out}`));
   assert.deepEqual(result.files, ['conversation-dark.png', 'conversation-light.png', 'now-dark.png', 'now-light.png']);
 });
+
+test('native Git config pass-through preserves set, empty and absent caller values without an SSH agent', () => {
+  const start = script.indexOf('native() {');
+  const end = script.indexOf('\nxcrun() {', start);
+  assert.ok(start >= 0 && end > start, 'exercise the actual native environment boundary');
+  const native = script.slice(start, end);
+  for (const value of [undefined, '', '/caller managed config/with spaces']) {
+    const env = { ...process.env, SSH_AUTH_SOCK: '/fixture/human-agent-must-not-leak' };
+    delete env.GIT_CONFIG_GLOBAL;
+    if (value !== undefined) env.GIT_CONFIG_GLOBAL = value;
+    const result = spawnSync('bash', ['-c', `set -Eeuo pipefail\napple_developer_dir=/usr\n${native}\nnative /usr/bin/env`], { env, encoding: 'utf8' });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    const variables = new Map(result.stdout.trimEnd().split('\n').map(line => {
+      const at = line.indexOf('=');
+      return [line.slice(0, at), line.slice(at + 1)];
+    }));
+    assert.equal(variables.has('GIT_CONFIG_GLOBAL'), value !== undefined);
+    assert.equal(variables.get('GIT_CONFIG_GLOBAL'), value);
+    assert.equal(variables.has('SSH_AUTH_SOCK'), false);
+  }
+});

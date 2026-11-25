@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep thread preview evidence message timestamps on the production renderer clock",
+  "replay": { "status": "none", "detail": "Only the ignored preview evidence fixture changes; no durable data is replayed." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes." },
+  "rules": { "status": "none", "detail": "Thread authority and mutation rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Production behavior is unchanged; fixed-clock unit fixtures remain deterministic." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required." },
+  "manual": { "status": "changed", "detail": "The ignored thread_preview_evidence harness now captures a message accepted two minutes before rendering and asserts its relative label, instead of rendering a 1970 fixture against today's wall clock." },
+  "recovery": { "status": "none", "detail": "Preview evidence writes captures only and changes no daemon state." }
+}

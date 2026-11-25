@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
-import { ActionSheetIOS, Alert, View } from 'react-native';
+import { View } from 'react-native';
+import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
 import { agentName } from '../agentsView';
 import { AUTO_RESOLVED_TITLE, autoResolvedRows, autoResolvedVisible, INCOMPLETE_AUTO_RESOLVED, needsWords, OVERRIDE_TITLE, overrideAnswer, overrideCopy, type AutoResolvedRow, type OverrideChoice } from '../autoResolved';
 import { ContextMenu } from '../menu';
@@ -31,7 +32,7 @@ export function useOverride() {
     if (status !== 'online') { Alert.alert('Not connected', 'Reconnect to Fractal to answer this.'); return; }
     if (busy || overridePending.has(row.ask.episode)) return;
     const { choices } = row;
-    ActionSheetIOS.showActionSheetWithOptions({ title: OVERRIDE_TITLE, message: overrideCopy(row.asker), options: [...choices.map(choice => choice.label), 'Cancel'], cancelButtonIndex: choices.length }, index => {
+    showOwnedActionSheet({ title: OVERRIDE_TITLE, message: overrideCopy(row.asker), options: [...choices.map(choice => choice.label), 'Cancel'], cancelButtonIndex: choices.length }, index => {
       const choice = choices[index];
       if (!choice) return;
       if (needsWords(choice)) Alert.prompt(choice.label, 'What should change?', text => send(row, choice, text));

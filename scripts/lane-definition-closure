@@ -85,6 +85,7 @@ VERDICT_DATA = {
         '.github/clippy-splits.json': 'how the clippy stage splits the workspace (scripts/clippy_ratchet.py)',
         '.github/fleet-compat-baseline.json': 'the release the fleet-compat stage runs against (scripts/compat-baseline)',
         '.github/messaging-compat-baseline.json': 'the release the messaging compatibility tests run against (scripts/ci-local)',
+        '.github/thread-floor-v22-compat-baseline.json': 'the genuine v22 reader selected by the thread floor test (scripts/ci-linux)',
         'nix/hm-module.nix': 'the executable ownership/rollback activation proved by the hm-module-eval job required by linux-gate',
     },
     'linux-clippy': {
@@ -93,6 +94,7 @@ VERDICT_DATA = {
     },
     'linux-fleet-compat': {
         '.github/fleet-compat-baseline.json': 'the release the fleet-compat stage runs against (scripts/compat-baseline)',
+        '.github/thread-floor-v22-compat-baseline.json': 'the genuine v22 reader selected by the thread floor test (scripts/ci-linux)',
     },
     'rust-tests': {
         '.config/daily-only.filterset': 'the tests the PR run leaves to the daily run (scripts/ci-nextest)',
@@ -117,6 +119,9 @@ KEPT = {'ci-script-tests', 'genie-freshness'}
 
 # Edges no static reference shows, each with why. Keep this small: a reference the scanner can see belongs in the code it is in.
 EXTRA = {
+    # The fixed-output check selects checks.$system.typescript-client.installation dynamically, outside the dev shell.
+    # Follow its actual Nix entry point and transitive inputs instead of guessing them from the shell's closure.
+    'typescript-client': {'executed_files': {'nix/typescript-client.nix': 'the dynamically selected check installation'}},
     # The recorded argv only reads one crate's result out of a JUnit report; the report is made by the tests stage that
     # scripts/fractal-test runs for the crates without a note (RUN_TESTS), so that stage is part of what a rust-tests note says.
     'rust-tests': {'argv': [['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']]},
@@ -843,6 +848,8 @@ def lane_closure(repo, entry, lane=None):
     closure.argv(entry['argv'], f'{lane or "lane"} argv')
     for extra in EXTRA.get(lane, {}).get('argv', []):
         closure.argv(extra, f'{lane} EXTRA')
+    for path, reason in EXTRA.get(lane, {}).get('executed_files', {}).items():
+        closure.add(path, f'{lane} EXTRA: {reason}', executed=True)
     closure.finish(lane or 'lane')
     return closure
 
