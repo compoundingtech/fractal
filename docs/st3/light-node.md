@@ -283,6 +283,13 @@ not prove physical entry; conversely, an error after backend entry cannot create
 that witness. The original backend error is retained before fallible native
 inspection, and later recovery rechecks positive exact-operation closure without
 respawning or treating absence as proof.
+The finite backend's private release pipe carries the newly minted physical
+generation with its release token. It clears inherited generation hints before
+launch; the actual exec wrapper consumes that exact generation for payload
+attribution instead of waiting for a seat graph projection. This is attribution,
+not a new credential or launch/stop grant: the existing finite physical admission
+and release barriers remain authoritative. Legacy untracked exec wrappers retain
+their graph-incarnation lookup.
 
 Finite remote admission authenticates the immutable lane request against the
 admitted, undispatched native Start before enrolling canonical resource membership

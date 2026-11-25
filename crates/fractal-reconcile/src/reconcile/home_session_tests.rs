@@ -93,6 +93,7 @@ struct NativePair {
     server: tokio::task::JoinHandle<()>,
     client: Option<tokio::task::JoinHandle<Result<()>>>,
     stop: Option<watch::Sender<bool>>,
+    owned_exec_roots: std::sync::Mutex<Vec<(String, Option<String>)>>,
     #[cfg(target_os = "linux")]
     _lane_configuration: Option<FiniteLaneConfiguration>,
 }
@@ -227,6 +228,7 @@ impl NativePair {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let mut pair = Self { root, selection, home, seat, store, graph, runtime, executor, driver, binding, seat_auth, endpoint,
             home_service, server, client: None, stop: None,
+            owned_exec_roots: std::sync::Mutex::new(Vec::new()),
             #[cfg(target_os = "linux")]
             _lane_configuration: None };
         // Full-node fixtures may admit parent memberships and launch their native
@@ -413,6 +415,34 @@ impl Drop for NativePair {
         if let Some(client) = &self.client { client.abort(); }
         self.home_service.shutdown();
         self.server.abort();
+        // Capture physical state and CLI output before cleanup and TempDir
+        // destruction. Finite stderr is separate from the legacy exec log.
+        if std::thread::panicking() {
+            for id in ["native-worker", "native-parent", "native-sibling"] {
+                let observed = self.runtime.observe_exec(id);
+                eprintln!("native fixture {id} physical state: {observed:?}");
+                eprintln!("native fixture {id} generation journal: {:?}",
+                    std::fs::read_to_string(self.root.path().join("exec").join(format!("{id}.json"))));
+                eprintln!("native fixture {id} exec log: {:?}", self.runtime.exec.read_log(id));
+                if let Ok(Some(observed)) = observed
+                    && let Some(generation) = observed.incarnation_id {
+                    eprintln!("native fixture {id} stdout/stderr: {:?}",
+                        self.runtime.exec.read_output(id, &generation));
+                }
+            }
+        }
+        for (id, incarnation) in self.owned_exec_roots.lock().unwrap_or_else(|error| error.into_inner()).iter() {
+            // A start may panic/fail after physical entry but before returning its
+            // generation. These IDs were reserved before entry in this fixture's
+            // private runtime directory; resolve only that owned root, never scan
+            // or signal arbitrary scopes.
+            let generation = incarnation.clone().or_else(|| self.runtime.observe_exec(id).ok().flatten()
+                .and_then(|observed| observed.incarnation_id));
+            if let Some(generation) = generation
+                && let Err(error) = self.runtime.exec.retire_if(id, &generation) {
+                eprintln!("native fixture exact cleanup {id}/{generation}: {error:#}");
+            }
+        }
         let _ = self.runtime.pty().and_then(|pty| pty.stop("native-worker"));
         let _ = self.runtime.pty().and_then(|pty| pty.stop("native-second"));
         let _ = self.runtime.pty().and_then(|pty| pty.stop("native-launcher"));
@@ -1120,6 +1150,7 @@ async fn native_start_entered_unknown_recovers_only_its_positive_operation_proof
 async fn native_start_unknown_never_adopts_or_stops_a_reused_runtime_generation() {
     let mut pair = NativePair::for_start().await;
     let authorization = pair.start_authorization("printf x >> entered; exec sleep 600");
+    let mut launch_member = authorization.launch_member.clone();
     let start = pair.home.enqueue(pair.draft("unknown-before-generation-reuse",
         Operation::Start { authorization: Box::new(authorization) })).unwrap();
     assert!(matches!(pair.seat.admit(&start).unwrap(), Admission::Accepted(_)));
@@ -1127,6 +1158,10 @@ async fn native_start_unknown_never_adopts_or_stops_a_reused_runtime_generation(
     assert_eq!(native_file(&pair.root.path().join("entered")).await, b"x");
     let original = pair.runtime.snapshot_ptys().unwrap().into_iter()
         .find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
+    assert_eq!(pair.runtime.start_operation("native-worker", true, &original).unwrap().as_deref(),
+        Some(start.execution_id.as_str()), "the retired producer must belong to this exact Start");
+    assert!(pair.store.local_session(&start.binding.subject).unwrap().is_none(),
+        "this crash precedes local custody acquisition");
     pair.store.connection.write().execute(
         /* sqlite-large-value: allow-for-now lv-h3387d8df1df9 owner=fractal_reconcile::reconcile::home_session_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=0,result=NULL WHERE id=?1", [&start.execution_id]).unwrap();
     pair.runtime.pty().unwrap().stop_if("native-worker", Some(&original)).unwrap();
@@ -1136,23 +1171,63 @@ async fn native_start_unknown_never_adopts_or_stops_a_reused_runtime_generation(
         .find(|entry| entry.runtime_id == "native-worker").unwrap().incarnation_id.unwrap();
     assert_ne!(original, successor);
     pair.reopen_native();
-    assert!(pair.driver.recover(Recovery { custody_proof: None, ..entered }).await.is_err(),
-        "absence of original provenance must retain entered custody, never launch/adopt a successor");
+    assert!(pair.runtime.start_operation("native-worker", true, &successor).unwrap().is_none(),
+        "the replacement has no provenance for the original Start");
+    launch_member.tags.insert(start_jobs::OPERATION_TAG.into(), start.execution_id.clone());
+    let producer_closed = pair.runtime.start_operation_closed(&launch_member).unwrap();
+    let mut unrelated = launch_member.clone();
+    unrelated.tags.insert(start_jobs::OPERATION_TAG.into(), "unrelated-start".into());
+    assert!(!pair.runtime.start_operation_closed(&unrelated).unwrap(),
+        "runtime reuse or an empty old scope alone cannot close another operation");
+    // Linux scope mode retains operation-keyed work/server ownership even after
+    // the runtime registry has been replaced. stop_if positively retired that
+    // original producer; losing its result is not losing its closure witness.
+    assert_eq!(producer_closed, fractal_runtime::isolation_mode() == fractal_runtime::Isolation::Scope);
+    let first = pair.driver.recover(Recovery { custody_proof: None, ..entered }).await;
+    if producer_closed {
+        assert!(matches!(first.as_ref(), Ok(Outcome::Refused { .. })),
+            "positive original producer closure may settle without adopting the replacement: {first:?}");
+    } else {
+        assert!(first.is_err(), "without positive closure, entered producer custody must remain unknown");
+    }
     pair.seat.cancel_or_revoke(&start.execution_id, "withdraw unknown".into(),
         |command, authority, reason| pair.driver.cancel(command, authority, reason)).unwrap();
     let recovery = pair.seat.recoverable().unwrap().into_iter()
         .find(|recovery| recovery.command.execution_id == start.execution_id).unwrap();
-    assert!(pair.driver.recover(recovery).await.is_err(), "unknown producer closure cannot be guessed");
+    let cancelled = pair.driver.recover(recovery).await;
+    if producer_closed {
+        assert!(matches!(cancelled.as_ref(), Ok(Outcome::Refused { .. })),
+            "original closure permits refusal, never replacement retirement: {cancelled:?}");
+    } else {
+        assert!(cancelled.is_err(), "unknown producer closure cannot be guessed");
+    }
     let running = pair.runtime.snapshot_ptys().unwrap().into_iter().find(|entry| entry.runtime_id == "native-worker").unwrap();
     assert_eq!(running.incarnation_id.as_deref(), Some(successor.as_str()));
     assert_eq!(running.status, "running", "old Start revocation must not signal a reused generation");
     assert_eq!(std::fs::read(pair.root.path().join("entered")).unwrap(), b"x");
     assert!(pair.store.local_session(&start.binding.subject).unwrap().is_none());
-    assert!(!pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap().cleanup_verified);
+    let operation = pair.store.remote_runtime_start(&start.execution_id).unwrap().unwrap();
+    assert_eq!(operation.cleanup_verified, producer_closed);
+    assert_eq!(operation.applied, producer_closed);
     assert!(pair.seat.pending_terminal_results().unwrap().is_empty());
-    assert!(pair.seat.recoverable().unwrap().iter().any(|recovery|
-        recovery.command.execution_id == start.execution_id && recovery.cancellation_reason.is_some()),
-        "unproven original producer must retain entered cancellation custody");
+    if producer_closed {
+        let proof = operation.result.unwrap();
+        assert_eq!(proof["verification"], "producer-closed");
+        assert_eq!(proof["producer_closed"], true);
+        assert!(proof["incarnation"].is_null(), "closure cannot adopt either physical generation");
+        pair.seat.complete(&start.execution_id, cancelled.unwrap()).unwrap();
+        pair.connect();
+        pair.settled(&start).await;
+        pair.disconnect().await;
+        let running = pair.runtime.snapshot_ptys().unwrap().into_iter()
+            .find(|entry| entry.runtime_id == "native-worker").unwrap();
+        assert_eq!(running.incarnation_id.as_deref(), Some(successor.as_str()));
+        assert_eq!(running.status, "running", "refusal delivery must not signal the replacement");
+    } else {
+        assert!(pair.seat.recoverable().unwrap().iter().any(|recovery|
+            recovery.command.execution_id == start.execution_id && recovery.cancellation_reason.is_some()),
+            "unproven original producer must retain entered cancellation custody");
+    }
 }
 
 #[tokio::test]
@@ -1196,8 +1271,10 @@ async fn native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_an
     let mut pair = NativePair::for_finite_start().await;
     let mut authorization = pair.start_authorization("unused");
     authorization.member.terminal = false;
+    authorization.member.environment.insert(fractal_runtime::payload_receipt::GENERATION_ENV.into(), "untrusted-parent-generation".into());
+    authorization.member.environment.insert("ST3_INCARNATION".into(), "stale-parent-incarnation".into());
     authorization.member.launch = crate::model::LaunchSpec::Argv(vec!["bun".into(), "-e".into(),
-        "await Bun.write('finite-entered', 'actual-bun'); setInterval(() => {}, 60000);".into()]);
+        "await Bun.write('finite-entered', 'actual-bun:' + process.env.ST3_INCARNATION); setInterval(() => {}, 60000);".into()]);
     let request = LaneRequest {
         id: "remote-native-finite".into(), name: "remote-native-checks".into(), host: pair.selection.host.clone(),
         max_members: 1, profile: None, profile_estimate: None, disk_path: None,
@@ -1230,7 +1307,8 @@ async fn native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_an
     let ReceiptState::Settled { outcome: Outcome::Started { incarnation } } = &receipt.state else {
         panic!("supported Linux native lane must launch, not silently skip unsupported coverage: {receipt:?}");
     };
-    assert_eq!(native_file(&pair.root.path().join("finite-entered")).await, b"actual-bun");
+    assert_eq!(native_file(&pair.root.path().join("finite-entered")).await,
+        format!("actual-bun:{incarnation}").as_bytes());
     let record = pair.store.resource_membership_record(&request.id, &request.owner).unwrap();
     assert_eq!(record.state, "launched");
     assert!(record.native_custody);
@@ -1343,7 +1421,7 @@ async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_paren
                 u64::try_from(now_ms()).unwrap()).unwrap();
             assert!(matches!(admission, ResourceAdmission::Admitted(_)),
                 "full-node parent setup must admit its enforced membership: {admission:?}");
-            let mut authorization = pair.start_authorization("printf ready > inherited-ready; exec sleep 600");
+            let mut authorization = pair.start_authorization("printf 'ready:%s' \"$ST3_INCARNATION\" > inherited-ready; exec sleep 600");
             authorization.member.terminal = false;
             resource_lanes::set_request(&mut authorization.member, &request).unwrap();
             authorization.launch_member = authorization.member.clone();
@@ -1353,8 +1431,10 @@ async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_paren
                 let mut member = authorization.member.clone();
                 member.runtime_id = runtime_id.into();
                 member.launch = crate::model::LaunchSpec::Shell("exec sleep 600".into());
+                pair.owned_exec_roots.lock().unwrap().push((runtime_id.into(), None));
                 pair.runtime.start_resource_guarded(&pair.store, &member, None, &|| Ok(())).unwrap();
                 let incarnation = pair.runtime.observe_exec(runtime_id).unwrap().unwrap().incarnation_id.unwrap();
+                pair.owned_exec_roots.lock().unwrap().last_mut().unwrap().1 = Some(incarnation.clone());
                 survivors.push((runtime_id, incarnation));
             }
             inherited = Some((request, authorization, survivors));
@@ -1379,8 +1459,9 @@ async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_paren
         pair.settled(&start).await;
         let mut child_incarnation = None;
         if matches!(boundary, "stop" | "withdraw") {
-            assert_eq!(native_file(&pair.root.path().join("inherited-ready")).await, b"ready");
             let local = pair.store.local_session(&start.binding.subject).unwrap().unwrap();
+            assert_eq!(native_file(&pair.root.path().join("inherited-ready")).await,
+                format!("ready:{}", local.native_incarnation).as_bytes());
             if boundary == "stop" {
                 pair.binding = pair.executor.session_bindings(&pair.selection).unwrap().pop().unwrap();
                 pair.authorized().await;
@@ -1424,5 +1505,6 @@ async fn inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_paren
         for (runtime_id, incarnation) in survivors {
             pair.runtime.exec.retire_if(runtime_id, &incarnation).unwrap();
         }
+        pair.owned_exec_roots.lock().unwrap().clear();
     }
 }
