@@ -43,6 +43,7 @@ fractal-secrets = { path = "../fractal-secrets" }
 
 [dev-dependencies]
 fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
+fractal-light-node-core = { path = "../fractal-light-node-core" }
 fractal_seats_self = { package = "fractal-seats", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
