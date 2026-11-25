@@ -2530,6 +2530,7 @@ dependencies = [
  "fractal-client",
  "fractal-drivers",
  "fractal-kernel",
+ "fractal-light-node-core",
  "fractal-missions",
  "fractal-runtime",
  "fractal-schema",
