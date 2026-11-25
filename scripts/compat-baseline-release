@@ -101,10 +101,14 @@ def validate(pin, label):
     for target, bundle in pin['bundles'].items():
         expected = tuple(f'https://github.com/{repository()}/releases/download/{pin["tag"]}/{name}-{target}.tar.gz'
                          for name in ('fractal', 'smalltalk'))
-        if (not isinstance(bundle, dict) or set(bundle) != {'url', 'sha256'}
+        if (not isinstance(bundle, dict) or set(bundle) not in (
+                {'url', 'sha256'}, {'url', 'sha256', 'elf_sha256'})
                 or bundle['url'] not in expected or not isinstance(bundle['sha256'], str)
                 or not DIGEST.fullmatch(bundle['sha256'])):
             raise BaselineError(f'{label}: {target} needs the tagged archive URL and hex SHA256')
+        if 'elf_sha256' in bundle and (not isinstance(bundle['elf_sha256'], str)
+                                      or not DIGEST.fullmatch(bundle['elf_sha256'])):
+            raise BaselineError(f'{label}: {target} needs a hex ELF SHA256')
 
 
 def check(pins, releases, require_latest=False):

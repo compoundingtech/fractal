@@ -15,6 +15,8 @@ vi.mock('@stylexjs/stylex', () => ({
 vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
 
 import { AgentAlerts } from './AgentAlerts.tsx'
+import { AnswerAlert } from './AnswerAlert.tsx'
+import { PromptAlert } from './PromptAlert.tsx'
 import { promptAlerts } from './alertChoices.ts'
 import { gatewayPromptAnswers } from './prompt-answer-port.ts'
 
@@ -218,5 +220,17 @@ describe('gatewayPromptAnswers', () => {
     } as unknown as FractalClient)
     expect((await ungranted.respond({ alert: promptAlert as never, answer: 'allow' }))._tag).toBe('Refused')
     expect(called).toBe(false)
+  })
+})
+
+describe('contextual alert landmarks', () => {
+  it('distinguishes the same item in the Inbox view and its conversation for prompt and ordinary alerts', () => {
+    const prompt = { ...alert('attention/shared', ['allow'], 'Allow this command?', 'call/shared'), requested_at: DateTime.makeUnsafe('2026-10-13T10:00:00Z') }
+    const report = { ...prompt, attention_kind: 'custom.garden.report' }
+    const conversation = renderToStaticMarkup(<AgentAlerts alerts={[prompt, report]} />)
+    expect(conversation).toContain(`aria-label="${prompt.title}"`)
+    expect(conversation).not.toContain('aria-label="Inbox: ')
+    expect(renderToStaticMarkup(<PromptAlert alert={prompt} context="Inbox" />)).toContain(`aria-label="Inbox: ${prompt.title}"`)
+    expect(renderToStaticMarkup(<AnswerAlert alert={report} context="Inbox" />)).toContain(`aria-label="Inbox: ${report.title}"`)
   })
 })

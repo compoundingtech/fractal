@@ -5,9 +5,9 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { ANCHOR_MS, catalog, loadWorld, type Slice } from '../src/index.ts'
-import { decodeFile, decodeFixtures, decodeRecordings, decodeSlice, everyVariant, RECORDINGS_DIR } from '../scripts/decode.ts'
-import { checkTree, FIXTURES_DIR, generate } from '../scripts/emit.ts'
+import { ANCHOR, ANCHOR_MS, catalog, loadWorld, rebase, type Slice } from '../src/index.ts'
+import { decodeFile, decodeFixtures, decodeNow, decodeRecordings, decodeSlice, everyVariant, RECORDINGS_DIR } from '../scripts/decode.ts'
+import { checkTree, FIXTURES_DIR, generate, sliceTimes } from '../scripts/emit.ts'
 import { checkPublicRepo, scanContent, scanIdentities, scanRecordingContent, scanTree, scanVocabulary } from '../scripts/scan.ts'
 import { decodeRecording } from '../scripts/recordings.ts'
 
@@ -26,6 +26,44 @@ describe('decode gate', () => {
   it('covers every variant the worlds offer', () => {
     const world = loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })
     expect(everyVariant(world).map((slice) => `${slice.kind}:${slice.variant}`)).toContain('sync:subscription-limit-local')
+  })
+
+  it.each([0, 0.25, 0.5, 0.75, 1])('keeps decode clock sample %s wire-valid without changing relative thread instants', (sample) => {
+    const now = decodeNow(sample)
+    expect(now).toBeGreaterThanOrEqual(ANCHOR_MS)
+    expect(now).toBeLessThanOrEqual(ANCHOR_MS + 400 * 365 * 86_400_000)
+    const anchor = loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })
+    const world = loadWorld(anchor.id, { now })
+    for (const variant of world.available.attention) {
+      const original = anchor.with({ attention: variant }).slices.attention
+      const shifted = world.with({ attention: variant }).slices.attention
+      expect(rebase({ state: original.state, timeline: original.timeline }, sliceTimes(original), ANCHOR, now))
+        .toEqual({ state: shifted.state, timeline: shifted.timeline })
+      for (const [index, topic] of (shifted.state.topic_threads ?? []).entries()) {
+        for (const [eventIndex, event] of topic.events.entries()) {
+          expect(event.accepted_at_unix_ms).toBeGreaterThanOrEqual(0)
+          expect(event.accepted_at_unix_ms - now)
+            .toBe(original.state.topic_threads![index]!.events[eventIndex]!.accepted_at_unix_ms - ANCHOR_MS)
+        }
+      }
+      expect(decodeSlice(world.id, shifted)).toEqual([])
+    }
+  })
+
+  it('rejects negative thread wire timestamps rather than clamping or skipping them', () => {
+    const world = loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })
+    const slice = structuredClone(world.slices.attention)
+    slice.state.topic_threads![0]!.events[0]!.accepted_at_unix_ms = -1
+    expect(decodeSlice(world.id, slice).map(({ pointer }) => pointer))
+      .toContain('/state/topic_threads/0/events/0')
+
+    // The old random-clock range reached 1933. Affine rebasing must not disguise the
+    // resulting invalid Unix timestamps; only the decode gate's clock selection changes.
+    const now = Date.UTC(1933, 8, 19)
+    const original = world.slices.attention
+    const shifted = rebase({ state: original.state, timeline: original.timeline }, sliceTimes(original), ANCHOR, now)
+    expect(shifted.state.topic_threads![0]!.events[0]!.accepted_at_unix_ms).toBeLessThan(0)
+    expect(decodeSlice(world.id, { ...original, ...shifted }).length).toBeGreaterThan(0)
   })
 
   it('fails on a planted strict-invalid value', () => {

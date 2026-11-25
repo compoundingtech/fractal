@@ -5,8 +5,7 @@ import * as stylex from '@stylexjs/stylex'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { ObservedAge } from './lastObserved.tsx'
-import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
-import { credentialExpiredMessage } from '../data/source.ts'
+import { credentialExpiredMessage, credentialExpiredTitle } from '../data/source.ts'
 
 /** Screen readers hear the wait; the skeleton beside it is decorative. */
 export const RosterLoading = () =>
@@ -25,20 +24,18 @@ export const SidebarEmptyState = (props: { readonly kind: 'empty' } | { readonly
     </div>
 
 const unavailableCopy = {
-  unauthorized: { title: 'Credential expired', body: credentialExpiredMessage },
+  unauthorized: { title: credentialExpiredTitle, body: credentialExpiredMessage },
   failed: { title: 'Couldn’t load agents', body: 'The agent list did not load. Open conversations keep working.' },
   ungranted: { title: 'No access to the agent roster', body: 'Read access has not been granted.' },
   unsupported: { title: 'Agent roster not supported', body: 'This connection does not offer it.' },
 } as const
 
 /**
- * The roster read itself failed. Only a failed follow is announced as an alert in the danger tone; a refused or
- * unsupported read is a standing fact. Retry renders only when the source supports it.
+ * The roster read itself failed. Only a failed follow is announced as an alert in the danger tone; a refused,
+ * revoked or unsupported read is a standing fact. Retry renders only when the source supports it.
  */
 export const RosterUnavailable = ({ reason, onRetry }: { readonly reason: keyof typeof unavailableCopy; readonly onRetry: (() => void) | undefined }) =>
-  reason === 'unauthorized'
-    ? <SystemNotice scope="rail" kind="error" connection title={unavailableCopy.unauthorized.body} data-roster-error data-wf-roster-reason={reason} />
-    : <div role={reason === 'failed' ? 'alert' : 'status'} data-roster-error data-system-state="error" data-wf-roster-reason={reason} {...stylex.props(styles.message, styles.messageStart)}>
+  <div role={reason === 'failed' ? 'alert' : 'status'} data-roster-error data-system-state="error" data-wf-roster-reason={reason} {...stylex.props(styles.message, styles.messageStart)}>
     <p {...stylex.props(styles.messageTitle, reason === 'failed' && styles.errorTitle)}>{reason === 'failed' && <Icon name="alert" size={14} />}{unavailableCopy[reason].title}</p>
     <p {...stylex.props(styles.messageBody)}>{unavailableCopy[reason].body}</p>
     {onRetry === undefined ? null : <div {...stylex.props(styles.actions)}><Aria.Button onPress={onRetry} {...stylex.props(styles.actionButton)}>Retry</Aria.Button></div>}

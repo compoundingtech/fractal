@@ -62,7 +62,10 @@ exec > >(tee "$out/commands.log") 2>&1
 # Clear DEVELOPER_DIR during discovery too: xcode-select otherwise echoes it.
 apple_developer_dir="$(env -u DEVELOPER_DIR /usr/bin/xcode-select -p)"
 native() {
-  local -a launch=()
+  local -a launch=() git_config=()
+  # Preserve the caller's managed Git transport without inheriting a human SSH agent.
+  # CI and standalone callers may legitimately have no global config override.
+  if [[ ${GIT_CONFIG_GLOBAL+x} ]]; then git_config=("GIT_CONFIG_GLOBAL=$GIT_CONFIG_GLOBAL"); fi
   if [[ "${native_replace_process:-0}" = 1 ]]; then launch=(exec); fi
   "${launch[@]}" env -i \
     HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" TMPDIR="${TMPDIR:-/tmp}" \
@@ -73,6 +76,7 @@ native() {
     EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1 \
     EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK="${EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK:-}" \
     EXPO_PUBLIC_FRACTAL_TEST_TAB=Now EXPO_PUBLIC_FRACTAL_TEST_LINKS='' \
+    "${git_config[@]}" \
     "$@"
 }
 xcrun() { native /usr/bin/xcrun "$@"; }

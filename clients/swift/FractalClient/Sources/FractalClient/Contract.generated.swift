@@ -55,6 +55,14 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case terminalEnd = "terminal.end"
     case terminalInput = "terminal.input"
     case terminalResize = "terminal.resize"
+    case threadClearUnread = "thread.clear-unread"
+    case threadClose = "thread.close"
+    case threadMarkUnread = "thread.mark-unread"
+    case threadRead = "thread.read"
+    case threadRename = "thread.rename"
+    case threadReopen = "thread.reopen"
+    case threadReply = "thread.reply"
+    case threadStart = "thread.start"
     case workAsk = "work.ask"
     case workCancelAsk = "work.cancel-ask"
     case workClaim = "work.claim"
@@ -70,6 +78,11 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ReadOperation: String, CaseIterable, Sendable {
+    case threadList = "thread.list"
+    case threadStartContext = "thread.start-context"
+    case threadGet = "thread.get"
+    case threadTimeline = "thread.timeline"
+    case threadRequestHistory = "thread.request-history"
     case harnessQuestionsList = "harness-questions.list"
     case harnessQuestionsGet = "harness-questions.get"
     case notesList = "notes.list"
@@ -175,6 +188,11 @@ public enum ReadOperation: String, CaseIterable, Sendable {
 }
 
 public let fractalClientReadPaths: [ReadOperation: String] = [
+    .threadList: "/v1/client/threads",
+    .threadStartContext: "/v1/client/threads/start-context",
+    .threadGet: "/v1/client/threads/{id}",
+    .threadTimeline: "/v1/client/threads/{id}/timeline",
+    .threadRequestHistory: "/v1/client/threads/{id}/request-history",
     .harnessQuestionsList: "/v1/client/harness-questions",
     .harnessQuestionsGet: "/v1/client/harness-questions/{id}",
     .notesList: "/v1/client/notes",
