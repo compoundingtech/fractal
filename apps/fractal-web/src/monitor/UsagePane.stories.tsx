@@ -9,10 +9,10 @@ import { scenarioArgTypes } from '@fractal/scenarios/storybook'
 import { assistantDarkTheme, liveAccentTheme, compositionLightTheme } from '@fractal/ui/assistant-ui'
 import { colorVars as color, typeVars as type } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { accountOf, accounts, FIXTURE_NOW, fixtureSource, quotaEnvelope } from './fixtures.ts'
+import { accountOf, accounts, FIXTURE_NOW, fixtureSource, historyEnvelope, quotaEnvelope, type Scripted } from './fixtures.ts'
 import { scenarioUsageSource, usageReads, type UsageRead } from './usageFixtures.ts'
 import { UsagePane } from './UsagePane.tsx'
-import type { QuotaAccount } from './wire.ts'
+import type { QuotaAccount, UsageHistoryEnvelope } from './wire.ts'
 
 const HOUR = 3_600_000
 const atLimit = accountOf({ harness: 'codex', provider: 'openai-codex', name: 'team-north', label: 'Team North', plan: 'Pro',
@@ -21,11 +21,29 @@ const atLimit = accountOf({ harness: 'codex', provider: 'openai-codex', name: 't
 const held = accountOf({ harness: 'codex', provider: 'openai-codex', name: 'held', label: 'Held', plan: 'Plus', retained: { observedAgo: 3 * HOUR, reason: 'provider answered 401' },
   limits: [{ id: 'week', label: 'Weekly', slot: 'governing', fraction: 0.74, resetsIn: 2 * 24 * HOUR }] })
 const quotaOf = (list: readonly QuotaAccount[], generatedAgo?: number) => fixtureSource({ quota: [{ _tag: 'ok', json: quotaEnvelope({ list, ...(generatedAgo === undefined ? {} : { generatedAgo }) }) }] })
+const dayAgo = (days: number) => new Date(FIXTURE_NOW - days * 24 * HOUR).toISOString().slice(0, 10)
+/** The producer reported these days' tokens but no rate-card dollars. */
+const withoutRate = (envelope: UsageHistoryEnvelope, daysAgo: readonly number[]): UsageHistoryEnvelope =>
+  ({ ...envelope, rows: envelope.rows.map(row => daysAgo.some(days => row.bucket_start.startsWith(dayAgo(days))) ? { ...row, usd: null } : row) })
 /** Made-up v3 quota envelopes for the quota accounts at the top of the pane, at the fixture clock. */
 const quotas = {
   'at limit': quotaOf([accounts.claudeAlpha, atLimit, accounts.codexAlpha]),
   stale: quotaOf([held, accounts.claudeBravo], 2 * HOUR),
   empty: quotaOf([]),
+  history: fixtureSource({
+    quota: [{ _tag: 'ok', json: quotaEnvelope({ list: [accounts.claudeAlpha, accounts.claudeBravo, accounts.codexAlpha, accounts.codexBravo, accounts.copilotMain, accounts.zaiMain, atLimit] }) }],
+    history: (ledgerAccountId): readonly Scripted[] => {
+      switch (ledgerAccountId) {
+        case 'anthropic/alpha': return [{ _tag: 'ok', json: historyEnvelope({ ledgerAccountId, days: 40, coverageOk: false, idle: [2, 3] }) }]
+        case 'anthropic/bravo': return [{ _tag: 'fail', failure: { kind: 'unavailable', reason: 'history returned HTTP 404' } }]
+        case 'openai-codex/alpha': return [{ _tag: 'ok', json: { lens: 'usage_over_time', rows: 'none' } }]
+        case 'openai-codex/bravo': return [{ _tag: 'fail', failure: { kind: 'http', reason: 'history returned HTTP 502' } }]
+        case 'github-copilot/main': return [{ _tag: 'ok', json: historyEnvelope({ ledgerAccountId, days: 3 }) }]
+        case 'zai/main': return [{ _tag: 'ok', json: withoutRate(historyEnvelope({ ledgerAccountId, days: 40, idle: [4] }), [5, 6]) }]
+        default: return [{ _tag: 'hang' }]
+      }
+    },
+  }),
 }
 
 interface UsageArgs { readonly reads: readonly UsageRead[]; readonly scheme: 'dark' | 'light'; readonly objectives?: string; readonly quota?: keyof typeof quotas }
@@ -163,27 +181,45 @@ export const QuotaAtLimit: Story = {
     await expect(detail.getByText('100%!')).toBeVisible()
     await expect(detail.getByText('at limit · resets 4d')).toBeVisible()
     await expect(detail.getByText('12%')).toBeVisible()
+    await expect(await within(canvasElement).findByText('Daily spend, USD · last 30 days')).toBeVisible()
+    expect(canvasElement.querySelectorAll('[data-usage-day]')).toHaveLength(30)
+    expect(canvasElement.querySelector('[data-usage-day]:last-child')).toHaveAttribute('data-open', 'true')
     await expect(detail.getByText('1 banked reset · expires in 6d')).toBeVisible()
-    await expect(detail.getByText('Reading, 42s old')).toBeVisible()
+    await expect(detail.getByText('This account’s reading, 42s old')).toBeVisible()
     await userEvent.click(await accountRow(canvasElement, 'claude/alpha'))
     await waitFor(() => expect(detailOf(canvasElement)).toHaveAttribute('data-usage-detail', 'claude/alpha'))
     await expect(within(detailOf(canvasElement)!).getAllByRole('listitem')).toHaveLength(3)
     await userEvent.keyboard('{ArrowUp}')
     await waitFor(() => expect(detailOf(canvasElement)).not.toHaveAttribute('data-usage-detail', 'claude/alpha'))
+    // Selection carries the accent bar; the keyboard focus ring is neutral, never the accent.
+    const selected = canvasElement.querySelector<HTMLElement>('[data-usage-account][data-selected]')!
+    expect(getComputedStyle(selected).boxShadow).toMatch(/inset/)
+    const ring = getComputedStyle(document.activeElement!)
+    expect(ring.outlineStyle).toBe('solid')
+    expect(parseFloat(ring.outlineWidth)).toBeGreaterThan(0)
+    expect(ring.outlineColor).not.toBe(getComputedStyle(selected).boxShadow.match(/rgba?\([^)]*\)/)![0])
+    // The pointer over the selected row must not hide the selection: the bar and the bold name stay.
+    await userEvent.hover(selected)
+    await waitFor(() => expect(selected).toHaveAttribute('data-hovered', 'true'))
+    expect(getComputedStyle(selected).boxShadow).toMatch(/3px 0px 0px( 0px)? inset/)
+    expect(Number(getComputedStyle(selected.querySelector('span')!).fontWeight)).toBeGreaterThanOrEqual(600)
     canvasElement.dataset.proof = 'passed'
   },
 }
 
-/** A snapshot past its horizon says so; a held account names its age and the producer's reason. */
+/** A snapshot past its horizon says so; each account names its own reading's age, and a held one the producer's reason. */
 export const QuotaStale: Story = {
   args: { quota: 'stale' },
   globals: { scenarioNow: FIXTURE_NOW },
   play: async ({ canvasElement }) => {
     const usage = within(canvasElement)
-    await expect(await usage.findByText('Last reading, 2h old')).toBeVisible()
+    await expect(await usage.findByText('Quota snapshot 2h old: account readings are muted')).toBeVisible()
+    await userEvent.click(await accountRow(canvasElement, 'claude/bravo'))
+    await waitFor(() => expect(detailOf(canvasElement)).toHaveAttribute('data-usage-detail', 'claude/bravo'))
+    await expect(within(detailOf(canvasElement)!).getByText('This account’s reading, 42s old')).toBeVisible()
     await userEvent.click(await accountRow(canvasElement, 'codex/held'))
     const detail = within(detailOf(canvasElement)!)
-    await expect(detail.getByText('Held reading, 3h old')).toBeVisible()
+    await expect(detail.getByText('This account’s reading, 3h old, held by the producer')).toBeVisible()
     await expect(detail.getByText('Last attempt: indeterminate 40s ago: provider answered 401')).toBeVisible()
     canvasElement.dataset.proof = 'passed'
   },
@@ -195,6 +231,50 @@ export const QuotaEmpty: Story = {
   play: async ({ canvasElement }) => {
     await expect(await within(canvasElement).findByText(/The quota source reports no accounts/)).toBeVisible()
     expect(detailOf(canvasElement)).toBeNull()
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+/** One day of the history chart as its accessible table reads it: date, value, unit, state. */
+const dayRow = (canvas: HTMLElement, index: number) => {
+  const table = within(canvas).getByRole('table', { name: 'Each day in the chart' })
+  const row = within(table).getAllByRole('row').slice(1).at(index)!
+  return [within(row).getByRole('rowheader'), ...within(row).getAllByRole('cell')].map(cell => cell.textContent)
+}
+
+/** Each history state under the selected account: tokens below USD coverage, none relayed, unreadable, failed, still reading. */
+export const QuotaHistory: Story = {
+  args: { quota: 'history' },
+  globals: { scenarioNow: FIXTURE_NOW },
+  play: async ({ canvasElement }) => {
+    const usage = within(canvasElement)
+    await waitFor(() => expect(detailOf(canvasElement)).not.toBeNull())
+    for (const [account, text] of [
+      ['claude/alpha', 'Daily tokens · last 30 days'],
+      ['claude/bravo', 'No account history here'],
+      ['codex/alpha', 'History is in a shape this app cannot read'],
+      ['codex/bravo', 'Could not read history'],
+      ['codex/team-north', 'Reading history…'],
+      ['copilot/main', '27 days not reported'],
+      ['zai/main', '2 without a rate'],
+    ] as const) {
+      await userEvent.click(await accountRow(canvasElement, account))
+      await expect(await usage.findByText(text, { exact: false })).toBeVisible()
+    }
+    expect(canvasElement.querySelectorAll('[data-state="unrated"]')).toHaveLength(2)
+    expect(canvasElement.querySelectorAll('[data-state="zero"]')).toHaveLength(1)
+    await userEvent.click(await accountRow(canvasElement, 'copilot/main'))
+    await waitFor(() => expect(canvasElement.querySelectorAll('[data-state="unreported"]')).toHaveLength(27))
+    // Without hover: the chart's table names the oldest day as unreported, with no value.
+    const [oldest, oldestValue, , oldestState] = dayRow(canvasElement, 0)
+    expect(oldest).toBe(canvasElement.querySelector('[data-usage-day]')!.getAttribute('data-usage-day'))
+    expect([oldestValue, oldestState]).toEqual(['none', 'unreported'])
+    await userEvent.click(await accountRow(canvasElement, 'claude/alpha'))
+    await expect(await usage.findByText('USD coverage is below the producer’s gate, so this shows tokens')).toBeVisible()
+    // ...and yesterday's value, in the unit the chart draws, matching the bar's hover title.
+    const [yesterday, value, unit, state] = dayRow(canvasElement, -2)
+    expect([unit, state]).toEqual(['tokens', 'recorded'])
+    expect(canvasElement.querySelector(`[data-usage-day="${yesterday}"]`)).toHaveAttribute('title', `${yesterday}: ${value}`)
     canvasElement.dataset.proof = 'passed'
   },
 }

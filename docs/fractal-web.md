@@ -319,7 +319,8 @@ The settings:
 - `WF_ROOT_DETAIL_URL` is optional: a loopback base URL, such as `http://127.0.0.1:PORT`, of a
   producer serving `/api/v1/lens/root_detail`. When set, the publisher (and the Vite development
   gateway) answers `GET /v1/client/usage/root-detail?agent=<id>&window=1d|7d` with the
-  descendant-inclusive spend of an `omp` agent's current native root over that window.
+  descendant-inclusive spend of an `omp` agent's current native root over that window. The
+  Details pane asks for `window=7d` and labels the spend as reported over 7 days.
   The browser names only the agent. The server derives the root from the gateway with the
   request's own gateway credential, which must hold `read.projections`, and requires the agent's
   native usage over the last 7 days to pair it with that root. It returns the root total,
