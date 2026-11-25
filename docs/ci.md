@@ -693,6 +693,11 @@ the existing hermetic package-link job builds the minimal standalone Nix package
 the same bundled SQLite policy as other Rust products. These are packaging and native
 custody proofs, not a production deployment or the 600-second CPU budget gate.
 
+Dependency-isolation checks re-evaluate the complete canonical flake input set,
+not a partial input list. The per-crate signing policy includes reviewed entries
+for every split auth, protocol-core and agent workspace member and the repository
+fixtures their tests consume.
+
 ### TypeScript client
 
 `typescript-client` runs on every PR and merge-group entry. Main retains the queue check;

@@ -22,7 +22,7 @@
   };
 
   outputs =
-    {
+    inputs@{
       self,
       nixpkgs,
       flake-utils,
@@ -1035,9 +1035,8 @@
         # flake discovery must not force package inputs (including the installation hash guard).
         checks.st3-runtime-inputs = pkgs.runCommand "fractal-runtime-inputs" { } (
           assert import ./nix/fractal-runtime-input-tests.nix {
-            inherit self system;
+            inherit self system inputs;
             baseline = messagingCompat;
-            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
           ''touch $out''
         );
