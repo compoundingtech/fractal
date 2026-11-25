@@ -4737,14 +4737,34 @@ impl Store {
                 cache_local_apply_receipt_tx(transaction,response,local_receipt,idempotency_key)
             };
         if intent.mission_runs.is_empty() {
-            self.connection.batched(apply)
-                .map_err(|error| FractalError::new("internal", error))?
+            run_fence::execute(&self.graph, None, Some(run_fence::API_TURN_BUDGET), apply)
         } else {
             self.with_all_runs_fenced(apply)
         }
     }
 
     pub fn append_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
+        if input.kind == program_journal::JOURNAL_KIND && input.fields.get("key").and_then(Value::as_str) == Some("$result") {
+            // Cancellation deliberately keeps program steps live for cleanup. Fence the
+            // normal root result in its own append transaction, not with a prior read.
+            let admission = |connection: &Connection| {
+                let finalizing = connection.query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM step_runs AS step
+                       JOIN mission_runs AS run ON run.id=step.run_id
+                       WHERE step.subject=?1 AND (run.phase LIKE 'cleanup-%' OR run.phase='final-cancelled')
+                     )", [&input.subject], |row| row.get::<_, bool>(0),
+                ).map_err(internal)?;
+                if finalizing {
+                    return Err(FractalError::new("program-finalizing", "a finalizing program cannot publish a normal root outcome"));
+                }
+                Ok(())
+            };
+            return append_claim_with_commit_context(
+                &self.graph, input, None, None, None, None,
+                ClaimCommitContext { admission: Some(&admission), ..Default::default() },
+            ).map(|(claim, _)| claim);
+        }
         self.append_claim_outcome(input).map(|(claim, _)| claim)
     }
 
@@ -23938,8 +23958,8 @@ pub fn cancel_mission_run_tx(
             AND json_type(body,'$.fields.native_turn')='object')",
         [format!("mission-run/{run_id}")], |row| row.get::<_, bool>(0),
     ).map_err(internal)?;
-    let final_paths = if native_turn {
-        BTreeSet::new()
+    let (final_paths, program_paths) = if native_turn {
+        (BTreeSet::new(), BTreeSet::new())
     } else {
         let revision: String = transaction.query_row(
             "SELECT revision FROM run_generations WHERE id=?1", [&generation_id], |row| row.get(0),
@@ -23948,8 +23968,11 @@ pub fn cancel_mission_run_tx(
             "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
             params![mission_id, revision], |row| row.get::<_, String>(0),
         ).map_err(internal).and_then(|body| serde_json::from_str(&body).map_err(internal))?;
-        flatten_mission_step_specs(&mission).into_iter().filter(|step| step.finally)
-            .map(|step| step.path.clone()).collect::<BTreeSet<_>>()
+        let steps = flatten_mission_step_specs(&mission);
+        (
+            steps.iter().filter(|step| step.finally).map(|step| step.path.clone()).collect::<BTreeSet<_>>(),
+            steps.iter().filter(|step| step.program.is_some()).map(|step| step.path.clone()).collect::<BTreeSet<_>>(),
+        )
     };
     let mut statement = transaction
         .prepare(
@@ -23972,6 +23995,15 @@ pub fn cancel_mission_run_tx(
     drop(statement);
     for (subject, path, claimant) in steps {
         if final_paths.contains(&path) {
+            continue;
+        }
+        // The daemon interrupts the current program and lets its Effect finalizers
+        // finish before ending this attempt. Keeping the step live preserves the
+        // existing credential contract; no credential validity is widened.
+        if program_paths.contains(&path) && transaction.query_row(
+            "SELECT status IN ('ready','working','blocked','waiting-person') FROM step_runs WHERE subject=?1",
+            [&subject], |row| row.get::<_, bool>(0),
+        ).map_err(internal)? {
             continue;
         }
         if let Some(claimant) = claimant {
