@@ -518,6 +518,18 @@ or returned claim bytes.
   storage without changing historical identity semantics. A boolean existence
   result does not establish a bound on its subject/index inputs.
 
+### Observer reconcile-input batch fixtures
+
+`fractal_store::store::observer_reconcile_inputs_tests` owns three standalone
+test-source registrations: `lv-hbc6ac9552c51` inserts 300 fixed-shape desired
+resources with an empty JSON body and one of three literal run owners;
+`lv-h4699cce4b4b9` stores a serialized `RunPart("first")` pending marker; and
+`lv-h2f207f725563` deletes that marker by its derived key. These are test
+producers, not new production write paths or a size proof. The module retains
+`prepare-body-and-predecessor-values` and
+`bound-or-reference-values-and-reclamation` ownership if these fixture producers
+acquire variable payloads.
+
 ## What the static guard checks
 
 Run these lightweight source controls; neither opens SQLite or compiles Rust:
