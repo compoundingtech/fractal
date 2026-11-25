@@ -52,6 +52,41 @@ pub fn forget_subject(connection: &Connection, subject: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct SessionCustodyCapacityReached;
+
+impl std::fmt::Display for SessionCustodyCapacityReached {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("executor session custody capacity reached")
+    }
+}
+impl std::error::Error for SessionCustodyCapacityReached {}
+
+/// Admit one unsettled custody slot under the exclusive writer, before native entry.
+/// Every start-operation kind must count its unsettled reservations here. Local
+/// dispatched producers reserve capacity until binding or proven producer closure.
+pub fn admit_capacity(connection: &Connection, operation: Option<&str>) -> Result<()> {
+    connection.execute("DELETE FROM local_session_custody
+        WHERE active=0 AND custody_settled=1
+          AND (detached_by IS NULL OR detach_receipted=1)
+          AND NOT EXISTS(SELECT 1 FROM local_runtime_starts AS starts
+            WHERE starts.subject=local_session_custody.subject
+              AND (?1 IS NULL OR starts.id<>?1) AND
+              (finished=0 OR applied=0 OR receipted=0
+               OR (revoked_by IS NOT NULL AND cleanup_verified=0)))", [operation])?;
+    let count: u64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM local_session_custody WHERE custody_settled=0)
+          + (SELECT count(*) FROM local_runtime_starts AS starts
+             WHERE dispatched=1 AND (?1 IS NULL OR id<>?1)
+               AND (finished=0 OR (cleanup_verified=0
+                    AND json_extract(result,'$.producer_closed') IS NOT 1))
+               AND NOT EXISTS(SELECT 1 FROM local_session_custody AS custody
+                 WHERE json_extract(custody.body,'$.start_operation')=starts.id))",
+        [operation], |row| row.get(0))?;
+    if count >= 4096 { return Err(SessionCustodyCapacityReached.into()); }
+    Ok(())
+}
+
 impl Store {
     /// Admission is bounded per executor. Previous generations retain custody and receipt fences.
     pub fn bind_local_session(&self, binding: &LocalSession) -> Result<()> {
@@ -81,8 +116,7 @@ impl Store {
             params![binding.subject, binding.incarnation], |row| row.get(0)).optional()?;
         if matches!(prior, Some(Some(_))) { return Ok(()); }
         if prior.is_none() {
-            let count: u64 = tx.query_row("SELECT count(*) FROM local_session_custody", [], |row| row.get(0))?;
-            anyhow::ensure!(count < 4096, "executor session custody capacity reached");
+            admit_capacity(&tx, binding.start_operation.as_deref())?;
         }
         tx.execute(/* sqlite-large-value: allow-for-now lv-hdce8a783bfb6 owner=fractal_store::store::local_sessions TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_session_custody SET active=0 WHERE subject=?1 AND incarnation<>?2 AND active=1",
             params![binding.subject, binding.incarnation])?;
@@ -177,5 +211,36 @@ impl Store {
             WHERE subject=?1 AND json_extract(body,'$.native_incarnation')=?2",
             params![subject, native_incarnation])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settled_generations_are_reclaimed_for_a_live_subject() {
+        let store = Store::open_memory("executor").unwrap();
+        let mut binding = LocalSession {
+            subject: "agent/example/live".into(), runtime_id: "live".into(),
+            incarnation: "0".into(), native_incarnation: "0".into(),
+            terminal: true, driver: None,
+            lifecycle: crate::model::MemberLifecycle::Service,
+            custody: SessionCustody::Owned, start_operation: None, invocation: None,
+        };
+        for generation in 0..4100 {
+            binding.incarnation = generation.to_string();
+            binding.native_incarnation = binding.incarnation.clone();
+            store.bind_local_session(&binding).unwrap();
+            store.settle_local_session_custody(&binding.subject, &binding.native_incarnation).unwrap();
+        }
+        let retained: u64 = store.readers.get().query_row(
+            "SELECT count(*) FROM local_session_custody WHERE subject=?1",
+            [&binding.subject], |row| row.get(0)).unwrap();
+        assert!(retained <= 2, "settled live-subject history must remain bounded");
+        binding.incarnation = "next".into();
+        binding.native_incarnation = binding.incarnation.clone();
+        store.bind_local_session(&binding).unwrap();
+        assert!(store.has_current_local_session(&binding.subject).unwrap());
     }
 }
