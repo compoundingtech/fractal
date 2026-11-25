@@ -23,6 +23,7 @@ import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
 import { ConversationComposer } from '../conversationComposer';
 import { ConversationAttempts } from '../conversationAttempts';
 import { ConversationFeedback, ConversationFrame, ConversationMessage } from '../conversationPresentation';
+import { OutboxRecovery } from '../outboxRecovery.tsx';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport } from '../visibleConversationImages';
@@ -62,10 +63,6 @@ export function ConversationScreen(props: RootScreen<'Conversation'>) {
 function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
   const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, draftsOwner, draftGeneration, saveDrafts, actions, simpleOn } = useStore();
-  // Native alert callbacks outlive the render that opened them. A new send must
-  // use the selection at confirmation time, not the alert's captured client.
-  const actionsRef = useRef(actions);
-  actionsRef.current = actions;
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
   // A running session Fractal manages belongs to its agent: name it, and send to it, as the agent.
   const agent = data.agents.find(candidate => candidate.id === target)
@@ -316,25 +313,28 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     if (!agent || (!text && !sending.length)) return;
     const item: Pending = { id: `pending-${Date.now()}-${nextAttempt.current++}`, text, at: nowClock(), pickedImages: sending, ...(sending.length ? { images: sending.length } : {}) };
     const submittedOwner = draftsOwner.current, submittedGeneration = draftGeneration.current;
-    // The words sent from dictation include what was in the box, so it empties either way; a send that
-    // does not go puts the text back, and one that Fractal acknowledged leaves it empty.
-    emptyBox();
-    setImages([]); setImageIssue('');
+    const submittedDraft = draftCache.current.get(target);
+    let cleared = false;
+    const accepted = () => {
+      if (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration) return;
+      if (draftCache.current.get(target) === submittedDraft) { emptyBox(); cleared = true; }
+      setImages(previous => previous === sending ? [] : previous); setImageIssue('');
+    };
     // To the newest, where the message appears: animated from nearby, a jump from far up, since an
     // animation across the whole conversation reads as the list scrolling everything again.
     list.current?.scrollToOffset({ offset: 0, animated: offset.current < 1200 });
     const tags = dictated || spoken !== undefined ? ['dictated'] : undefined;
     setDictated(false);
-    const sent = await attempts.send(item.id, item, () => actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending));
+    const sent = await attempts.send(item.id, item, () => actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending, accepted));
     if (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration) return;
     setSendIssue('');
     // Images that did not go stay ready to send again.
-    if (sent.how === 'failed' && sending.length) setImages(previous => addImages(sending, previous).images);
+    if (sent.how === 'failed' && cleared && sending.length) setImages(previous => addImages(sending, previous).images);
     if (sent.how === 'failed') {
       // The text goes back in the box, whatever the reason: only a send Fractal acknowledged clears it. Words
       // typed while it was on its way stay after it. The cache holds the box's text even if the person
       // has left the conversation, so the text is there when they come back.
-      const restored = restoreDraft(draftCache.current.get(target) ?? '', text);
+      const restored = cleared ? restoreDraft(draftCache.current.get(target) ?? '', text) : draftCache.current.get(target) ?? draft;
       if (restored) draftCache.current.set(target, restored);
       draftTouched.current = true;
       if (tags) setDictated(true);
@@ -345,18 +345,24 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       return;
     }
     settle(item.id, sent);
+    if (sent.how === 'accepted') attempts.remove(item.id);
   }
   function sendAgain(item: Pending) {
     const bound = item.unconfirmed;
     if (!bound || item.resending) return;
-    Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. The original attempt cannot be resent. Sending as new uses the current member and a new key, and may create a duplicate.`, [
+    const owner = draftsOwner.current, generation = draftGeneration.current;
+    Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. The original attempt cannot be resent. Copying only restores the text; sending this copy may duplicate it.`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Send as new', style: 'destructive', onPress: async () => {
-        const parameters = bound.request.parameters;
-        const sent = await attempts.sendAsNew(item.id, () => actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages));
-        if (sent.how === 'failed') {
-          setSendIssue(`Not sent: ${sent.error}`);
-        } else settle(item.id, sent);
+      { text: 'Copy to composer', onPress: () => {
+        if (draftsOwner.current !== owner || draftGeneration.current !== generation || !attempts.has(item.id)) return;
+        const text = restoreDraft(draftCache.current.get(target) ?? '', bound.request.parameters.content);
+        draftTouched.current = true;
+        draftCache.current.set(target, text); setDraft(text); saveDrafts();
+        setSendIssue('Sending this copy may duplicate it');
+        box.current?.focus();
+      } },
+      { text: 'Discard', style: 'destructive', onPress: () => {
+        if (draftsOwner.current === owner && draftGeneration.current === generation) attempts.remove(item.id);
       } },
     ]);
   }
@@ -477,6 +483,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   return <ConversationFrame style={styles.screen} keyboardVerticalOffset={headerHeight} composer={composer}>
     <DraftRecoveryNote />
     <Banners />
+    {agent ? <OutboxRecovery chat={agent.id} onOpen={(target, title) => navigation.navigate('Conversation', { target, title })} /> : null}
     {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
     {header ? <View style={strip}><T dim>{header}</T></View> : null}
     {agent ? <>

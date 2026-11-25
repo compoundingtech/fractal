@@ -47,6 +47,8 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   const exports = {};
   // Components rendered as children stay inspectable without mounting a second hook scope.
   dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', RequestHistory: 'RequestHistory', threadClock, threadExactTime, threadRelativeTime,
+    OutboxRecovery: 'OutboxRecovery',
+    confirmRecoveryDiscard: discard => discard(),
     ConversationComposer: props => compile('ConversationComposer', undefined, { View: 'View', Field: 'Field', Button: 'Button' }, './conversationComposer.tsx')(props),
     ConversationFeedback: props => compile('ConversationFeedback', undefined, { View: dependencies.View ?? 'View', T: dependencies.T ?? 'T', Button: dependencies.Button ?? 'Button' }, './conversationPresentation.tsx')(props),
     ConversationMessage: props => compile('ConversationMessage', undefined, { View: dependencies.View ?? 'View', T: dependencies.T ?? 'T', Markdown: dependencies.Markdown ?? 'Markdown' }, './conversationPresentation.tsx')(props),
@@ -1615,7 +1617,7 @@ test('pending episode A never replaces or disables the fresh Start for episode B
 test('same-origin Starts have independent slots and keys; neither unknown attempt can replay', async () => {
   const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
   const track = source.slice(source.indexOf('  async function trackThreadDelivery('), source.indexOf('  const actions ='));
-  const start = source.slice(source.indexOf('    startThread(thread:'), source.indexOf('    replyToThread('));
+  const start = source.slice(source.indexOf('    async startThread(thread:'), source.indexOf('    async replyToThread('));
   const scope = source.slice(source.indexOf('export function threadStartScope('), source.indexOf('export function threadEditScope(')).replaceAll('export ', '');
   const { outputText } = ts.transpileModule(`${scope}\n${track}\nconst actions = {${start}}; exports.start = actions.startThread;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -1632,9 +1634,9 @@ test('same-origin Starts have independent slots and keys; neither unknown attemp
     return { how: 'unconfirmed', retry: run };
   };
   new Function('exports', 'threadClient', 'deliveriesByClient', 'setThreadDeliveryRevision',
-    'threadActionErrorText', 'submitThreadAction', 'signingKeyRef', 'readPhoneSigning', 'signThreadMessage', 'ConversationAttempts', outputText)(
+    'threadActionErrorText', 'submitThreadAction', 'signingKeyRef', 'readPhoneSigning', 'signThreadMessage', 'ConversationAttempts', 'acceptOutbox', outputText)(
     exports, client, byClient, () => {}, String, submit, { current: {} },
-    async () => ({ person: 'person/one' }), async key => ({ signature: `signature/${key}`, messageId: `message/${key}` }), ConversationAttempts);
+    async () => ({ person: 'person/one' }), async key => ({ signature: `signature/${key}`, messageId: `message/${key}` }), ConversationAttempts, async () => undefined);
   const origin = { sourceId: 'notice/same', episode: 'episode/same', agentId: 'agent/one' };
   const first = await exports.start('thread/first', origin, 'First', 'One');
   const second = await exports.start('thread/second', origin, 'Second', 'Two');

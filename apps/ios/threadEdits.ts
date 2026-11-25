@@ -7,6 +7,7 @@ export function threadRefusalMessage(reason: string): string {
 export type ThreadEdit = { kind: "rename"; title: string } | { kind: "close" | "reopen" };
 export type ThreadEditResult =
   | { how: "sent"; snapshot?: Snapshot }
+  | { how: "accepted"; outboxId: string; snapshot?: undefined }
   | { how: "failed"; error: string; action?: ThreadEdit["kind"]; refreshStartContext?: true }
   | { how: "unconfirmed"; retry: () => Promise<ThreadEditResult> };
 type Summary = Pick<ThreadSummary, "id" | "title" | "state">;

@@ -71,7 +71,7 @@ test('normal variants preserve the complete origin/main configuration', () => {
     const original = {
       ...base,
       ...(push ? { extra: { ...base.extra, stIosPush: true } } : {}),
-      plugins: [...(base.plugins ?? []), push ? ['expo-notifications', { mode: 'development' }] : './plugins/withoutPush'],
+      plugins: [...(base.plugins ?? []), 'expo-sqlite', push ? ['expo-notifications', { mode: 'development' }] : './plugins/withoutPush'],
       icon: daily ? './assets/icon.png' : './assets/icon-dev.png',
       ios: {
         ...base.ios,

@@ -15,6 +15,7 @@ module.exports = () => {
     ...((push || testClient) ? { extra: { ...base.extra, ...(push ? { stIosPush: true } : {}), ...(testClient ? { testClientMode: true } : {}) } } : {}),
     plugins: [
       ...(base.plugins ?? []),
+      'expo-sqlite',
       push
         ? ['expo-notifications', { mode: 'development' }]
         : './plugins/withoutPush',

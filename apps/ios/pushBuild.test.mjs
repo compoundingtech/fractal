@@ -24,7 +24,7 @@ test('only a push flag of 1 selects notifications without changing either instal
           const configured = configure();
           assert.deepEqual(configured.ios, expected.ios);
           assert.equal(configured.icon, expected.icon);
-          assert.deepEqual(configured.plugins.slice(0, -1), baseline.plugins);
+          assert.deepEqual(configured.plugins.slice(0, -1), [...baseline.plugins, 'expo-sqlite']);
           assert.equal(configured.extra?.stIosPush, flag === '1' ? true : undefined);
           assert.deepEqual(configured.plugins.at(-1), flag === '1' ? ['expo-notifications', { mode: 'development' }] : './plugins/withoutPush');
         }

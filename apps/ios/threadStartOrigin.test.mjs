@@ -6,8 +6,8 @@ import { appliedAnswer, ClientError } from '../../clients/typescript/fractal-cli
 
 test('native start signs the canonical Inbox source and sends the exact generic origin', async () => {
   const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
-  const a = source.indexOf('    startThread(thread: string,');
-  const b = source.indexOf('    replyToThread(', a);
+  const a = source.indexOf('    async startThread(thread: string,');
+  const b = source.indexOf('    async replyToThread(', a);
   const { outputText } = ts.transpileModule(`exports.action = { ${source.slice(a, b)} }.startThread;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
@@ -16,6 +16,7 @@ test('native start signs the canonical Inbox source and sends the exact generic 
   const scope = origin => JSON.stringify([origin.sourceId, origin.episode]);
   const attemptScope = (origin, thread) => JSON.stringify([origin.sourceId, origin.episode, thread]);
   const ports = {
+    acceptOutbox: async () => undefined,
     signingKeyRef: { current: 'profile/exact' },
     threadStartAttemptScope: attemptScope,
     trackThreadDelivery: (deliveryScope, _target, send, _onSent, presentation) => { scopes.push(deliveryScope); presentations.push(presentation); return send(); },

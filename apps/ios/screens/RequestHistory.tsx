@@ -52,14 +52,14 @@ export function RequestHistory({ client, threadId, StartAction }: {
     <Pressable accessibilityRole="button" accessibilityState={{ expanded }} accessibilityValue={{ text: expanded ? 'Expanded' : 'Collapsed' }}
       accessibilityHint={expanded ? 'Hides earlier requests related to this thread' : 'Loads earlier requests related to this thread'}
       onPress={toggle} style={{ minHeight: 44, justifyContent: 'center' }}>
-      <T bold color={theme.accent}>{expanded ? '▾' : '▸'} Request history</T>
+      <T bold color={theme.accent}>{expanded ? '▾' : '▸'} Related requests</T>
     </Pressable>
     {expanded ? <T dim>History only · requests remain independent</T> : null}
     {!expanded ? null
-      : snapshot.kind === 'loading' ? <T dim>Loading request history…</T>
+      : snapshot.kind === 'loading' ? <T dim>Loading Related requests…</T>
       : snapshot.kind === 'error' ? <View style={{ gap: 6 }}>
         <T color={theme.waiting}>{snapshot.message}</T>
-        <Button label="Retry" accessibilityLabel="Retry loading request history" onPress={() => void reader.load()} />
+        <Button label="Retry" accessibilityLabel="Retry loading Related requests" onPress={() => void reader.load()} />
       </View>
       : <HistoryPage page={snapshot.page} loadingMore={snapshot.loadingMore} issue={snapshot.issue} reload={() => void reader.load()} more={() => void reader.more()} StartAction={StartAction} />}
   </View>;

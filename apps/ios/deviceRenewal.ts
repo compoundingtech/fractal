@@ -1,5 +1,5 @@
 import type { PersonPairedSession } from '../../clients/typescript/fractal-client';
-import { verifyPairing, verifyPersonRoot, type ProofCrypto } from './pairingProof.ts';
+import { verifyPairing, verifyPersonRoot, type ProofCrypto, type PairingIssuer } from './pairingProof.ts';
 import { isClientApiVersion } from './protocolVersions.ts';
 
 export const renewalResponseValue = (envelope: unknown): unknown => {
@@ -7,7 +7,7 @@ export const renewalResponseValue = (envelope: unknown): unknown => {
   return envelope.value;
 };
 
-export type RenewalProfile = { url: string; credential: string; personRootFingerprint?: string; signing?: { key: string; storage: 'secure-enclave' | 'software'; handle?: string; person: string; chain: string[] } };
+export type RenewalProfile = { url: string; credential: string; profileId?: string; pairingIssuer?: PairingIssuer; outboxNoticeSeen?: boolean; personRootFingerprint?: string; signing?: { key: string; storage: 'secure-enclave' | 'software'; handle?: string; person: string; chain: string[] } };
 export type RenewalOffer = {
   renewal_id: string; migration_epoch: string; issuer_member: string; person_id: string; requested_by: string;
   scopes: string[]; old_public_key: string; nonce: string; expires_at_unix_ms: number; grant_expires_at_unix_ms: number;
@@ -88,7 +88,9 @@ export async function approveRenewal(profileKey: string, previous: RenewalProfil
     const session = await ports.post(completionUrl, '/v1/client/pairings/renewals/complete', { api_version: apiVersion, renewal_id: offer.renewal_id, nonce: offer.nonce, expires_at_unix_ms: offer.expires_at_unix_ms, device_public_key: previous.signing!.key, candidate_public_key: candidate.key, key_storage: candidate.storage, old_signature: oldSignature, candidate_signature: candidateSignature }) as PersonPairedSession;
     requireValue(session.kind === 'paired-session' && session.person_id === offer.person_id && JSON.stringify(session.scopes) === JSON.stringify(offer.scopes), 'Renewal returned a different person or scopes');
     requireValue(Date.parse(session.expires_at) === offer.grant_expires_at_unix_ms, 'Renewal returned a different expiry');
-    await verifyPairing(session, candidate.key, previous.personRootFingerprint, ports.crypto);
+    const issuer = await verifyPairing(session, candidate.key, previous.personRootFingerprint, ports.crypto);
+    requireValue(!previous.pairingIssuer || (issuer?.issuer === previous.pairingIssuer.issuer
+      && issuer.issuerKey === previous.pairingIssuer.issuerKey), 'Renewal returned a different pairing authority');
     requireValue(JSON.stringify(await ports.read(profileKey)) === JSON.stringify(previous), 'The saved pairing changed; renewal was not saved');
     const next: RenewalProfile = { ...previous, credential: session.credential, signing: { key: candidate.key, storage: candidate.storage, handle: candidate.handle, person: session.person_id, chain: session.device_key_chain ?? [] } };
     await ports.save(profileKey, next);

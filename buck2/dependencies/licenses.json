@@ -2,7 +2,7 @@
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
   "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback) or recognized LICENSE fingerprint; missing packages from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "4c8987bdde70905288b33541cde7372539e695a0fdd4eb3ed25aa5de6d7041ee",
+  "lockfileSha256": "e3c3a943ad14435ad5b1f32658a9d09d2bf1655ea6c4ea52f5e0df3b42d5c417",
   "packages": [
     {
       "name": "@adobe/css-tools",
@@ -2210,6 +2210,11 @@
       "license": "MIT"
     },
     {
+      "name": "await-lock",
+      "version": "2.2.2",
+      "license": "MIT"
+    },
+    {
       "name": "axe-core",
       "version": "4.14.0",
       "license": "MPL-2.0"
@@ -2881,6 +2886,11 @@
     },
     {
       "name": "expo-server",
+      "version": "57.0.3",
+      "license": "MIT"
+    },
+    {
+      "name": "expo-sqlite",
       "version": "57.0.3",
       "license": "MIT"
     },

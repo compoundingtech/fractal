@@ -117,6 +117,8 @@ async function grantProof(value: unknown, id: string | undefined, person: string
   return grant;
 }
 
+export type PairingIssuer = { issuer: string; issuerKey: string };
+
 async function rootProof(root: Grant, fingerprint: string | undefined, crypto: ProofCrypto) {
   const fields = root.body.fields, sig = root.signature;
   require(fields.role === 'root' && typeof fields.issuer === 'string' && fields.issuer.startsWith('host/') && fields.issuer.length > 5
@@ -126,6 +128,7 @@ async function rootProof(root: Grant, fingerprint: string | undefined, crypto: P
   require(p256 ? raw.length === 65 && raw[0] === 4 : raw.length === 32, 'Invalid person-root public key');
   const actual = `sha256:${encoded(await crypto.hash(new TextEncoder().encode(fields.key)))}`;
   require(!fingerprint || fingerprint === actual, 'Person-root fingerprint mismatch. Do not trust this response; obtain the fingerprint separately from the trusted machine.');
+  return { issuer: sig.signer, issuerKey: sig.key };
 }
 
 /** Authenticate a renewal issuer using only the profile's previously saved root pin. */
@@ -137,7 +140,7 @@ export async function verifyPersonRoot(proof: unknown, person: string, fingerpri
 }
 
 /** Check enrollment before saving any credential. A fingerprint must be validated before POST. */
-export async function verifyPairing(session: PersonPairedSession, key: string, fingerprint: string | undefined, crypto: ProofCrypto): Promise<void> {
+export async function verifyPairing(session: PersonPairedSession, key: string, fingerprint: string | undefined, crypto: ProofCrypto): Promise<PairingIssuer | undefined> {
   require(typeof session.person_id === 'string' && /^person\/[^/]+$/.test(session.person_id)
     && typeof session.credential === 'string' && session.credential.length >= 32 && strings(session.scopes), 'Invalid paired session');
   const chain = session.device_key_chain ?? [], proofs = session.device_key_proofs ?? [];
@@ -151,10 +154,10 @@ export async function verifyPairing(session: PersonPairedSession, key: string, f
     require(fields.key === key && fields.role === 'device' && device.actor === session.person_id && fields.issuer === session.person_id
       && device.signature.signer === session.person_id && fields.issuer_key === root.body.fields.key && device.signature.key === root.body.fields.key
       && device.signature.chain.length === 1 && device.signature.chain[0] === chain[1], 'Returned device grant does not bind our public key to the paired person’s root');
-    await rootProof(root, fingerprint, crypto);
+    return rootProof(root, fingerprint, crypto);
   } else {
     require(chain.length === 0 && proofs.length === 0, 'Read-only pairing unexpectedly enrolled a signing key');
-    if (session.person_root_key_proof) await rootProof(await grantProof(session.person_root_key_proof, undefined, session.person_id, crypto), fingerprint, crypto);
+    if (session.person_root_key_proof) return rootProof(await grantProof(session.person_root_key_proof, undefined, session.person_id, crypto), fingerprint, crypto);
     else require(!fingerprint, 'Member did not return a person-root proof for read-only pairing; upgrade it or explicitly choose unpinned pairing.');
   }
 }
