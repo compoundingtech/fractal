@@ -216,7 +216,7 @@ impl Store {
                 write_record(output, &mut hash, &Record::Signatures(signatures))?;
             }
         }
-        // A trim records its complete certified tombstones before deleting any rows.
+        // A trim records its complete tombstones before deleting any rows.
         // A snapshot between deletion chunks must include that manifest too.
         let checkpoint: Option<(String, u128)> = self
             .readers
@@ -235,8 +235,9 @@ impl Store {
             )
             .optional()?;
         if let Some((checkpoint, cut_unix_ms)) = checkpoint {
-            // The manifest is the sync representation, verified against signed certificate
-            // claims on restore. No SQL or local checkpoint bookkeeping enters the archive.
+            // The manifest carries the archived tombstones: verified against a certificate
+            // on restore when present, otherwise checked as this member's own local cut.
+            // No SQL or local checkpoint bookkeeping enters the archive.
             let mut after = None;
             loop {
                 let page = self.manifest_page(
@@ -1427,6 +1428,52 @@ mod tests {
         assert_eq!(
             source.checkpointed_envelopes().unwrap(),
             restored.checkpointed_envelopes().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_local_trim_backup_restores_tombstones_and_the_same_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open(&root.path().join("source.db"), "alder").unwrap();
+        source.bind_fleet("test-fleet").unwrap();
+        source.import_retired_identities_paced(|_| {}).unwrap();
+        source.trim_locally(true).unwrap();
+        for index in 0..12 {
+            source
+                .append_as_older_build_for_test(&ClaimInput {
+                    subject: "observer/backup-test".into(),
+                    kind: "observer.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([("status".into(), json!(["ok", "changed"][index % 2]))]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        let context = CheckpointContext {
+            now_unix_ms: now_ms() + 3 * 86_400_000,
+            configured_peers: vec![],
+            scratch: root.path().join("scratch"),
+            reviewer: "person/operator".into(),
+        };
+        source.checkpoint_step(&context).unwrap();
+        assert!(source.trimmed_checkpoint().unwrap().is_some());
+        assert!(source.checkpointed_envelopes().unwrap() > 0);
+        let path = root.path().join("local-trim.jsonl");
+        let header = archive(&source, &path);
+        let target = root.path().join("restored.db");
+        let report = backup::restore(&path, &target, root.path()).unwrap();
+        assert_eq!(report.graph_digest, header.graph_digest);
+        let restored = Store::open(&target, &report.writer).unwrap();
+        assert_eq!(
+            source.replication_inventory().unwrap().digest,
+            restored.replication_inventory().unwrap().digest
+        );
+        let checkpoint = source.trimmed_checkpoint().unwrap().unwrap();
+        assert_eq!(
+            source.checkpoint_manifest(&checkpoint.id, checkpoint.cut_unix_ms).unwrap(),
+            restored.checkpoint_manifest(&checkpoint.id, checkpoint.cut_unix_ms).unwrap()
         );
     }
 
