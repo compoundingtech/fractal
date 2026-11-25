@@ -186,7 +186,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::note_read(|| "host-lane-memory".into());
             fit.held_bytes = self.lanes_held(&request.id, now, true, false)?;
             fit.reserve_bytes = self.finite_burst_reserve(&request.id)?.kept;
-            let observation = (host.outside)().context("UnsupportedCoverage: outside-lane host observation unavailable")?;
+            let observation = (host.outside)(&self.seat_admission.finite_policy.psi_brake).context("UnsupportedCoverage: outside-lane host observation unavailable")?;
             fit.outside_bytes = observation.outside_bytes;
             fit.psi_blocked = observation.psi_blocked;
         } else if request.coverage == Coverage::Logical {
@@ -211,7 +211,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             subject: request.id.clone(), room: fit.room, seat_held_bytes: fit.held_bytes,
             finite_held_bytes: self.store.held_resource_membership_bytes(&self.host, &request.id)?,
             outside_bytes: fit.outside_bytes, reserve_bytes: fit.reserve_bytes,
-            arc_credit_bytes: fractal_runtime::host::arc_credit_bytes(), observed_at: now,
+            arc_credit_bytes: fractal_runtime::host::arc_credit_bytes(&policy.psi_brake), observed_at: now,
         });
         Ok(fit)
     }
@@ -730,11 +730,11 @@ mod tests {
         use fractal_runtime::{Capacity, host};
         const GIB: u64 = 1 << 30;
         thread_local! { static HIGH_PSI: std::cell::Cell<bool> = const { std::cell::Cell::new(true) }; }
-        fn outside() -> Option<host::HostMemoryObservation> {
+        fn outside(_: &fractal_runtime::resource_pressure::Policy) -> Option<host::HostMemoryObservation> {
             let pressure = HIGH_PSI.with(|high| if high.get() {
-                "full avg10=0.00 avg60=2.00 avg300=0.00 total=50\n"
+                2000
             } else {
-                "full avg10=0.00 avg60=0.99 avg300=0.00 total=50\n"
+                990
             });
             host::outside_memory(
                 "MemTotal: 131072000 kB\nMemAvailable: 15309210 kB\n",
@@ -762,7 +762,7 @@ mod tests {
             owner: Owner { run: "run".into(), step: "step".into(), attempt: 1, invocation: None },
         }).collect();
         // Twenty waiters, no holders: PSI suppresses the fictional 20 GiB evictable credit.
-        let observation = outside().unwrap();
+        let observation = outside(&reconciler.seat_admission.finite_policy.psi_brake).unwrap();
         assert!(observation.psi_blocked);
         for request in &requests {
             let fit = Fit { room: Some(room), outside_bytes: observation.outside_bytes,
@@ -778,7 +778,8 @@ mod tests {
         let head = &requests[0];
         let fit = reconciler.resource_lane_fit(head).unwrap();
         assert_eq!(fit.reserve_bytes, 0, "a finite member is not a burst-capable seat");
-        assert_eq!(fit.outside_bytes, outside().unwrap().outside_bytes);
+        assert_eq!(fit.outside_bytes,
+            outside(&reconciler.seat_admission.finite_policy.psi_brake).unwrap().outside_bytes);
         assert!(!fit.psi_blocked);
         assert!(matches!(store.request_resource_membership(head, fit, 2).unwrap(), Admission::Admitted(_)));
         assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 15 * GIB);
