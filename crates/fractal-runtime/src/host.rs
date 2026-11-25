@@ -50,23 +50,23 @@ pub struct HostMemoryObservation {
 /// once, never add its children again. Admission charges their declared capacities separately.
 /// Missing or malformed ARC/pressure data gives no ARC credit; unavailable required host data
 /// returns `None`.
-pub fn outside_lane_memory() -> Option<HostMemoryObservation> {
+pub fn outside_lane_memory(policy: &crate::resource_pressure::Policy) -> Option<HostMemoryObservation> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let arcstats = std::fs::read_to_string("/proc/spl/kstat/zfs/arcstats").ok();
-    let pressure = std::fs::read_to_string("/proc/pressure/memory").ok();
+    let pressure = crate::resource_pressure::Reader::default().memory_full_avg60(policy).ok();
     let lane_stat = optional_stat(
         &crate::lane::app_slice_cgroup()?.join(crate::lane::LANES_SLICE).join("memory.stat"),
     )?;
-    outside_memory(&meminfo, arcstats.as_deref(), lane_stat.as_deref(), pressure.as_deref())
+    outside_memory(&meminfo, arcstats.as_deref(), lane_stat.as_deref(), pressure)
 }
 
 /// ARC credit applied by the same native outside-memory formula, for read-only diagnostics.
-pub fn arc_credit_bytes() -> Option<u64> {
+pub fn arc_credit_bytes(policy: &crate::resource_pressure::Policy) -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let arcstats = optional_stat(std::path::Path::new("/proc/spl/kstat/zfs/arcstats"))?;
-    let pressure = std::fs::read_to_string("/proc/pressure/memory").ok();
-    let without_arc = outside_memory(&meminfo, None, None, pressure.as_deref())?;
-    let with_arc = outside_memory(&meminfo, arcstats.as_deref(), None, pressure.as_deref())?;
+    let pressure = crate::resource_pressure::Reader::default().memory_full_avg60(policy).ok();
+    let without_arc = outside_memory(&meminfo, None, None, pressure)?;
+    let with_arc = outside_memory(&meminfo, arcstats.as_deref(), None, pressure)?;
     Some(without_arc.outside_bytes.saturating_sub(with_arc.outside_bytes))
 }
 
@@ -79,17 +79,18 @@ fn optional_stat(path: &std::path::Path) -> Option<Option<String>> {
 }
 
 /// Parse one host observation. Only ARC above its minimum and reported evictable is eligible
-/// for credit, and only while memory PSI `full avg60` is below one percent.
+/// for credit, and only while admission-slice memory PSI `full avg60` is below one percent.
+/// Pressure is measured in milli-percent; missing observations withhold credit.
 pub fn outside_memory(
     meminfo: &str,
     arcstats: Option<&str>,
     lane_stat: Option<&str>,
-    pressure: Option<&str>,
+    pressure: Option<u32>,
 ) -> Option<HostMemoryObservation> {
     let total = meminfo_bytes(meminfo, "MemTotal:")?;
     let available = meminfo_bytes(meminfo, "MemAvailable:")?;
     let eligible = arcstats.and_then(arc_reclaimable).unwrap_or(0);
-    let psi_blocked = eligible > 0 && !pressure.and_then(full_avg60).is_some_and(|avg| avg < 1.0);
+    let psi_blocked = eligible > 0 && !pressure.is_some_and(|avg| avg < 1000);
     let reclaimable = if psi_blocked { 0 } else { eligible };
     let lane_memory = lane_stat.map_or(0, unreclaimable);
     Some(HostMemoryObservation {
@@ -127,29 +128,6 @@ fn arc_reclaimable(stat: &str) -> Option<u64> {
     let evictable =
         mru_data?.saturating_add(mru_metadata?).saturating_add(mfu_data?).saturating_add(mfu_metadata?);
     Some(size?.saturating_sub(minimum?).min(evictable))
-}
-
-fn full_avg60(pressure: &str) -> Option<f64> {
-    let mut fields = pressure
-        .lines()
-        .find(|line| line.split_whitespace().next() == Some("full"))?
-        .split_whitespace();
-    fields.next()?;
-    let mut avg60 = None;
-    for key in ["avg10=", "avg60=", "avg300="] {
-        let value = fields.next()?.strip_prefix(key)?.parse::<f64>().ok()?;
-        if !value.is_finite() || value < 0.0 {
-            return None;
-        }
-        if key == "avg60=" {
-            avg60 = Some(value);
-        }
-    }
-    fields.next()?.strip_prefix("total=")?.parse::<u64>().ok()?;
-    if fields.next().is_some() {
-        return None;
-    }
-    avg60
 }
 
 /// `anon` plus `kernel` from a cgroup's `memory.stat`.
@@ -215,10 +193,8 @@ pub fn installed_memory_bytes() -> Option<u64> {
 mod tests {
     use super::*;
 
-    const LOW_PRESSURE: &str =
-        "some avg10=4.00 avg60=3.00 avg300=2.00 total=100\n\
-         full avg10=2.00 avg60=0.99 avg300=1.50 total=50\n";
-    const HIGH_PRESSURE: &str = "full avg10=0.00 avg60=2.00 avg300=0.00 total=50\n";
+    const LOW_PRESSURE: u32 = 990;
+    const HIGH_PRESSURE: u32 = 2000;
     const ARC: &str = "size 4 1000\nc_min 4 100\n\
                        mru_evictable_data 4 100\nmru_evictable_metadata 4 20\n\
                        mfu_evictable_data 4 200\nmfu_evictable_metadata 4 30\n";
@@ -286,18 +262,7 @@ mod tests {
     #[test]
     fn psi_withholds_credit_at_one_percent_or_when_unavailable() {
         let meminfo = "MemTotal: 1024 kB\nMemAvailable: 256 kB\n";
-        for pressure in [
-            None,
-            Some(HIGH_PRESSURE),
-            Some("full avg10=0.00 avg60=1.00 avg300=0.00 total=0\n"),
-            Some("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"),
-            Some("full avg10=0.00 avg300=0.00 total=0\n"),
-            Some("full avg10=0.00 avg60=x avg300=0.00 total=0\n"),
-            Some("full avg10=0.00 avg60=NaN avg300=0.00 total=0\n"),
-            Some("full avg10=0.00 avg60=inf avg300=0.00 total=0\n"),
-            Some("full avg10=0.00 avg60=-0.01 avg300=0.00 total=0\n"),
-            Some("full avg10=0.00 avg60=0.00 avg300=0.00 total=x\n"),
-        ] {
+        for pressure in [None, Some(HIGH_PRESSURE), Some(1000), Some(100000)] {
             assert_eq!(
                 outside_memory(meminfo, Some(ARC), None, pressure),
                 observation(768 * 1024, true),

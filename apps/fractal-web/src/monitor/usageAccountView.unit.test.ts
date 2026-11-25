@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { accountOf, accounts, FIXTURE_NOW, incompatibleSummaryAccount, quotaEnvelope } from './fixtures.ts'
-import { initialQuota, projectRows, reduceQuota } from './model.ts'
-import { accountDetailView, selectedRow } from './usageAccountView.ts'
+import { accountOf, accounts, FIXTURE_NOW, historyEnvelope, incompatibleSummaryAccount, quotaEnvelope, type HistorySpec } from './fixtures.ts'
+import { initialHistory, initialQuota, projectHistory, projectRows, reduceQuota, type HistoryState, type HistoryUnit } from './model.ts'
+import { accountDetailView, historyView, selectedRow } from './usageAccountView.ts'
 import { usageSectionView } from './usageSectionView.ts'
 import type { QuotaAccount } from './wire.ts'
 
@@ -54,5 +54,80 @@ describe('usage account detail', () => {
     expect(selectedRow({ state, view, selected: 'claude/alpha' })?.accountId).toBe('claude/alpha')
     expect(selectedRow({ state, view, selected: undefined })?.accountId).toBe(view.rows[0]!.id)
     expect(selectedRow({ state, view, selected: 'gone/away' })?.accountId).toBe('codex/mixed')
+  })
+})
+
+const ledger = 'openai/alpha'
+const seriesOf = (spec: Partial<HistorySpec> = {}): HistoryState['last'] => {
+  const series = projectHistory({ envelope: historyEnvelope({ ledgerAccountId: ledger, days: 45, ...spec }), ledgerAccountId: ledger })
+  if (series._tag !== 'series') throw new Error(series.reason)
+  return { series: series.series, at: now }
+}
+const history = (state: Partial<HistoryState>, preferred: HistoryUnit = 'usd') =>
+  historyView({ ledgerAccountId: ledger, history: { ...initialHistory, ...state }, preferred })
+
+describe('usage account history', () => {
+  it('names each state before a series exists', () => {
+    expect(historyView({ ledgerAccountId: undefined, history: initialHistory, preferred: 'usd' })).toEqual({ _tag: 'not-configured' })
+    expect(history({ attempt: { _tag: 'inFlight' } })).toEqual({ _tag: 'loading' })
+    expect(history({ attempt: { _tag: 'failed', kind: 'unavailable', reason: 'history returned HTTP 404' } })).toEqual({ _tag: 'not-configured' })
+    expect(history({ attempt: { _tag: 'failed', kind: 'incompatible', reason: 'bad rows' } })).toEqual({ _tag: 'incompatible', reason: 'bad rows' })
+    expect(history({ attempt: { _tag: 'failed', kind: 'http', reason: 'history returned HTTP 502' } })).toEqual({ _tag: 'unavailable', reason: 'history returned HTTP 502' })
+  })
+
+  it('charts the last 30 days in USD, the open day last and partial', () => {
+    const view = history({ last: seriesOf({ idle: [3] }), attempt: { _tag: 'ok' } })
+    if (view._tag !== 'chart') throw new Error('expected chart')
+    expect(view.caption).toBe('Daily spend, USD · last 30 days')
+    expect(view.bars).toHaveLength(30)
+    expect(view.bars.filter(bar => bar.open)).toEqual([view.bars.at(-1)])
+    expect(view.bars.at(-1)!.words).toMatch(/so far: \$\d+\.\d\d$/)
+    expect(view.bars.at(-4)!).toMatchObject({ state: 'zero', fill: 0, words: expect.stringMatching(/: \$0\.00$/) })
+    expect(Math.max(...view.bars.map(bar => bar.fill ?? 0))).toBe(100)
+    expect(view.summary).toMatch(/^\$\d+ over 29 full days · peak \$\d+\.\d\d on \d{4}-\d\d-\d\d · today so far \$\d+\.\d\d$/)
+    expect(view.notes).toEqual([])
+  })
+
+  it('falls back to tokens below coverage and keeps the last series through a failed refresh', () => {
+    const view = history({ last: seriesOf({ coverageOk: false, omittedBuckets: 4 }), attempt: { _tag: 'failed', kind: 'timeout', reason: 'history timed out' } })
+    if (view._tag !== 'chart') throw new Error('expected chart')
+    expect(view.caption).toBe('Daily tokens · last 30 days')
+    expect(view.notes).toEqual([
+      'USD coverage is below the producer’s gate, so this shows tokens',
+      'The producer dropped 4 older days',
+      'Refresh failed: history timed out; showing the last good reading',
+    ])
+    expect(history({ last: seriesOf(), attempt: { _tag: 'ok' } }, 'tokens')).toMatchObject({ caption: 'Daily tokens · last 30 days', notes: [] })
+  })
+
+  it('spans 30 calendar days back from the open day, marking days before the series as not reported', () => {
+    const view = history({ last: seriesOf({ days: 3 }), attempt: { _tag: 'ok' } })
+    if (view._tag !== 'chart') throw new Error('expected chart')
+    expect(view.bars).toHaveLength(30)
+    expect(view.bars.at(-1)!).toMatchObject({ day: '2026-10-01', open: true })
+    expect(view.bars[0]!).toMatchObject({ day: '2026-09-02', state: 'unreported', fill: undefined, words: '2026-09-02: not reported', value: undefined, status: 'unreported' })
+    expect(view.bars.at(-1)!).toMatchObject({ value: expect.stringMatching(/^\$\d+\.\d\d$/), status: 'partial' })
+    expect(view.unit).toBe('USD')
+    expect(view.bars.map(bar => bar.state === 'unreported')).toEqual([...Array(27).fill(true), false, false, false])
+    expect(view.summary).toMatch(/^\$\d+\.\d\d over 2 full days · 27 days not reported · peak /)
+  })
+
+  const unrated = (usd: ReadonlyArray<number | undefined>): HistoryState['last'] => {
+    const days = usd.map((value, index) => ({ day: `2026-09-0${index + 1}`, tokens: 1000, usd: value, open: index === usd.length - 1 }))
+    return { series: { days, openDay: days.at(-1)!.day, coverageOk: true, omittedDays: 0, computedAt: '2026-09-04T12:00:00Z' }, at: now }
+  }
+
+  it('sums only rated days and says how many lack a rate', () => {
+    const view = history({ last: unrated([10, undefined, 5, 2]), attempt: { _tag: 'ok' } })
+    if (view._tag !== 'chart') throw new Error('expected chart')
+    expect(view.summary).toBe('$15.00 rated subtotal over 2 full days · 1 without a rate · 26 days not reported · peak $10.00 on 2026-09-01 · today so far $2.00')
+    expect(view.bars.at(-3)!).toMatchObject({ state: 'unrated', fill: undefined, words: '2026-09-02: no rate', value: undefined, status: 'unrated' })
+    expect(view.bars.at(-2)!).toMatchObject({ value: '$5.00', status: 'recorded' })
+  })
+
+  it('shows no USD total when no day is rated', () => {
+    expect(history({ last: unrated([undefined, undefined, undefined]), attempt: { _tag: 'ok' } })).toMatchObject({
+      summary: 'no rate for 2 full days · 27 days not reported · today so far no rate',
+    })
   })
 })
