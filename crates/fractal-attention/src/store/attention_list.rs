@@ -98,14 +98,14 @@ impl<'a> SeatChecks<'a> {
         }
     }
 
-    /// Whether the previous rows hold a login or prompt item for `seat`: any claim about it can
-    /// change that item, its episode or its removal. Such an item names its seat as its source
-    /// and lists every seat it covers in its targets, so a seat sharing another's login counts.
+    /// Runtime-derived candidates count before admission too: a runtime change must invalidate
+    /// a future prompt before its clock boundary. Targets include seats sharing a login.
     fn has_seat_item(&mut self, seat: &str) -> bool {
         let previous = self.previous;
         self.seat_items
             .get_or_insert_with(|| item_seats(&previous.rows))
             .contains(seat)
+            || previous.source_snapshot.as_deref().is_some_and(|source| source.has_seat_item(seat))
     }
 
     /// Whether `seat`'s harness needs a login at this snapshot, by the login fold attention
