@@ -38,7 +38,7 @@ const Detail = ({ detail, muted }: { readonly detail: AccountDetailView; readonl
       </li>)}
     </ul>
     {detail.banked === undefined ? null : <p data-usage-banked="" {...stylex.props(styles.meta)}>{detail.banked}</p>}
-    <p {...stylex.props(styles.meta, detail.reading.held && styles.held)}>{detail.reading.held ? 'Held reading' : 'Reading'}, {detail.reading.age}</p>
+    <p data-usage-reading="" {...stylex.props(styles.meta, detail.reading.held && styles.held)}>This account’s reading, {detail.reading.age}{detail.reading.held ? ', held by the producer' : ''}</p>
     {detail.attempt === undefined ? null : <p data-usage-attempt="" {...stylex.props(styles.meta)}>Last attempt: {detail.attempt}</p>}
   </article>
 }
@@ -85,7 +85,7 @@ export const UsageAccounts = ({ label }: { readonly label: string }): React.Reac
   const row = view._tag === 'ready' ? selectedRow({ state, view, selected }) : undefined
   return <section aria-label={`${label}: quota`} data-usage-accounts={view._tag} {...stylex.props(styles.region)}>
     {view._tag !== 'ready' ? <Note view={view} /> : <>
-      {view.old === undefined ? null : <p role="status" {...stylex.props(styles.meta, styles.inset, styles.held)}>Last reading, {view.old}</p>}
+      {view.old === undefined ? null : <p role="status" {...stylex.props(styles.meta, styles.inset, styles.held)}>Quota snapshot {view.old}: account readings are muted</p>}
       {row === undefined ? null : <>
         <Detail detail={accountDetailView({ row, now })} muted={view.old !== undefined || row.retained} />
         <AccountHistory row={row} />
@@ -95,7 +95,7 @@ export const UsageAccounts = ({ label }: { readonly label: string }): React.Reac
         onSelectionChange={keys => { const [key] = keys === 'all' ? [] : keys; if (key !== undefined) select(String(key)) }} {...stylex.props(styles.list)}>
         {view.rows.map(account => <Aria.GridListItem key={account.id} id={account.id} textValue={account.name} data-usage-account={account.id} data-usage-level={account.level}
           {...stylex.props(styles.row, account.id === row?.accountId && styles.selected)}>
-          <span {...stylex.props(styles.label)}>{account.name}</span>
+          <span {...stylex.props(styles.label, account.id === row?.accountId && styles.selectedName)}>{account.name}</span>
           <span {...stylex.props(styles.percent, levels[view.old === undefined && account.old === undefined ? account.level : 'unknown'])}>{account.percent}{account.level === 'limit' ? '!' : ''}</span>
           <span {...stylex.props(styles.reset, styles.wide)}>{account.window} · {account.old ?? account.reset}{account.more === undefined ? '' : ` · +${account.more.count}${account.more.atLimit ? '!' : ''}`}</span>
         </Aria.GridListItem>)}
@@ -125,8 +125,12 @@ const styles = stylex.create({
   list: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 },
   // Two lines: what and how much, then the meter and when it resets; one grid keeps every meter on one column.
   limit: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: s.md, rowGap: 2, alignItems: 'center', paddingBlock: s.xs, fontSize: t.metaSize },
-  row: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: s.md, rowGap: 2, padding: s.md, borderRadius: r.sm, fontSize: t.metaSize, cursor: 'pointer', outline: 'none', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}`, outlineOffset: `calc(-1 * ${g.focusRing})` } },
-  selected: { backgroundColor: c.rowHover, boxShadow: `inset 2px 0 0 ${c.primary}` },
+  // Selection is the accent (bar, tint, weight); focus is a neutral ring, as in the sidebar lists, so the two never read alike.
+  // Hover follows react-aria's data-hovered, as the workbench controls do, so a play can hover a row and see its style.
+  row: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: s.md, rowGap: 2, padding: s.md, borderRadius: r.sm, fontSize: t.metaSize, cursor: 'pointer', outline: 'none', backgroundColor: { default: null, ':is([data-hovered])': c.rowHover }, ':focus-visible': { outline: `${g.focusRing} solid ${c.fgMuted}`, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  // The tint is the hover surface: the stronger rowActive drops the muted and amber inks below 4.5:1.
+  selected: { backgroundColor: c.rowHover, boxShadow: `inset 3px 0 0 ${c.primary}` },
+  selectedName: { fontWeight: t.weightSemibold },
   label: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   percent: { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', textAlign: 'end' },
   meter: { display: 'block', blockSize: g.progressSm, minWidth: 0, borderRadius: r.full, overflow: 'hidden', backgroundColor: c.borderStrong },
