@@ -55,6 +55,77 @@ impl StartCommand {
     pub(super) fn prepared(&self) -> &PreparedStart {
         &self.prepared
     }
+    /// Execute an immutable home admission without reading fleet claims or desired rows.
+    /// The caller holds the session dispatch barrier, native subject lock, activation
+    /// lease and launch-freeze permit through the backend's final release callback.
+    pub(super) fn dispatch_remote<R: RuntimeControl>(
+        command: &fractal_peer::light_node::journal::Command,
+        authority: &rusqlite::Connection,
+        store: &Store,
+        runtime: &R,
+        observations: &host_observations::HostObservations,
+        owner: &str,
+        launch_member: &MemberSpec,
+    ) -> Result<()> {
+        use fractal_peer::light_node::journal::{Operation, require_start};
+        let Operation::Start { authorization } = &command.operation else {
+            anyhow::bail!("remote native launch requires Start");
+        };
+        let id = &command.execution_id;
+        let guard = || -> Result<()> {
+            require_start(authority, command)?;
+            super::home_session::require_start_helper(store, runtime, authorization)?;
+            anyhow::ensure!(!store.runtime_start_revoked(id)?, "remote start was revoked");
+            Ok(())
+        };
+        guard()?;
+        store.enter_remote_runtime_start(id, owner)?;
+        observations.invalidate();
+        let operation = fractal_runtime::LaunchOperation(id.clone());
+        let result = caught(|| {
+            if resource_lanes::request(launch_member)?.is_some() {
+                runtime.start_resource_guarded(store, launch_member, Some(&operation), &guard)
+            } else {
+                runtime.start_guarded(launch_member, Some(&operation), &guard)
+            }
+        });
+        observations.invalidate();
+        let mut proof = serde_json::json!({
+            "operation_id": id, "subject": command.binding.subject,
+            "runtime_id": authorization.member.runtime_id, "terminal": authorization.member.terminal,
+            "phase": "unknown", "verification": "producer-open-unverified"
+        });
+        if let Err(error) = result {
+            let rejected = error.downcast_ref::<fractal_runtime::StartRejected>()
+                .is_some_and(|proof| proof.operation.as_deref() == Some(id.as_str()));
+            // Retain the backend's causal error before any fallible native inspection.
+            // A failed closure/provenance read must not erase it or imply nonentry.
+            proof["error"] = Value::from(format!("{error:#}"));
+            proof["producer_closed"] = Value::from(rejected);
+            store.finish_remote_runtime_start(id, &proof)?;
+            let closed = rejected || runtime.start_operation_closed(launch_member)?;
+            proof["producer_closed"] = Value::from(closed);
+            if closed {
+                proof["verification"] = Value::from("producer-closed");
+                proof["phase"] = Value::from("failed");
+            }
+        }
+        // Keep the exact returned result even if observing its generation fails.
+        store.finish_remote_runtime_start(id, &proof)?;
+        // Acceptance is not success. Only native operation provenance can bind an
+        // actual generation, including when the backend returned an uncertain error.
+        if let Some(observed) = runtime.observe_start(launch_member)?
+            && let Some(incarnation) = observed.incarnation_id
+            && runtime.start_operation(&authorization.member.runtime_id, authorization.member.terminal, &incarnation)?
+                .as_deref() == Some(id.as_str())
+        {
+            proof["incarnation"] = Value::from(incarnation);
+            proof["verification"] = Value::from("operation-incarnation");
+            proof["phase"] = Value::from("completed");
+            proof.as_object_mut().expect("native proof is an object").remove("error");
+        }
+        store.finish_remote_runtime_start(id, &proof)
+    }
 
     /// Backend entry is a durable, single-use fence. Replayed commands cannot spawn twice,
     /// and revocation before entry closes the producer without touching a physical runtime.
