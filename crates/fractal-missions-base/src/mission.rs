@@ -11,6 +11,7 @@ use crate::model::{
     LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec,
     MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, ProgramSpec,
     RetrySpec, RevisionCutover, FractalError, StepSpec, UsedMissionSpec, WorkSelector,
+    EscalationSpec, EscalationClock, EscalationStage, EscalationAction, EscalationState, EscalationOverride,
 };
 
 pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
@@ -20,6 +21,42 @@ pub const CANDIDATE_INDEX_INPUT: &str = "__st3_candidate_index";
 
 pub fn validate_mission_id(value: &str) -> Result<(), FractalError> {
     validate_id(value, "mission")
+}
+
+pub const MISSION_RUN_TEMPLATE: &str = "${ST_MISSION_RUN}";
+
+/// Resolve only the run-scoped output identity, not arbitrary environment or input variables.
+/// `run` is the durable full run ID also exported to workers as `ST_MISSION_RUN`.
+pub fn resolve_produced_mission(value: &str, run: &str) -> Result<String, FractalError> {
+    let resolved = value.replace(MISSION_RUN_TEMPLATE, run);
+    validate_id(&resolved, "mission")?;
+    if value.contains(MISSION_RUN_TEMPLATE)
+        && !resolved.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/-._".contains(&byte))
+    {
+        return Err(FractalError::new(
+            "invalid-produces-mission",
+            "run-scoped mission IDs allow only ASCII letters, digits, '/', '-', '.', and '_'",
+        ));
+    }
+    if resolved.contains(['$', '{', '}']) {
+        return Err(FractalError::new(
+            "invalid-produces-mission",
+            "produces-mission supports only the ${ST_MISSION_RUN} template",
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Whether this declaration needs the fleet's per-run output admission barrier.
+pub fn declares_per_run_missions(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.produces_mission.as_deref().is_some_and(|id| id.contains(MISSION_RUN_TEMPLATE))
+            || step.nested_mission.as_deref().is_some_and(declares_per_run_missions)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_per_run_missions(branch))
+            })
+    })
 }
 
 pub fn parse_missions(
@@ -228,6 +265,7 @@ fn parse_mission(
             "stalled-after",
             "report-stalls",
             "report-completed",
+            "target-at",
         ],
     )?;
     let id = first_string(node)?;
@@ -253,6 +291,8 @@ fn parse_mission(
         ));
     }
     let (report_to, stalled_after_ms, report_completed, report_stalls) = parse_run_report(node, &id)?;
+    let target_at = property_string(node, "target-at")?
+        .map(|value| crate::model::mission_target_instant(&value)).transpose()?;
     let revisions_human_only = parse_revision_protection(node)?;
     let revision_reviewer = parse_revision_reviewer(node, revisions_human_only)?;
     let revision_cutover = match property_string(node, "revision-cutover")?.as_deref() {
@@ -309,9 +349,36 @@ fn parse_mission(
     let mut system = false;
     let mut capacity = None;
     let mut authority = None;
+    let mut milestones: Vec<crate::model::MissionMilestone> = Vec::new();
+    let mut milestone_ids = BTreeSet::new();
     for child in children.nodes() {
         match child.name().value() {
             "declared-priority" | "declared-lane" | "declared-budgets" => {}
+            "escalation" => {
+                if children.nodes().iter().filter(|n| n.name().value() == "escalation").count() > 1 {
+                    return Err(FractalError::new("duplicate-mission-field", "mission repeats escalation"));
+                }
+            }
+            "milestone" => {
+                reject_type(child)?;
+                ensure_only_properties(child, &["at"])?;
+                let milestone_id = one_string(child)?;
+                validate_id(&milestone_id, "milestone")?;
+                if !milestone_ids.insert(milestone_id.clone()) {
+                    return Err(FractalError::new("duplicate-milestone", format!("mission `{id}` repeats milestone `{milestone_id}`")));
+                }
+                let at = property_string(child, "at")?.ok_or_else(||
+                    FractalError::new("invalid-milestone", "milestone needs an at instant"))?;
+                let at = crate::model::mission_target_instant(&at)?;
+                // Canonical fixed-width UTC milliseconds compare in chronological order.
+                if milestones.last().is_some_and(|previous| at <= previous.at) {
+                    return Err(FractalError::new("invalid-milestone-order", "milestones must have strictly increasing instants"));
+                }
+                milestones.push(crate::model::MissionMilestone {
+                    id: milestone_id,
+                    at,
+                });
+            }
             "system" => {
                 if system {
                     return Err(FractalError::new(
@@ -582,6 +649,7 @@ fn parse_mission(
         id,
         state,
         revision: String::new(),
+        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(|node| parse_escalation(node, false)).transpose()?.unwrap_or_default(),
         system,
         declared_priority: admission.priority,
         declared_lane: admission.lane,
@@ -591,6 +659,8 @@ fn parse_mission(
         inputs,
         max_active_runs,
         timeout_ms,
+        target_at,
+        milestones,
         report_to,
         stalled_after_ms,
         report_stalls,
@@ -919,6 +989,7 @@ fn parse_loop_group(
     let mut step = StepSpec {
         id,
         path,
+        escalation: EscalationOverride::Inherit,
         fresh_context: false,
         keep_open: false,
         queue: None,
@@ -980,6 +1051,9 @@ fn parse_embedded_mission(
                 MissionInputKind::Resource => "resource",
             },
         ));
+        if let Some(kind) = &input.resource_kind {
+            input_node.entries_mut().push(kdl::KdlEntry::new_prop("resource-kind", kind.as_str()));
+        }
         body.nodes_mut().push(input_node);
     }
     for name in [
@@ -1397,11 +1471,15 @@ fn unique_named_child<'a>(
 fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec, FractalError> {
     use crate::model::{ResourceLaneCoverage, ResourceLaneSpec};
     reject_type(node)?;
-    ensure_only_properties(node, &["host", "max-members", "coverage", "admission-timeout", "class", "disk", "disk-path", "io"])?;
+    ensure_only_properties(node, &["host", "profile", "max-members", "coverage", "admission-timeout", "class", "disk", "disk-path", "io"])?;
     let name = one_string_with_children(node)?;
     validate_id(&name, "resource lane")?;
     let host = property_string(node, "host")?.filter(|host| !host.trim().is_empty())
         .ok_or_else(|| FractalError::new("invalid-step-lane", "lane needs an explicit execution host"))?;
+    let profile = property_string(node, "profile")?;
+    if profile.as_ref().is_some_and(|key| key.trim().is_empty()) {
+        return Err(FractalError::new("invalid-step-lane", "profile must be nonempty"));
+    }
     let max_members = match node.get("max-members") {
         None => 1,
         Some(KdlValue::Integer(value)) => u32::try_from(*value).ok().filter(|value| *value > 0)
@@ -1414,13 +1492,15 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
         _ => return Err(FractalError::new("invalid-step-lane", "coverage must be logical or enforced")),
     };
     let class = match property_string(node, "class")?.as_deref().unwrap_or("agent") {
+        "recovery" => fractal_runtime::RequestClass::Recovery,
         "landing" => fractal_runtime::RequestClass::Landing,
         "check" => fractal_runtime::RequestClass::Check,
         "agent" => fractal_runtime::RequestClass::Agent,
-        _ => return Err(FractalError::new("invalid-step-lane", "class must be landing, check or agent")),
+        _ => return Err(FractalError::new("invalid-step-lane", "class must be recovery, landing, check or agent")),
     };
     let disk = match (property_string(node, "disk")?, property_string(node, "disk-path")?) {
         (None, None) => None,
+        (None, Some(path)) if profile.is_some() && !path.trim().is_empty() => None,
         (Some(bytes), Some(path)) if !path.trim().is_empty() => {
             let bytes = fractal_runtime::parse_lane_memory(&bytes)
                 .map_err(|error| FractalError::new("invalid-step-lane", format!("invalid disk footprint: {error}")))?;
@@ -1431,6 +1511,7 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
         }
         _ => return Err(FractalError::new("invalid-step-lane", "disk and nonempty disk-path must be supplied together")),
     };
+    let disk_path = if disk.is_none() { property_string(node, "disk-path")? } else { None };
     let io = match property_string(node, "io")?.as_deref() {
         None => None,
         Some("heavy") => Some(fractal_runtime::IoClass::Heavy),
@@ -1447,7 +1528,7 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
             capacity = Some(parse_capacity(child)?);
         }
     }
-    Ok(ResourceLaneSpec { name, host, max_members, capacity, coverage, admission_timeout_ms, class, disk, io })
+    Ok(ResourceLaneSpec { name, host, profile, disk_path, max_members, capacity, coverage, admission_timeout_ms, class, disk, io })
 }
 
 fn parse_step(
@@ -1592,6 +1673,12 @@ fn parse_step(
                 "uses-mission" => uses_mission = Some(parse_used_mission(child)?),
                 "after-run" => after_run = Some(parse_after_run(child)?),
                 "program" => program = Some(parse_program(child)?),
+                "escalation" => {
+                    if node.children().is_some_and(|body| body.nodes().iter()
+                        .filter(|entry| entry.name().value() == "escalation").count() > 1) {
+                        return Err(FractalError::new("duplicate-step-field", "step repeats escalation"));
+                    }
+                }
                 "gate" => {
                     let gate = crate::gate_parse::parse_gate(child, default_host)?;
                     if matches!(gate, GateSpec::Deadline { .. }) {
@@ -1711,6 +1798,7 @@ fn parse_step(
     let mut step = StepSpec {
         id,
         path,
+        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(|node| parse_escalation(node, true)).transpose()?.unwrap_or_default(),
         fresh_context,
         keep_open,
         queue: None,
@@ -1895,7 +1983,7 @@ fn build_work_selector(
 
 fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, FractalError> {
     reject_type(node)?;
-    ensure_only_properties(node, &["kind"])?;
+    ensure_only_properties(node, &["kind", "resource-kind"])?;
     ensure_no_children(node)?;
     let name = first_string(node)?;
     if name.contains('/') {
@@ -1921,7 +2009,16 @@ fn parse_mission_input(node: &KdlNode) -> Result<MissionInputSpec, FractalError>
             ));
         }
     };
-    Ok(MissionInputSpec { name, kind })
+    let resource_kind = property_string(node, "resource-kind")?;
+    if let Some(resource_kind) = &resource_kind
+        && (kind != MissionInputKind::Resource || resource_kind.trim().is_empty())
+    {
+        return Err(FractalError::new(
+            "invalid-mission-input-resource-kind",
+            format!("mission input `{name}` needs a nonempty resource-kind on kind=resource"),
+        ));
+    }
+    Ok(MissionInputSpec { name, kind, resource_kind })
 }
 
 fn parse_concurrent_runs(node: &KdlNode) -> Result<Option<u32>, FractalError> {
@@ -2475,7 +2572,8 @@ fn parse_produced_mission(node: &KdlNode) -> Result<String, FractalError> {
         .strip_prefix("mission/")
         .unwrap_or(&values[0])
         .to_owned();
-    validate_id(&id, "mission")?;
+    // Validate the fixed syntax here; the durable run ID and final length are checked on use.
+    resolve_produced_mission(&id, "mission-run/run")?;
     Ok(id)
 }
 
@@ -2583,6 +2681,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
     let mut step = StepSpec {
         id: AFTER_RUN_STEP.into(),
         path: AFTER_RUN_STEP.into(),
+        escalation: EscalationOverride::Inherit,
         fresh_context: false,
         keep_open: false,
         queue: None,
@@ -2992,6 +3091,73 @@ pub(crate) fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
         ));
     }
     Ok(())
+}
+
+/// Scope determines the closed runtime state vocabulary; absence is handled by the caller.
+fn parse_escalation(node: &KdlNode, step: bool) -> Result<EscalationOverride, FractalError> {
+    reject_type(node)?;
+    crate::declaration_syntax::ensure_only_properties(node, &["disabled"])?;
+    let invalid = || FractalError::new("invalid-escalation", "expected unique policy IDs, scope-valid state/clock, and increasing positive stages with exactly one typed recipient");
+    if node.entries().iter().any(|entry| entry.name().is_none()) { return Err(invalid()); }
+    if let Some(disabled) = node.get("disabled") {
+        if disabled.as_bool() != Some(true) || node.children().is_some() {
+            return Err(invalid());
+        }
+        return Ok(EscalationOverride::Disable);
+    }
+    let body = node.children().ok_or_else(invalid)?;
+    let mut ids = BTreeSet::new();
+    let mut policies = Vec::new();
+    for policy in body.nodes() {
+        if policy.name().value() != "policy" { return Err(invalid()); }
+        crate::declaration_syntax::ensure_only_properties(policy, &["state", "clock"])?;
+        let id = one_string_with_children(policy)?;
+        validate_id(&id, "escalation")?;
+        if !ids.insert(id.clone()) { return Err(invalid()); }
+        let state = match property_string(policy, "state")?.as_deref() {
+            Some("waiting-person") if step => EscalationState::WaitingPerson,
+            Some("ready") if step => EscalationState::Ready,
+            Some("claimed") if step => EscalationState::Claimed,
+            Some("blocked") if step => EscalationState::Blocked,
+            Some("verifying") if step => EscalationState::Verifying,
+            Some("queued") if !step => EscalationState::Queued,
+            Some("running") if !step => EscalationState::Running,
+            Some("waiting") => EscalationState::Waiting,
+            Some("completed") => EscalationState::Completed,
+            Some("failed") => EscalationState::Failed,
+            Some("cancelled") => EscalationState::Cancelled,
+            _ => return Err(invalid()),
+        };
+        let clock = match property_string(policy, "clock")?.as_deref() {
+            Some("since-progress") => EscalationClock::SinceProgress,
+            Some("since-entered") => EscalationClock::SinceEntered,
+            _ => return Err(invalid()),
+        };
+        let mut stages = Vec::new();
+        let mut previous = 0;
+        for stage in policy.children().ok_or_else(invalid)?.nodes() {
+            if stage.name().value() != "stage" { return Err(invalid()); }
+            crate::declaration_syntax::ensure_only_properties(stage, &["notify", "ask"])?;
+            let after_ms = parse_duration(&one_string(stage)?)?;
+            if after_ms <= previous { return Err(invalid()); }
+            previous = after_ms;
+            let action = match (property_string(stage, "notify")?, property_string(stage, "ask")?) {
+                (Some(to), None) => { validate_report_to(&to)?; EscalationAction::Notify(to) }
+                (None, Some(to)) if to.starts_with("person/") => {
+                    for segment in to.strip_prefix("person/").unwrap_or_default().split('/') {
+                        validate_id(segment, "person")?;
+                    }
+                    EscalationAction::Ask(to)
+                }
+                _ => return Err(invalid()),
+            };
+            stages.push(EscalationStage { after_ms, action });
+        }
+        if stages.is_empty() { return Err(invalid()); }
+        policies.push(EscalationSpec { id, state, clock, stages });
+    }
+    if policies.is_empty() { return Err(invalid()); }
+    Ok(EscalationOverride::Replace { policies })
 }
 
 /// The mission's opt-in run report: who hears of a failed, cancelled or stalled run, how long a
@@ -3414,6 +3580,18 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 #[cfg(test)]
 mod tests {
     #[test]
+    fn recovery_lane_class_parses_as_a_host_profile_request() {
+        let document: kdl::KdlDocument =
+            r#"lane "reclaim" host="node" class="recovery" profile="disk.reclaim""#.parse().unwrap();
+        let lane = super::parse_resource_lane(&document.nodes()[0]).unwrap();
+        assert_eq!(lane.class, fractal_runtime::RequestClass::Recovery);
+        assert_eq!(lane.profile.as_deref(), Some("disk.reclaim"));
+        let invalid: kdl::KdlDocument =
+            r#"lane "reclaim" host="node" class="unknown" profile="disk.reclaim""#.parse().unwrap();
+        assert!(super::parse_resource_lane(&invalid.nodes()[0]).is_err());
+    }
+
+    #[test]
     fn whole_input_subjects_use_the_input_id_grammar() {
         for name in [
             "vrs-review",
@@ -3643,5 +3821,205 @@ mod tests {
             if actual != code { mismatches.push(format!("{body}: {actual}, expected {code}")); }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+    #[test]
+    fn inline_escalation_parses_and_changes_revision() {
+        let source = r#"mission "refresh" state="ready" {
+            goal "Refresh";
+            escalation {
+                policy "pending-refresh" state="running" clock="since-entered" {
+                    stage "30m" notify="agent/example/manager";
+                    stage "4h" notify="agent/example/manager";
+                    stage "24h" ask="person/owner";
+                }
+            }
+            step "inherit" { agentless; }
+            step "approval" { agentless; escalation disabled=#true; }
+        }"#;
+        let mission = super::parse_missions(&source.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+        let crate::model::EscalationOverride::Replace { policies } = &mission.escalation else { panic!("expected replacement"); };
+        assert_eq!(policies[0].stages[2].after_ms, 86_400_000);
+        assert_eq!(mission.steps["inherit"].escalation, crate::model::EscalationOverride::Inherit);
+        assert_eq!(mission.steps["approval"].escalation, crate::model::EscalationOverride::Disable);
+        let rendered = crate::mission_render::render_mission_kdl(&mission).unwrap();
+        assert!(rendered.text.contains("30m"));
+        assert!(rendered.text.contains("1d"));
+        assert!(rendered.text.contains("disabled=#true"));
+        let roundtrip = super::parse_missions(&rendered.text.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+        assert_eq!(mission.revision, roundtrip.revision);
+        assert_eq!(mission.escalation, roundtrip.escalation);
+        assert_eq!(mission.steps["approval"].escalation, roundtrip.steps["approval"].escalation);
+        for (from, to) in [
+            ("24h", "25h"),
+            ("since-entered", "since-progress"),
+            ("state=\"running\"", "state=\"waiting\""),
+            ("person/owner", "person/reviewer"),
+            ("pending-refresh", "residency"),
+            ("escalation disabled=#true;", ""),
+        ] {
+            let changed = source.replace(from, to);
+            let changed = super::parse_missions(&changed.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+            assert_ne!(mission.revision, changed.revision, "{from}");
+        }
+        let json = serde_json::to_string(&mission).unwrap();
+        assert_eq!(mission, serde_json::from_str(&json).unwrap());
+    }
+
+    #[test]
+    fn inline_escalation_rejects_invalid_stages() {
+        for stages in [
+            r#"stage "0m" notify="agent/a";"#,
+            r#"stage "4h" notify="agent/a"; stage "30m" notify="agent/a";"#,
+            r#"stage "30m" notify="agent/a" ask="person/a";"#,
+            r#"stage "30m" ask="agent/a";"#,
+            r#"stage "30m" notify="agent/a"; stage "30m" notify="agent/a";"#,
+            r#"stage "30m";"#,
+            r#"stage "30m" notify="agent/a" unexpected="value";"#,
+            r#"stage "30m" ask="person/";"#,
+            r#"stage "30m" notify="agent/a" {}"#,
+        ] {
+            let source = format!(r#"escalation {{ policy "p" state="claimed" clock="since-progress" {{ {stages} }} }}"#);
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert!(super::parse_escalation(&doc.nodes()[0], true).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn inline_escalation_rejects_invalid_policies_and_duplicate_blocks() {
+        let policy = r#"policy "p" state="claimed" clock="since-progress" { stage "1m" notify="agent/example/manager"; }"#;
+        for body in [
+            format!("{policy}\n{policy}"),
+            policy.replace("since-progress", "activation-age"),
+            policy.replace("claimed", "unknown"),
+            policy.replace("stage \"1m\" notify=\"agent/example/manager\";", ""),
+            policy.replace("since-progress", "in-state"),
+            policy.replace("\"p\"", "\"\""),
+            policy.replace("\"p\"", ""),
+            String::new(),
+        ] {
+            let document: kdl::KdlDocument = format!("escalation {{ {body} }}").parse().unwrap();
+            assert!(super::parse_escalation(&document.nodes()[0], true).is_err());
+        }
+        for body in [
+            "escalation {}; escalation {}; step \"work\" { agentless; }",
+            "step \"work\" { agentless; escalation {}; escalation {}; }",
+        ] {
+            let source = format!("mission \"test\" state=\"ready\" {{ goal \"Test\"; {body} }}");
+            assert!(super::parse_missions(&source.parse().unwrap(), "node").is_err());
+        }
+        for state in ["waiting-person", "waiting", "ready", "claimed", "blocked", "verifying", "completed", "failed", "cancelled", "queued", "running", "working", "normal", "revision-draining", "final", "unknown"] {
+            let source = format!(r#"escalation {{ policy "p" state="{state}" clock="since-entered" {{ stage "30m" notify="agent/a"; }} }}"#);
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert_eq!(super::parse_escalation(&doc.nodes()[0], true).is_ok(),
+                matches!(state, "waiting-person" | "waiting" | "ready" | "claimed" | "blocked" | "verifying" | "completed" | "failed" | "cancelled"), "{state}");
+            assert_eq!(super::parse_escalation(&doc.nodes()[0], false).is_ok(),
+                matches!(state, "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"), "{state}");
+        }
+        for source in ["escalation {}", "escalation", "escalation disabled=#false", "escalation disabled=\"true\"", "escalation disabled=#true {}", "escalation disabled=#true { policy \"p\"; }"] {
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert!(super::parse_escalation(&doc.nodes()[0], true).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn mission_dates_normalize_round_trip_and_participate_in_revision() {
+        let source = r#"mission "dates" state="ready" target-at="2026-11-04T13:00:00+01:00" {
+            goal "Dates are metadata only.";
+            milestone "review" at="2026-11-04T13:00:00+01:00";
+            milestone "release" at="2026-11-05T12:00:00.001Z";
+            step "work" { agentless; }
+        }"#;
+        let parse = |text: &str| super::parse_missions(&text.parse().unwrap(), "node")
+            .unwrap().remove("dates").unwrap();
+        let mission = parse(source);
+        assert_eq!(mission.target_at.as_deref(), Some("2026-11-04T12:00:00.000Z"));
+        assert_eq!(mission.milestones[0].at, "2026-11-04T12:00:00.000Z");
+        assert_eq!(mission.milestones[1].at, "2026-11-05T12:00:00.001Z");
+        assert!(mission.timeout_ms.is_none());
+        let rendered = crate::mission_render::render_mission_kdl(&mission).unwrap();
+        let roundtrip = parse(&rendered.text);
+        assert_eq!(mission, roundtrip);
+        assert_eq!(mission.revision, parse(&source.replace("13:00:00+01:00", "12:00:00Z")).revision);
+        for (from, to) in [
+            ("target-at=\"2026-11-04T13:00:00+01:00\"", "target-at=\"2026-11-06T12:00:00Z\""),
+            ("milestone \"review\"", "milestone \"approval\""),
+            ("2026-11-05T12:00:00.001Z", "2026-11-05T12:00:00.002Z"),
+        ] {
+            assert_ne!(mission.revision, parse(&source.replace(from, to)).revision);
+        }
+        let plain = parse(r#"mission "dates" state="ready" { goal "Dates are metadata only."; step "work" { agentless; } }"#);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("target_at").is_none());
+        assert!(json.get("milestones").is_none());
+    }
+
+    #[test]
+    fn mission_dates_reject_invalid_instants_and_milestone_shapes() {
+        for at in [
+            "2026-11-04", "2026-02-30T00:00:00Z", "2027-02-29T00:00:00Z",
+            "2026-11-04T24:00:00Z", "2026-11-04T00:00:00", "2026-11-04T00:00:00-00:00",
+            "2026-11-04T00:00:60Z", "2026-11-04T00:00:00.0000Z", "2026-11-04T00:00:00.1234Z",
+            "2026-11-04T00:00:00+24:00", "2026-11-04T00:00:00+01:60",
+            "2026-11-04t00:00:00z", "2026-11-04 00:00:00Z",
+        ] {
+            for (property, child) in [
+                (format!(r#"target-at="{at}""#), String::new()),
+                (String::new(), format!(r#"milestone "review" at="{at}";"#)),
+            ] {
+                let source = format!(r#"mission "dates" state="ready" {property} {{ goal "Soft dates."; {child} step "work" {{ agentless; }} }}"#);
+                assert!(super::parse_missions(&source.parse().unwrap(), "node").is_err(), "{at}");
+            }
+        }
+        for child in [
+            r#"milestone "review";"#,
+            r#"milestone "" at="2026-11-04T12:00:00Z";"#,
+            r#"milestone "review" "extra" at="2026-11-04T12:00:00Z";"#,
+            r#"milestone "review" at="2026-11-04T12:00:00Z" { goal "no"; };"#,
+            r#"milestone "review" at="2026-11-04T12:00:00Z" unexpected=#true;"#,
+            r#"milestone "review" at="2026-11-04T12:00:00Z"; milestone "review" at="2026-11-05T12:00:00Z";"#,
+            r#"milestone "a" at="2026-11-04T13:00:00+01:00"; milestone "b" at="2026-11-04T12:00:00Z";"#,
+            r#"milestone "a" at="2026-11-05T00:00:00Z"; milestone "b" at="2026-11-04T00:00:00Z";"#,
+        ] {
+            let source = format!(r#"mission "dates" state="ready" {{ goal "Soft dates."; {child} step "work" {{ agentless; }} }}"#);
+            assert!(super::parse_missions(&source.parse().unwrap(), "node").is_err(), "{child}");
+        }
+        let source = r#"mission "dates" state="ready" {
+            goal "Order instants, not offset text.";
+            milestone "first" at="2026-11-04T23:30:00-02:00";
+            milestone "second" at="2026-11-05T02:00:00Z";
+            step "work" { agentless; }
+        }"#;
+        assert!(super::parse_missions(&source.parse().unwrap(), "node").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod produced_mission_tests {
+    use super::*;
+
+    #[test]
+    fn run_scoped_identity_is_stable_and_isolated() {
+        let template = "consent/${ST_MISSION_RUN}";
+        let first = resolve_produced_mission(template, "abc123").unwrap();
+        assert_eq!(first, "consent/abc123");
+        assert_eq!(resolve_produced_mission(template, "abc123").unwrap(), first);
+        assert_ne!(resolve_produced_mission(template, "def456").unwrap(), first);
+        assert_eq!(resolve_produced_mission("consent/shared", "abc123").unwrap(), "consent/shared");
+    }
+
+    #[test]
+    fn output_templates_are_narrow_and_validate_the_expanded_identity() {
+        for invalid in ["consent/${input.id}", "consent/${HOME}", "consent/${ST_MISSION_RUN", "consent/$name"] {
+            assert!(resolve_produced_mission(invalid, "abc123").is_err(), "{invalid}");
+        }
+        for invalid in ["", "/leading", "trailing/", "double//slash", "white space", "non-ascii-é"] {
+            assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", invalid).is_err(), "{invalid}");
+        }
+        assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", &"a".repeat(152)).is_ok());
+        assert!(resolve_produced_mission("consent/${ST_MISSION_RUN}", &"a".repeat(153)).is_err());
+        let node: KdlDocument = r#"produces-mission "consent/${ST_MISSION_RUN}""#.parse().unwrap();
+        assert_eq!(parse_produced_mission(&node.nodes()[0]).unwrap(), "consent/${ST_MISSION_RUN}");
+        let node: KdlDocument = r#"produces-mission "consent/${input.id}""#.parse().unwrap();
+        assert!(parse_produced_mission(&node.nodes()[0]).is_err());
     }
 }

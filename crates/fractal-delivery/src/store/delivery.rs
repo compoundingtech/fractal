@@ -65,6 +65,16 @@ struct KeptWorkWakes {
     names: Vec<String>,
     through: u64,
     subjects: Vec<KeptWorkWake>,
+    /// The messages shard's index these stream wakes were read through, and the wakes.
+    stream_through: u64,
+    stream: Vec<KeptStreamWake>,
+}
+
+/// A work wake that is a stream item, and its view once closed: a closed item never changes, and
+/// an open one is read again on each pass, since its lifecycle is this member's shard records.
+struct KeptStreamWake {
+    subject: String,
+    closed: Option<MessageView>,
 }
 
 /// One work wake and the view last read for it. The view is kept here, beside the subject,
@@ -138,6 +148,14 @@ pub trait DeliveryStore {
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
         ) -> Result<(ClaimRecord, bool), FractalError>;
+    /// Record a genuine input acceptance under the same current physical mailbox fence.
+    fn record_mail_input_acceptance(
+        &self, message: &str, fence: &crate::mailbox::Fence, accepted_at_unix_ms: u64,
+    ) -> Result<(ClaimRecord, bool), FractalError>;
+    /// A sealed and drained native producer cut, under current physical mailbox authority.
+    fn record_mail_acceptance_frontier(
+        &self, fence: &crate::mailbox::Fence, observed_through_unix_ms: u64,
+    ) -> Result<(ClaimRecord, bool), FractalError>;
     /// Called only inside the native lease/authority guard. Metadata commits with
     /// the first new read receipt; replay/settlement never adds or changes a binding.
     fn append_native_mailbox_receipt_outcome(
@@ -376,7 +394,79 @@ impl DeliveryStore for Store {
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
         ) -> Result<(ClaimRecord, bool), FractalError> {
-        self.append_claim_fenced_outcome(input, Some(fence))
+        self.append_native_mailbox_receipt_outcome(input, fence, None)
+    }
+
+    fn record_mail_input_acceptance(
+        &self, message: &str, fence: &crate::mailbox::Fence, accepted_at_unix_ms: u64,
+    ) -> Result<(ClaimRecord, bool), FractalError> {
+        let view = self.message(message).map_err(internal)?
+            .ok_or_else(|| FractalError::new("missing-message", "input acceptance needs a durable message"))?;
+        if view.to != fence.subject || fence.component != "delivery" {
+            return Err(FractalError::new("wrong-message-recipient", "input acceptance belongs to the current recipient"));
+        }
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction().map_err(internal)?;
+        check_mailbox_fence(&transaction, fence, &self.origin)?;
+        let now = u64::try_from(now_ms()).map_err(internal)?;
+        if accepted_at_unix_ms > now {
+            return Err(FractalError::new("invalid-input-acceptance", "input acceptance cannot be in the future"));
+        }
+        let changed = fractal_store::store::mail_input_acceptance::record(
+            &transaction, message, &fence.subject, &fence.incarnation, accepted_at_unix_ms, now,
+        ).map_err(internal)?;
+        let first: u64 = transaction.query_row(
+            "SELECT accepted_at_unix_ms FROM local_mail_input_acceptance_v1
+             WHERE message=?1 AND recipient=?2 AND incarnation=?3",
+            params![message, fence.subject, fence.incarnation], |row| row.get(0),
+        ).map_err(internal)?;
+        transaction.commit().map_err(internal)?;
+        let fields = BTreeMap::from([
+            ("accepted_at_unix_ms".into(), json!(first)),
+            ("incarnation".into(), json!(fence.incarnation)),
+        ]);
+        let mut receipt = fractal_store::store::messages_shard::lifecycle_receipt(
+            &self.origin, message, "message.input-accepted", Some(&fence.subject), &fields,
+        );
+        receipt.id = format!("offset-receipt/{}", smallclaims::hash::canonical_hash(
+            &(message, &fence.subject, &fence.incarnation, "message.input-accepted"),
+        ).map_err(internal)?);
+        Ok((receipt, changed))
+    }
+
+    fn record_mail_acceptance_frontier(
+        &self, fence: &crate::mailbox::Fence, observed_through_unix_ms: u64,
+    ) -> Result<(ClaimRecord, bool), FractalError> {
+        if fence.component != "delivery" {
+            return Err(FractalError::new("invalid-input-acceptance-frontier", "only delivery publishes acceptance frontiers"));
+        }
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction().map_err(internal)?;
+        check_mailbox_fence(&transaction, fence, &self.origin)?;
+        let now = u64::try_from(now_ms()).map_err(internal)?;
+        if observed_through_unix_ms > now {
+            return Err(FractalError::new("invalid-input-acceptance-frontier", "acceptance frontier cannot be in the future"));
+        }
+        let changed = fractal_store::store::mail_input_acceptance::record_frontier(
+            &transaction, &fence.subject, &fence.incarnation, observed_through_unix_ms, now,
+        ).map_err(internal)?;
+        let through: u64 = transaction.query_row(
+            "SELECT observed_through_unix_ms FROM local_mail_acceptance_frontier_v1
+             WHERE recipient=?1 AND incarnation=?2",
+            params![fence.subject, fence.incarnation], |row| row.get(0),
+        ).map_err(internal)?;
+        transaction.commit().map_err(internal)?;
+        let fields = BTreeMap::from([
+            ("observed_through_unix_ms".into(), json!(through)),
+            ("incarnation".into(), json!(fence.incarnation)),
+        ]);
+        let mut receipt = fractal_store::store::messages_shard::lifecycle_receipt(
+            &self.origin, &fence.subject, "message.input-acceptance-frontier", Some(&fence.subject), &fields,
+        );
+        receipt.id = format!("offset-receipt/{}", smallclaims::hash::canonical_hash(
+            &(&fence.subject, &fence.incarnation, "message.input-acceptance-frontier"),
+        ).map_err(internal)?);
+        Ok((receipt, changed))
     }
 
     fn append_native_mailbox_receipt_outcome(
@@ -391,6 +481,9 @@ impl DeliveryStore for Store {
                 "native proof needs a read receipt",
             ));
         }
+        let mailbox_intake_frontier = if matches!(input.kind.as_str(), "message.staged" | "message.delivered") {
+            Some(fractal_store::suspension::mailbox_intake_frontier(self, &fence.subject)?)
+        } else { None };
         append_claim_with_commit_context(
             &self.graph,
             input,
@@ -400,6 +493,7 @@ impl DeliveryStore for Store {
             None,
             ClaimCommitContext {
                 native_receipt: native,
+                mailbox_intake_frontier,
                 ..Default::default()
             },
         )
@@ -497,9 +591,9 @@ impl DeliveryStore for Store {
                 .is_some_and(|kept| kept.names == names && kept.through <= through)
                 .then(|| kept.remove(&recipient))
                 .flatten()
-                .map(|kept| (kept.through, kept.subjects))
+                .map(|kept| (kept.through, kept.subjects, kept.stream_through, kept.stream))
         };
-        let (after, mut subjects) = kept.unwrap_or_default();
+        let (after, mut subjects, stream_after, mut stream) = kept.unwrap_or_default();
         // Sent claims are only appended, so only those after the kept cut can add a wake. The
         // rowid bounds are checked on the index entry, before the body is read.
         let mut statement = connection.prepare_cached(
@@ -571,10 +665,52 @@ impl DeliveryStore for Store {
             }
         }
         subjects.retain(|kept| !gone.contains(&kept.subject));
+        // Work wakes for this member's own seats are stream items (message_routing::send_work_wake).
+        let stream_names = names
+            .iter()
+            .cloned()
+            .chain([recipient.clone(), bare_recipient.to_owned()])
+            .collect::<Vec<_>>();
+        let (stream_through, added) =
+            fractal_store::store::messages_shard::mailbox_reads::work_wakes_after(self, &stream_names, stream_after)?;
+        let known = stream.iter().map(|kept| kept.subject.clone()).collect::<HashSet<_>>();
+        stream.extend(
+            added
+                .into_iter()
+                .filter(|(subject, _)| !known.contains(subject))
+                .map(|(subject, _)| KeptStreamWake { subject, closed: None }),
+        );
+        let mut gone = BTreeSet::new();
+        for kept in &mut stream {
+            let message = match &kept.closed {
+                Some(view) => view.clone(),
+                None => match fractal_store::store::messages_shard::message_view(self, &kept.subject)? {
+                    Some(view) => {
+                        if view.status == "closed" {
+                            kept.closed = Some(view.clone());
+                        }
+                        view
+                    }
+                    // The graph holds the subject, which its own read lists.
+                    None => {
+                        gone.insert(kept.subject.clone());
+                        continue;
+                    }
+                },
+            };
+            if message.to == recipient
+                && crate::silent::message_tag_values(message.tags.iter().map(String::as_str), "work:")
+                    .next()
+                    .is_some()
+            {
+                messages.push(message);
+            }
+        }
+        stream.retain(|kept| !gone.contains(&kept.subject));
         {
             let mut kept = wakes.0.lock().unwrap_or_else(PoisonError::into_inner);
-            if kept.get(&recipient).is_none_or(|kept| kept.through <= through) {
-                kept.insert(recipient.clone(), KeptWorkWakes { names, through, subjects });
+            if kept.get(&recipient).is_none_or(|kept| kept.through <= through && kept.stream_through <= stream_through) {
+                kept.insert(recipient.clone(), KeptWorkWakes { names, through, subjects, stream_through, stream });
             }
         }
         sort_messages_canonically(&connection, &mut messages)?;
@@ -1327,4 +1463,41 @@ fn admit_mailbox(
         mailbox_lease::record_argv_binding(tx, &bound, member)?;
     }
     Ok(Admitted::Bound { fence: bound, wrote: true, new_owner: true })
+}
+
+#[cfg(test)]
+mod input_acceptance_tests {
+    use super::*;
+    use crate::store::mailbox_tests::{claim, ready};
+    use crate::mailbox::Fence;
+
+    #[test]
+    fn native_acceptance_is_idempotent_non_delivering_and_fenced_by_incarnation() {
+        let store = Store::open_memory("node").unwrap();
+        ready(&store, "incarnation-one");
+        let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "incarnation-one", "delivery")).unwrap();
+        let sent = store.append_claim(&claim("message/example-acceptance", "message.sent",
+            json!({"from":"agent/example/sender","to":"agent/eval.worker","content":"synthetic input","status":"sent"}),
+            "send")).unwrap();
+        let at = u64::try_from(sent.accepted_at_unix_ms).unwrap();
+        let (receipt, changed) = store.record_mail_input_acceptance(&sent.subject, &fence, at).unwrap();
+        assert!(changed);
+        assert_eq!(receipt.kind, "message.input-accepted");
+        assert!(!store.record_mail_input_acceptance(&sent.subject, &fence, at).unwrap().1);
+        assert_eq!(store.message(&sent.subject).unwrap().unwrap().status, "sent");
+        let mut foreign = fence.clone();
+        foreign.subject = "agent/example/foreign".into();
+        assert!(store.record_mail_input_acceptance(&sent.subject, &foreign, at).is_err());
+        assert!(store.record_mail_input_acceptance(&sent.subject, &fence, u64::MAX).is_err());
+        let (frontier, changed) = store.record_mail_acceptance_frontier(&fence, at).unwrap();
+        assert!(changed);
+        assert_eq!(frontier.kind, "message.input-acceptance-frontier");
+        assert!(!store.record_mail_acceptance_frontier(&fence, at.saturating_sub(1)).unwrap().1);
+        assert!(store.record_mail_acceptance_frontier(&foreign, at).is_err());
+        assert!(store.record_mail_acceptance_frontier(&fence, u64::MAX).is_err());
+        ready(&store, "incarnation-two");
+        store.bind_mailbox(&Fence::new("agent/eval.worker", "incarnation-two", "delivery")).unwrap();
+        assert!(store.record_mail_input_acceptance(&sent.subject, &fence, at).is_err());
+        assert!(store.record_mail_acceptance_frontier(&fence, at).is_err());
+    }
 }

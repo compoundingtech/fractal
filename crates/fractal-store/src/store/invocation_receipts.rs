@@ -1,11 +1,42 @@
 //! Native launch receipts share the runtime-start writer fence, not its disposable local log.
 use super::*;
+use std::sync::PoisonError;
 pub use fractal_schema::invocation::{FallbackEvidence, FreshnessEvidence, InvocationPhase, InvocationReceipt};
 
 /// Live owners are daemon-local; their W3C correlation is retained in durable receipts.
 /// Dropping the store closes host segments without rewriting historical correlation.
 #[derive(Default)]
 struct InvocationTraces(Mutex<HashMap<String, crate::otel::AttemptTrace>>);
+
+type EndInvocations = Arc<BTreeMap<String, InvocationReceipt>>;
+
+struct RuntimeEnd {
+    observation: String,
+    tail: i64,
+    invocations: EndInvocations,
+}
+
+#[derive(Default)]
+/// Latest folded end per subject, valid only at the exact subject receipt tail. Late
+/// launch/turn receipts invalidate it; unrelated fleet writes do not. Publication
+/// checks the writer's pre-append tail, so a concurrent receipt cannot be hidden.
+struct RuntimeEnds(Mutex<HashMap<String, RuntimeEnd>>);
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+struct ReceiptReadWork(Mutex<(u64, u64)>);
+
+const GLOBAL_RECEIPTS: &str =
+    "SELECT json_extract(body,'$.fields') FROM claims WHERE kind='harness.invocation'
+     AND json_extract(body,'$.fields.invocation_id')=?1 ORDER BY store_index";
+
+const SUBJECT_RECEIPTS: &str =
+    "SELECT json_extract(body,'$.fields') FROM claims INDEXED BY claims_subject_kind_index
+     WHERE subject=?1 AND kind='harness.invocation' ORDER BY store_index";
+
+const SUBJECT_RECEIPT_TAIL: &str =
+    "SELECT COALESCE(MAX(store_index),0) FROM claims INDEXED BY claims_subject_kind_index
+     WHERE subject=?1 AND kind='harness.invocation'";
 
 impl Store {
     pub fn start_invocation_trace(&self, invocation: &str, agent: &str,
@@ -143,11 +174,28 @@ pub fn record_diagnostic_tx(tx: &Transaction<'_>, origin: &str, diagnostic: &Cla
 
 impl Store {
     pub fn invocation_receipts(&self, invocation_id: &str) -> Result<Vec<InvocationReceipt>> {
-        self.read_invocation_receipts(None, Some(invocation_id))
+        // Invocation-only diagnostic and shell-resource callers have no subject boundary.
+        // Do not use this global reader from member reconciliation.
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(
+            /* sqlite-large-value: allow-for-now lv-h7e35d2346b62 owner=fractal_store::store::invocation_receipts TODO=trace-statement-and-value-representation */
+            GLOBAL_RECEIPTS)?;
+        statement.query_map([invocation_id], |row| row.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
     pub fn agent_invocation_receipts(&self, agent: &str) -> Result<Vec<InvocationReceipt>> {
-        self.read_invocation_receipts(Some(agent), None)
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(
+            /* sqlite-large-value: allow-for-now lv-hb66150fef30d owner=fractal_store::store::invocation_receipts TODO=trace-statement-and-value-representation */
+            SUBJECT_RECEIPTS)?;
+        statement.query_map([agent], |row| row.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn take_invocation_receipt_read_work(&self) -> (u64, u64) {
+        std::mem::take(&mut *self.extension::<ReceiptReadWork>().0.lock().unwrap())
     }
 
     /// Return only the original admitted launch member, never the current declaration.
@@ -158,14 +206,10 @@ impl Store {
             |row| row.get::<_, Option<String>>(0)).optional()?.flatten();
         member.map(|member| serde_json::from_str(&member).map_err(Into::into)).transpose()
     }
-    fn read_invocation_receipts(&self, agent: Option<&str>, invocation_id: Option<&str>) -> Result<Vec<InvocationReceipt>> {
-        let connection = self.readers.get();
-        let mut statement = connection.prepare(
-            "SELECT json_extract(body,'$.fields') FROM claims WHERE kind='harness.invocation'
-             AND (?1 IS NULL OR subject=?1) AND (?2 IS NULL OR json_extract(body,'$.fields.invocation_id')=?2)
-             ORDER BY store_index")?;
-        statement.query_map(params![agent, invocation_id], |row| row.get::<_, String>(0))?
-            .map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    /// An invocation lookup on a hot member path must retain its subject boundary.
+    pub fn agent_invocation_receipts_for(&self, agent: &str, invocation_id: &str) -> Result<Vec<InvocationReceipt>> {
+        Ok(self.agent_invocation_receipts(agent)?.into_iter()
+            .filter(|receipt| receipt.invocation_id == invocation_id).collect())
     }
 
     /// Capture launch inputs before entering the native backend, including launches that fail.
@@ -196,48 +240,163 @@ impl Store {
         if let Some(binding) = artifact.binding_claim.as_ref() {
             observed.evidence.push(binding.clone());
         }
-        self.connection.batched(|tx| append_receipt_tx(tx, self.origin(), &observed))
-            .map_err(|error| anyhow::anyhow!("{error}"))??;
+        let (before, after) = self.connection.batched(|tx| -> Result<(i64, i64)> {
+            let before = tx.query_row(
+                /* sqlite-large-value: allow-for-now lv-h81380f50f059 owner=fractal_store::store::invocation_receipts TODO=trace-statement-and-value-representation */
+                SUBJECT_RECEIPT_TAIL, [&receipt.agent], |row| row.get(0))?;
+            append_receipt_tx(tx, self.origin(), &observed)?;
+            let after = tx.query_row(
+                /* sqlite-large-value: allow-for-now lv-h6993ac71c110 owner=fractal_store::store::invocation_receipts TODO=trace-statement-and-value-representation */
+                SUBJECT_RECEIPT_TAIL, [&receipt.agent], |row| row.get(0))?;
+            Ok((before, after))
+        }).map_err(|error| anyhow::anyhow!("{error}"))??;
+        if before != after
+            && let Some(ended) = self.extension::<RuntimeEnds>().0.lock().unwrap_or_else(PoisonError::into_inner)
+                .get_mut(&receipt.agent).filter(|ended| ended.tail == before)
+        {
+            Arc::make_mut(&mut ended.invocations).insert(observed.invocation_id.clone(), observed);
+            ended.tail = after;
+        }
         Ok(())
     }
     /// A terminal runtime observation may close only an already verified exact incarnation.
     /// The source observation can be local; the resulting receipt remains durable.
     pub fn record_invocation_runtime_end(&self, observation: &ClaimRecord) -> Result<()> {
+        self.invocations_for_runtime_end(observation).map(|_| ())
+    }
+
+    /// Record the end and reuse the same immutable fold for transcript retention.
+    pub fn invocations_for_runtime_end(&self, observation: &ClaimRecord) -> Result<Option<EndInvocations>> {
         let fields = &observation.body["fields"];
         if observation.kind != "runtime.observed"
             || !matches!(fields["status"].as_str(), Some("exited" | "stopped" | "vanished"))
         {
-            return Ok(());
+            return Ok(None);
         }
-        let Some(incarnation) = fields["incarnation_id"].as_str() else { return Ok(()); };
+        let Some(incarnation) = fields["incarnation_id"].as_str() else { return Ok(None); };
+        let connection = self.readers.get();
+        let snapshot = connection.unchecked_transaction()?;
+        let tail: i64 = snapshot.query_row(
+            /* sqlite-large-value: allow-for-now lv-h5db7679ab341 owner=fractal_store::store::invocation_receipts TODO=trace-statement-and-value-representation */
+            SUBJECT_RECEIPT_TAIL, [&observation.subject], |row| row.get(0))?;
+        let state = self.extension::<RuntimeEnds>();
+        if let Some(ended) = state.0.lock().unwrap_or_else(PoisonError::into_inner)
+            .get(&observation.subject)
+            && ended.observation == observation.id && ended.tail == tail
+        {
+            return Ok(Some(Arc::clone(&ended.invocations)));
+        }
+        let mut statement = snapshot.prepare(
+            /* sqlite-large-value: allow-for-now lv-h5eddbfd87f42 owner=fractal_store::store::invocation_receipts TODO=trace-statement-and-value-representation */
+            SUBJECT_RECEIPTS)?;
         let mut invocations = BTreeMap::new();
-        for receipt in self.agent_invocation_receipts(&observation.subject)? {
+        #[cfg(any(test, feature = "test-support"))]
+        let mut rows_read = 0;
+        for row in statement.query_map([&observation.subject], |row| row.get::<_, String>(0))? {
+            #[cfg(any(test, feature = "test-support"))]
+            { rows_read += 1; }
+            let receipt: InvocationReceipt = serde_json::from_str(&row?)?;
             if receipt.incarnation.as_deref() == Some(incarnation) {
                 invocations.insert(receipt.invocation_id.clone(), receipt);
             }
         }
-        self.connection.batched(|tx| -> Result<()> {
-            for receipt in invocations.values() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let work = self.extension::<ReceiptReadWork>();
+            let mut work = work.0.lock().unwrap();
+            work.0 += rows_read;
+            work.1 += u64::try_from(statement.get_status(rusqlite::StatementStatus::VmStep)).unwrap();
+        }
+        drop(statement);
+        snapshot.commit()?;
+        let (unchanged, ended_tail) = self.connection.batched(|tx| -> Result<(bool, i64)> {
+            let before: i64 = tx.query_row(
+                /* sqlite-large-value: allow-for-now lv-hd68f5de54218 owner=fractal_store::store::invocation_receipts TODO=trace-statement-and-value-representation */
+                SUBJECT_RECEIPT_TAIL, [&observation.subject], |row| row.get(0))?;
+            for receipt in invocations.values_mut() {
                 let mut ended = receipt.clone();
                 ended.phase = InvocationPhase::Ended;
                 ended.event_key = Some(observation.id.clone());
                 ended.evidence.push(observation.id.clone());
                 append_receipt_tx(tx, self.origin(), &ended)?;
+                *receipt = ended;
             }
-            Ok(())
+            let after = tx.query_row(
+                /* sqlite-large-value: allow-for-now lv-h8b905c70ad16 owner=fractal_store::store::invocation_receipts TODO=trace-statement-and-value-representation */
+                SUBJECT_RECEIPT_TAIL, [&observation.subject], |row| row.get(0))?;
+            Ok((before == tail, after))
         }).map_err(|error| anyhow::anyhow!("{error}"))??;
         let failed = fields["status"] == "vanished"
             || fields["exit_code"].as_i64().is_some_and(|code| code != 0);
         for invocation in invocations.keys() {
             self.finish_invocation_trace(invocation, failed);
         }
-        Ok(())
+        let invocations = Arc::new(invocations);
+        if unchanged {
+            state.0.lock().unwrap_or_else(PoisonError::into_inner)
+                .insert(observation.subject.clone(), RuntimeEnd {
+                    observation: observation.id.clone(), tail: ended_tail, invocations: Arc::clone(&invocations),
+                });
+        }
+        Ok(Some(invocations))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_receipt_reads_are_subject_indexed_and_unchanged_observations_do_not_reconstruct() {
+        let store = Store::open_memory("node").unwrap();
+        let agent = "agent/example/0";
+        store.connection.batched(|tx| -> Result<()> {
+            for subject in 0..256 {
+                for invocation in 0..4 {
+                    let receipt = native_receipt(&format!("{subject}/{invocation}"),
+                        &format!("agent/example/{subject}"), &prepared(), InvocationPhase::Started,
+                        Some(&json!({"verification":"operation-incarnation","incarnation":"exact"})))?.unwrap();
+                    append_receipt_tx(tx, store.origin(), &receipt)?;
+                }
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        let connection = store.readers.get();
+        let explain = format!("EXPLAIN QUERY PLAN {SUBJECT_RECEIPTS}");
+        let mut plan = connection.prepare(&explain).unwrap();
+        let plan = plan.query_map([agent], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("\n");
+        assert!(plan.contains("SEARCH claims USING INDEX claims_subject_kind_index"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        let legacy_sql = "SELECT json_extract(body,'$.fields') FROM claims WHERE kind='harness.invocation'
+            AND (?1 IS NULL OR subject=?1) AND (?2 IS NULL OR json_extract(body,'$.fields.invocation_id')=?2)
+            ORDER BY store_index";
+        let mut legacy = connection.prepare(legacy_sql).unwrap();
+        assert_eq!(legacy.query_map(params![agent, Option::<&str>::None], |row| row.get::<_, String>(0))
+            .unwrap().count(), 4);
+        let legacy_vm = u64::try_from(legacy.get_status(rusqlite::StatementStatus::VmStep)).unwrap();
+        let observation = store.append_claim(&ClaimInput { subject: agent.into(),
+            kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"stopped","incarnation_id":"exact"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None }).unwrap();
+        let first = store.invocations_for_runtime_end(&observation).unwrap().unwrap();
+        assert_eq!(first.len(), 4);
+        let (rows, vm) = store.take_invocation_receipt_read_work();
+        assert_eq!(rows, 4, "only the stopped member's receipts are reconstructed");
+        assert!(vm * 32 < legacy_vm, "indexed={vm}; legacy={legacy_vm}");
+        for _ in 0..3 {
+            assert!(Arc::ptr_eq(&first, &store.invocations_for_runtime_end(&observation).unwrap().unwrap()));
+        }
+        assert_eq!(store.take_invocation_receipt_read_work(), (0, 0));
+        eprintln!("receipt reconstruction: legacy three folds={} VM steps; first fold={vm} VM steps/{rows} rows; unchanged pass=0 VM steps/0 rows", legacy_vm * 3);
+        let late = native_receipt("late", agent, &prepared(), InvocationPhase::Started,
+            Some(&json!({"verification":"operation-incarnation","incarnation":"exact"}))).unwrap().unwrap();
+        store.connection.batched(|tx| append_receipt_tx(tx, store.origin(), &late)).unwrap().unwrap();
+        assert_eq!(store.invocations_for_runtime_end(&observation).unwrap().unwrap().len(), 5);
+        assert_eq!(store.take_invocation_receipt_read_work().0, 9);
+        store.record_invocation_runtime_end(&observation).unwrap();
+        assert_eq!(store.take_invocation_receipt_read_work(), (0, 0));
+    }
 
     fn prepared() -> Value { json!({"subject":{"kind":"agent","owner_run":"run-a","owner_step":"step-run/a/build"},
         "launch_member":{"driver":"omp","environment":{"ST_ATTEMPT":"3"}},"selected_token":"desired-a"}) }

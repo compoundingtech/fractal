@@ -145,7 +145,7 @@ enum OriginLabel {
 impl Origin {
     pub(crate) fn other() -> Self { Self(OriginLabel::Static(&TASK_ORIGINS[0])) }
 
-    fn attribute(&self, key: &'static str) -> KeyValue {
+    pub(crate) fn attribute(&self, key: &'static str) -> KeyValue {
         match &self.0 {
             OriginLabel::Static(label) => KeyValue::new(key, **label),
             OriginLabel::Route(label) => KeyValue::new(key, label.to_string()),
@@ -191,10 +191,13 @@ pub(crate) fn enter_task_origin(label: &'static str) -> Option<OriginScope> {
     enter_origin(Some(task_origin(label)))
 }
 
-pub(crate) fn current_origin() -> Option<Origin> {
-    Some(ORIGIN.with(|slot| slot.borrow().clone())
+pub(crate) fn scoped_origin() -> Option<Origin> {
+    ORIGIN.with(|slot| slot.borrow().clone())
         .or_else(|| REQUEST.with(|slot| slot.borrow().as_ref().and_then(|request| request.origin.clone())))
-        .unwrap_or_else(Origin::other))
+}
+
+pub(crate) fn current_origin() -> Option<Origin> {
+    Some(scoped_origin().unwrap_or_else(Origin::other))
 }
 
 impl Drop for OriginScope {
@@ -448,6 +451,7 @@ pub(super) struct Instruments {
     pub worker_wait: Histogram<f64>,
     pub abandoned_callback_starts: Counter<u64>,
     deferred: Counter<u64>,
+    pub read_loan_duration: Counter<f64>,
 }
 
 fn duration(meter: &Meter, name: &'static str) -> Histogram<f64> {
@@ -499,6 +503,7 @@ impl Instruments {
             abandoned_callback_starts: meter.u64_counter("st.write_workers.abandoned_callback_starts").with_unit("{job}").build(),
             deferred: meter.u64_counter("st.db.wal.checkpoint.deferred")
                 .with_unit("{attempt}").build(),
+            read_loan_duration: meter.f64_counter("st.db.read_loan.duration").with_unit("s").build(),
         }
     }
 }
@@ -914,6 +919,37 @@ mod tests {
             });
         }
         assert_eq!(task_origin("unknown").attribute("origin").value, opentelemetry::Value::from("other"));
+    }
+
+    #[test]
+    fn cancelled_read_publishes_duration_with_captured_origin() {
+        if isolated("cancelled_read_publishes_duration_with_captured_origin") { return; }
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let mut read = Box::pin(async {
+            let _scope = enter_task_origin("reconcile");
+            let _loan = super::super::read_lifetime::register_in_pool(1, false, None);
+            std::future::pending::<()>().await;
+        });
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(read.as_mut(), &mut cx).is_pending());
+        drop(read);
+        assert!(scoped_origin().is_none());
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        let sum = exported.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "st.db.read_loan.duration")
+            .and_then(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Sum(sum)) => Some(sum),
+                _ => None,
+            }).expect("cancelled read must publish its completed loan cost");
+        let points = sum.data_points().collect::<Vec<_>>();
+        assert_eq!(points.len(), 1);
+        assert!(points[0].value() > 0.0);
+        assert!(points[0].attributes().any(|attribute| attribute == &KeyValue::new("origin", "reconcile")));
     }
 
     // Global instruments initialize once. A separate test process keeps provider ordering

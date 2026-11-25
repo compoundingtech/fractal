@@ -2216,23 +2216,34 @@ async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
         .unwrap();
     for (name, mode) in [("birch", "listening"), ("cedar", "dial-out")] {
         let key = MemberKey::generate().unwrap().0;
-        state
-            .store
-            .append_claim(&ClaimInput {
-                subject: format!("host/{name}"),
-                kind: "fleet.member-admitted".into(),
-                actor: None,
-                fields: serde_json::from_value(json!({
-                    "fleet_id": fleet, "member_key": key.public(), "via": "invite",
-                    "mode": mode, "sponsor": "host/node"
-                }))
-                .unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+        let invite = state.store.create_fleet_invite(
+            Some(name), Duration::from_secs(60), &["loopback".into()],
+            "person/example", false,
+        ).unwrap();
+        let code = smallclaims::fleet::code::JoinCode {
+            fleet_id: fleet.parse().unwrap(),
+            invite: hex::decode(&invite.invite).unwrap().try_into().unwrap(),
+            token: invite.token,
+            fingerprint: [0; 16],
+            expires_at: invite.expires_at_unix_ms / 1000,
+            name: Some(name.into()),
+            migrate: false,
+            endpoints: Vec::new(),
+            pairing: None,
+        };
+        let joiner = smallclaims::fleet::handshake::Joiner::start(
+            &code, &key, name, mode, None, "test-build",
+        ).unwrap();
+        assert!(matches!(
+            state.store.redeem_fleet_invite(joiner.request()).unwrap(),
+            smallclaims::store::FleetRedemption::Admitted { .. }
+        ));
+        state.store.seal_local_batches().unwrap();
+        assert!(state.store.fleet_view_sealed().unwrap().members.iter()
+            .any(|member| member.name == name && member.state == "current"
+                && member.member_key == key.public()));
     }
+    state.store.record_replication_worker_heartbeat();
     // Both exchange with this daemon, then cedar's last exchange is aged a day.
     for peer in ["birch", "cedar"] {
         let source = smallclaims::store::Store::open_memory(
@@ -2241,9 +2252,13 @@ async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
         )
         .unwrap();
         let summary = source.export_replication_summary(fleet).unwrap();
+        let member_key = state.store.fleet_view_sealed().unwrap().members.into_iter()
+            .find(|member| member.name == peer && member.state == "current").unwrap().member_key;
         state
             .store
-            .receive_replication_exchange(peer, fleet, &summary)
+            .receive_replication_exchange_via(
+                peer, fleet, &summary, false, Default::default(), Some(&member_key),
+            )
             .unwrap();
     }
     state.store.age_replication_peer_for_test("cedar");

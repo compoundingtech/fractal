@@ -81,7 +81,7 @@ async fn has_run_on(client: &Client) -> Result<bool> {
         // An older daemon without the overview route cannot say, and guessing "never" would
         // start a second onboarding on an install that already finished one.
         Err(error) if fractal_daemon::client::is_missing_route(&error) => Err(error.context(
-            "the running daemon is older than this st and cannot say whether onboarding already ran; restart it, or run fractal setup --onboarding to begin explicitly",
+            "the running daemon is older than this fractal and cannot say whether onboarding already ran; restart it, or run fractal setup --onboarding to begin explicitly",
         )),
         Err(error) => Err(error),
     }

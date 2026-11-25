@@ -184,10 +184,15 @@ mod tests {
         runtime(&state, "native-one");
         assert!(busy(&state), "a running seat with no observation is not quiet");
         for (sequence, status, working) in [(1, "ready", false), (2, "working", true), (3, "idle", false), (4, "blocked", false)] {
-            let (code, admitted) = post(&state, &event(sequence, status), SEAT).await;
+            let mut observation = event(sequence, status);
+            observation.claim.fields.insert("observed_at_ms".into(), json!(client_now_ms() as u64));
+            let (code, admitted) = post(&state, &observation, SEAT).await;
             assert_eq!(code, StatusCode::OK, "{admitted}");
             assert_eq!(busy(&state), working, "{status}");
         }
+        let (code, admitted) = post(&state, &event(5, "idle"), SEAT).await;
+        assert_eq!(code, StatusCode::OK, "{admitted}");
+        assert!(busy(&state), "quiet state without a source timestamp cannot prove fresh work-state evidence");
     }
 
     #[tokio::test]

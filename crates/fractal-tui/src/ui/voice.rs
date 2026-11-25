@@ -6,7 +6,7 @@ use super::{Ui, theme};
 use crate::voice::{self, Event, Listening};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 use fractal_conversation_ui::text as wrap;
 
 /// What becomes of the words once the helper has them all.
@@ -263,8 +263,8 @@ impl Ui {
         let mut words = wrap::wrap(
             &heard,
             width.saturating_sub(1),
-            &[wrap::run("› ", theme::strong(theme::ACCENT))],
-            &[wrap::run("  ", theme::dim())],
+            &[wrap::decoration("› ", theme::strong(theme::ACCENT))],
+            &[wrap::decoration("  ", theme::dim())],
             None,
         );
         let excess = words.len().saturating_sub(6);
@@ -273,7 +273,7 @@ impl Ui {
         lines.push(Line::from(Span::styled(
             "  enter send · tab edit first · esc drop",
             theme::dim(),
-        )));
+        )).decoration());
         lines
     }
 }

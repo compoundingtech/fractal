@@ -1,8 +1,6 @@
-//! A node trims its own verified checkpoint from its staged plan, a page at a time, and adopts a
-//! manifest instead when its plan no longer matches the certificate.
+//! A node trims its own cut from its staged plan, a page at a time.
 use super::*;
 use crate::store::checkpoint::{DropPlan, SealedSet, claim_tombstone, drop_digest, retained_digest, sealed_digest};
-use crate::store::checkpoint_agreement::CHECKPOINT_VERIFIED;
 use crate::store::runtime::{IncrementalProjection, LegacyDigestTable, Plain};
 use crate::store::checkpoint::{DropCount, EnvelopeTombstone};
 use crate::store::checkpoint_staging::StagedPlanner;
@@ -122,20 +120,12 @@ impl Runtime for CaptureRuntime {
         Ok(())
     }
 
-    fn clear_checkpoint_projections(&self, tx: &Transaction<'_>) -> Result<()> {
-        Plain.clear_checkpoint_projections(tx)
-    }
-
-    fn replay_checkpoint_projections(&self, tx: &Transaction<'_>) -> Result<()> {
-        Plain.replay_checkpoint_projections(tx)
-    }
-
     fn checkpoint_subject_answers(&self, connection: &Connection, subject: &str, cut: u128) -> Result<Value> {
         Plain.checkpoint_subject_answers(connection, subject, cut)
     }
 }
 
-fn exercise(certified: bool, fault: Option<TrimFault>) {
+fn exercise(fault: Option<TrimFault>) {
     let runtime = Arc::new(CaptureRuntime::default());
     let store = Store::open_memory("alder", runtime.clone()).unwrap();
     for bytes in [1024, 4096, 16384] {
@@ -154,77 +144,52 @@ fn exercise(certified: bool, fault: Option<TrimFault>) {
     let checkpoint = checkpoint_name(cut);
     let staged = store.checkpoint_staged_set(cut, None, scratch.path()).unwrap();
     let plan = store.plan_staged_checkpoint(&staged).unwrap();
-    let seal_rowid = staged.seal_rowid;
     let mut expected_claims = staged.dropped_claims(0, 16).unwrap();
     expected_claims.sort_by(|left, right| left.id.cmp(&right.id));
     let staging_file = staged.path.clone();
     drop(staged);
-    store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-he57c3e1c3fb2 owner=smallclaims::store::checkpoint_trim::capture_lifetime_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, seal_rowid, updated_at_unix_ms)
-         VALUES (?1, ?2, 'verified', ?3, ?2)",
-        params![checkpoint, i64::try_from(cut).unwrap(), seal_rowid],
-    ).unwrap();
-    let drop = if certified { plan.drop_digest.clone() } else { "uncertified-plan".into() };
-    let certificate = CheckpointClaim {
-        id: "verification/alder".into(), kind: CHECKPOINT_VERIFIED.into(),
-        subject: checkpoint.clone(), writer: "alder".into(), actor: None,
-        fields: json!({
-            "cut_unix_ms": u64::try_from(cut).unwrap(), "participants": ["alder"],
-            "sealed_digest": plan.sealed_digest, "rules_digest": plan.rules_digest,
-            "drop_digest": drop, "retained_digest": plan.retained_digest,
-            "graph_digest": "graph", "reader_digest": "reader"
-        }).as_object().unwrap().clone(),
-    };
     store.set_trim_chunk_envelopes(1);
     store.set_trim_pause(std::time::Duration::ZERO);
     let interrupt = fault == Some(TrimFault::AfterChunk(1));
     store.set_trim_fault(fault);
     let graph_before = graph_digest(&store.readers.get()).unwrap();
     let mut actions = Vec::new();
-    let result = store.apply_stable_checkpoints(&[certificate], scratch.path(), &mut actions);
-    if !certified {
-        assert_eq!(result.unwrap().unwrap().drop_digest, "uncertified-plan");
-        assert_eq!(local_checkpoint(&store.readers.get(), &checkpoint).unwrap().unwrap().0, "plan-changed");
-        assert_eq!(store.claims_for("note/lifetime", None).unwrap().len(), 3);
+    // The staged capture is resumed where it was, with the plan it holds.
+    let staged = store.checkpoint_staged_set(cut, None, scratch.path()).unwrap();
+    assert_eq!(staged.path, staging_file);
+    let resumed = store.plan_staged_checkpoint(&staged).unwrap();
+    assert_eq!(resumed.drop_digest, plan.drop_digest);
+    let result = store.trim_staged_checkpoint(&checkpoint, &staged, &resumed, &mut actions);
+    if interrupt {
+        assert!(result.unwrap_err().to_string().contains("AfterChunk(1)"));
+        assert_eq!(store.claims_for("note/lifetime", None).unwrap().len(), 2);
+        store.finish_trim(&checkpoint, &mut actions).unwrap();
     } else {
-        if interrupt {
-            assert!(result.unwrap_err().to_string().contains("AfterChunk(1)"));
-            assert_eq!(store.claims_for("note/lifetime", None).unwrap().len(), 2);
-            store.finish_trim(&checkpoint, &mut actions).unwrap();
-        } else {
-            assert!(result.unwrap().is_none());
-        }
-        assert_eq!(local_checkpoint(&store.readers.get(), &checkpoint).unwrap().unwrap().0, "trimmed");
-        assert!(store.claims_for("note/lifetime", None).unwrap().is_empty());
-        assert!(matches!(actions.last(), Some(CheckpointAction::Trimmed { .. })));
-        assert_eq!(graph_digest(&store.readers.get()).unwrap(), graph_before);
-        let manifest = store.checkpoint_manifest(&checkpoint, cut).unwrap();
-        assert_eq!(manifest.claims, expected_claims);
-        assert_eq!(drop_digest(&manifest.envelopes, &manifest.claims), plan.drop_digest);
-        assert!(runtime.stage_checks.load(Ordering::Relaxed) >= 2);
+        result.unwrap();
     }
-    // The trim reused the staged plan where it was, then removed it.
-    if !interrupt {
-        assert!(!staging_file.exists(), "the staged capture outlived its trim");
-    }
+    staged.remove().unwrap();
+    assert_eq!(local_checkpoint(&store.readers.get(), &checkpoint).unwrap().unwrap().0, "trimmed");
+    assert!(store.claims_for("note/lifetime", None).unwrap().is_empty());
+    assert!(matches!(actions.last(), Some(CheckpointAction::Trimmed { .. })));
+    assert_eq!(graph_digest(&store.readers.get()).unwrap(), graph_before);
+    let manifest = store.checkpoint_manifest(&checkpoint, cut).unwrap();
+    assert_eq!(manifest.claims, expected_claims);
+    assert_eq!(drop_digest(&manifest.envelopes, &manifest.claims), plan.drop_digest);
+    assert!(runtime.stage_checks.load(Ordering::Relaxed) >= 2);
+    assert!(!staging_file.exists(), "the staged capture outlived its trim");
 }
 
 #[test]
 fn own_plan_trims_from_its_staged_plan_through_a_trim_error() {
-    exercise(true, Some(TrimFault::AfterChunk(1)));
+    exercise(Some(TrimFault::AfterChunk(1)));
 }
 
 #[test]
 fn own_plan_trims_from_its_staged_plan() {
-    exercise(true, None);
-}
-
-#[test]
-fn an_uncertified_staged_plan_leaves_claims_for_manifest_adoption() {
-    exercise(false, None);
+    exercise(None);
 }
 
 #[test]
 fn an_expired_initial_budget_still_deletes_every_tombstoned_row() {
-    exercise(true, Some(TrimFault::ExpireChunkBudget));
+    exercise(Some(TrimFault::ExpireChunkBudget));
 }

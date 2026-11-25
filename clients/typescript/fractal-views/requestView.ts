@@ -106,7 +106,7 @@ function optionalText(value: unknown): string | undefined {
   return option?._tag === 'Some' && typeof option.value === 'string' ? option.value || undefined : undefined;
 }
 
-/** When an ask resolves by itself and what then applies, as stui words it: `answer within 3h,
+/** When an ask resolves by itself and what then applies, as Fractal TUI words it: `answer within 3h,
  * or “Keep it open” applies`, or `answer within 3h, or it times out`. Null without a deadline. */
 export function askDeadline(
   item: { deadline_at?: string | null; default_answer?: { label: string } | null },

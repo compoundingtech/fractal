@@ -2,7 +2,7 @@
 // Source: objectives.kdl.genie.ts
 version 2
 objective "person-read" {
-  about "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents"
+  about "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents; 5% slow-event allowance at 300ms, local and remote separately; p99 remains the aspiration"
   indicator "latency" {
     path "GET /v1/client/agents"
     path "GET /v1/client/agents/{*id}"
@@ -45,7 +45,7 @@ objective "person-read-fresh" {
   }
 }
 objective "projection-fresh" {
-  about "From a commit to the published missions, agents or attention view that carries it, timed by each refresher; refreshers fold at most once a second"
+  about "From a commit to the published missions, agents or attention view that carries it, timed by each refresher; 5% slow-publication allowance at 1500ms; p99 remains the aspiration"
   indicator "latency" {
     path "publish missions"
     path "publish agents"
@@ -58,7 +58,7 @@ objective "projection-fresh" {
   }
 }
 objective "write-ack" {
-  about "Writes and acks: send, work actions, harness events"
+  about "Writes and acks: send, work actions, harness events; 5% slow-event allowance at 300ms; p99 remains the aspiration"
   indicator "latency" {
     path "POST /v1/messages"
     path "POST /v1/client/actions"
@@ -99,7 +99,7 @@ objective "sql-statement" {
   target "max" within="100ms"
 }
 objective "transaction" {
-  about "Any transaction, read or write, and any hold of the store's writer"
+  about "Read transactions, write transactions and holds of the store's writer: independent 1% slow-event allowances at 300ms; max remains diagnostic"
   indicator "transaction"
   target "max" within="300ms"
   budget allowance=0.01 horizon="30d" min-coverage=0.9 min-samples=1 {
@@ -176,7 +176,7 @@ objective "projection-divergence" {
   target "open" max=0
 }
 objective "database" {
-  about "This member's store: the pages in use, and how much they grow a day once checkpoints and retention have run"
+  about "This member's store: live pages at most 8GB and growth at most 300MB/day; 5% bad covered capacity-hours, sampled hourly with finite coverage"
   indicator "database"
   target "live-gb" max=8
   target "growth-mb-per-day" max=300

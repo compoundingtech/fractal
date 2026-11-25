@@ -18,10 +18,19 @@ mod isolate;
 mod lane;
 mod priority;
 mod peer_process;
+pub mod native_attach;
 mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+pub mod store_worktree_lease;
+mod resource_profile;
+pub mod resource_pressure;
+pub mod resource_class;
+pub mod resource_readiness;
+pub use resource_profile::{
+    ResourceLearningCoverage, ResourceProfileEstimate, ResourceProfileSamples, ResourceProfileSeed, validate_profile_key,
+};
 pub mod transcript;
 #[cfg(test)]
 mod test_executable;
@@ -33,6 +42,7 @@ mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]
 mod pty_launch_environment;
 
+pub mod payload_receipt;
 pub use environment::{
     ShellStartupTimeout, expand_path_placeholder, is_shell_startup_timeout, login_environment,
     login_environment_from, login_environment_within, materialize_environment, overlay_environment,
@@ -43,6 +53,7 @@ pub use isolate::{
     initialize_isolation, mode as isolation_mode, scope_unit, signal_scope, systemd_user_available,
     warn_if_degraded, wrap as wrap_isolated,
 };
+pub use isolate::darwin_slot;
 pub use priority::{
     BACKGROUND_IO_LEVEL, BACKGROUND_NICE, LIVE_WEIGHT, PRIORITY_ENV, SeatPriority, ServerPlacement,
     protect_server, protect_servers, report as priority_report, server_unit,
@@ -52,7 +63,7 @@ pub use host::installed_memory_bytes;
 pub use lane::{
     DiskRequest, IoClass, ParseMemoryError, RequestClass,
     CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, Raise, end as end_lane, resize as resize_lane, held_memory as lane_held_memory, live as live_lane, enforced as lanes_enforced,
-    parse_memory as parse_lane_memory, sccache_socket as lane_sccache_socket, seat_slice,
+    parse_memory as parse_lane_memory, sccache_socket as lane_sccache_socket, seat_slice, in_member, MemberContainment,
     show_memory as show_lane_memory,
     set_enforced as set_lanes_enforced,
 };
@@ -61,7 +72,7 @@ pub use peer_process::PeerProcessIdentity;
 pub use peer_process::{macos_process_identity, macos_process_owner};
 pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token, process_generation_alive,
-    FiniteLane, FiniteExecutionAuthorization, ResourceCoverage, ResourceExecutionBinding, UnsupportedCoverage,
+    FiniteLane, FiniteExecutionAuthorization, ResourceCoverage, ResourceExecutionBinding, UnsupportedCoverage, MemberScope,
 };
 pub use procfs::ProcessNamespaceMismatch;
 pub use pty::{
@@ -69,6 +80,10 @@ pub use pty::{
     ProcfsHidesProcesses, PtyExitEvidence, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout,
     PtySpawnTimeoutPhase, TerminalSize, mailbox_legacy_admissions_total,
 };
+
+/// Control-plane launch identity, never derived from a payload environment.
+#[derive(Clone, Debug)]
+pub struct LaunchOperation(pub String);
 
 #[cfg(test)]
 mod resource_profile_tests {

@@ -4,7 +4,7 @@
 //!
 //! Each step replays a gate that failed a run whose work was done: a cargo gate whose PATH lacked
 //! the linker (twice), a memory threshold that could never pass, a grep of a listing that showed
-//! only its first page, and a listing limit st refuses. A revision of only the gates then passes
+//! only its first page, and a listing limit fractal refuses. A revision of only the gates then passes
 //! every step.
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt as _;
@@ -1339,7 +1339,7 @@ mission "orchid/elsewhere" state="ready" {
     );
 
     // A gate that reads an input runs with the value given, and is unchecked without one. A
-    // built-in gate runs its `st gate` command; this host has no GitHub token, so it is broken.
+    // built-in gate runs its `fractal gate` command; this host has no GitHub token, so it is broken.
     let inputs = root.path().join("inputs.kdl");
     std::fs::write(
         &inputs,
@@ -1707,6 +1707,30 @@ mission "supersession" state="ready" timeout="5m" {
 }"#;
 
 #[test]
+fn explicit_cli_revision_pin_survives_a_new_head_publication() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let fixture = SupersessionFixture::new();
+    let publication = fixture.publish(&supersession_parked_source("", "touch broken-ran; exit 1"), "old");
+    let revision = publication["published_missions"][0]["revision"].as_str().unwrap();
+    let started = fixture.daemon.command(&[
+        "missions", "start", "supersession", "--revision", revision,
+        "--id", "pinned", "--workspace", fixture.root.path().to_str().unwrap(),
+        "--as", PUBLISHER,
+    ]);
+    let subject = started["mission_run"]["subject"].as_str().unwrap();
+    fixture.wait_for_review(subject);
+    fixture.publish(SUPERSESSION_FIXED, "fixed");
+    let retained = fixture.view(subject);
+    assert_eq!(retained["revision"], revision);
+    assert!(retained["superseded_by"].is_null(), "{retained}");
+    assert!(retained["supersession_fault"].is_null(), "{retained}");
+    assert!(!fixture.review(subject).is_null(), "{retained}");
+    assert!(!fixture.root.path().join("broken-ran").exists());
+}
+
+#[test]
 fn publishing_fixed_or_removed_steps_never_runs_the_parked_broken_step() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -1852,6 +1876,7 @@ mission "dependency" state="ready" {{
     fixture.publish(&format!(r#"version 2
 mission-run "dependent" {{
   mission "mission/supersession@{revision}"
+  follow-head "true"
   workspace {:?}
   requester "{PUBLISHER}"
   after {dependency_subject:?}

@@ -20,12 +20,25 @@ use std::{
 pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
 pub const CHUNK_BYTES: usize = 512 * 1024;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkspaceKind {
+    #[default]
+    Git,
+    NonGit,
+    LegacyUnknown,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Manifest {
     pub subject: String,
     pub suspend_operation: String,
     pub source_host: String,
     pub workspace: String,
+    #[serde(default = "git_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub workspace_kind: WorkspaceKind,
     pub head: String,
     pub branch: Option<String>,
     pub commit: String,
@@ -33,9 +46,105 @@ pub struct Manifest {
     pub harness: String,
     pub native_session_id: String,
     pub transcript: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<PathBuf>,
     pub transcript_sha256: String,
 }
 
+fn git_mode() -> String {
+    "git".into()
+}
+
+/// Non-Git workspaces remain in place for manual and idle suspension. Other Git
+/// snapshot limitations permit in-place capture only for idle operations.
+/// The on-disk kind survives a restart before the snapshot receipt is appended.
+pub fn capture(
+    state: &Path,
+    subject: &str,
+    member: &MemberSpec,
+    suspension: &Suspension,
+) -> Result<&'static str> {
+    let dir = directory(state, &suspension.operation_id);
+    if dir.join("in-place").is_file() {
+        let kind = in_place_kind(&dir)?;
+        anyhow::ensure!(
+            kind == WorkspaceKind::NonGit || suspension.cause() == "idle",
+            "in-place Git capture requires idle cause"
+        );
+        return Ok("in-place");
+    }
+    match workspace(state, subject, &suspension.operation_id, member) {
+        Ok(()) => Ok("git"),
+        Err(error) if code(&error) == "workspace-not-git"
+            || (suspension.cause() == "idle" && matches!(code(&error),
+                "workspace-unborn" | "workspace-not-root" | "workspace-submodule-unsupported")) =>
+        {
+            // A missing workspace is not a non-Git workspace.
+            anyhow::ensure!(Path::new(&member.workspace).is_dir(), "workspace directory is missing");
+            let kind = if code(&error) == "workspace-not-git" {
+                if workspace_kind(Path::new(&member.workspace))? != WorkspaceKind::NonGit {
+                    return Err(error);
+                }
+                WorkspaceKind::NonGit
+            } else {
+                WorkspaceKind::Git
+            };
+            fs::create_dir_all(&dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+            }
+            let mut marker = tempfile::NamedTempFile::new_in(&dir)?;
+            marker.write_all(&serde_json::to_vec(&kind)?)?;
+            marker.as_file().sync_all()?;
+            marker.persist(dir.join("in-place"))?;
+            Ok("in-place")
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn in_place_kind(dir: &Path) -> Result<WorkspaceKind> {
+    let bytes = fs::read(dir.join("in-place"))?;
+    // Historical idle captures wrote an empty marker.
+    if bytes.is_empty() {
+        Ok(WorkspaceKind::LegacyUnknown)
+    } else {
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+}
+
+fn workspace_kind(path: &Path) -> Result<WorkspaceKind> {
+    match git(path, &["rev-parse", "--git-dir"], None, None) {
+        Ok(_) => Ok(WorkspaceKind::Git),
+        Err(error) if code(&error) == "git-command-failed" => Ok(WorkspaceKind::NonGit),
+        Err(error) => Err(error),
+    }
+}
+
+/// Same-host Git resume historically needed only the native binding. Enforce kind
+/// equality when the capture actually recorded Git evidence, not merely because a
+/// historical suspension's missing mode defaults to Git.
+pub(crate) fn validate_git_workspace(state: &Path, operation: &str, path: &Path) -> Result<()> {
+    let bytes = match fs::read(directory(state, operation).join("workspace.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let snapshot: serde_json::Value = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        snapshot["head"].as_str().is_some_and(|head| !head.is_empty()),
+        "Git workspace snapshot has no recorded HEAD"
+    );
+    if workspace_kind(path)? != WorkspaceKind::Git {
+        return Err(refusal(
+            "workspace-kind-mismatch",
+            "the Git workspace became non-Git while suspended",
+        ));
+    }
+    Ok(())
+}
 fn refusal(code: &'static str, message: impl Into<String>) -> anyhow::Error {
     FractalError::new(code, message).into()
 }
@@ -192,6 +301,49 @@ pub fn workspace(state: &Path, subject: &str, operation: &str, member: &MemberSp
     Ok(())
 }
 
+const MAX_COMPANION_DEPTH: usize = 128;
+const MAX_COMPANION_ENTRIES: usize = 100_000;
+
+/// Bound companion content and traversal without following symlinks.
+fn account_companion_bytes(path: &Path, remaining: &mut u64) -> Result<()> {
+    let mut pending = vec![(path.to_path_buf(), 0usize)];
+    let mut entries = 1usize;
+    while let Some((directory, depth)) = pending.pop() {
+        if !fs::symlink_metadata(&directory)?.is_dir() {
+            continue;
+        }
+        // Finish this iterator before opening any descendant directory.
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entries == MAX_COMPANION_ENTRIES {
+                return Err(refusal("snapshot-entry-limit", "snapshot companion entry limit exceeded"));
+            }
+            entries += 1;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                if depth == MAX_COMPANION_DEPTH {
+                    return Err(refusal("snapshot-depth-limit", "snapshot companion depth limit exceeded"));
+                }
+                pending.push((entry.path(), depth + 1));
+            } else if kind.is_file() {
+                *remaining = remaining.checked_sub(entry.metadata()?.len()).ok_or_else(|| {
+                    refusal("snapshot-too-large", "snapshot content exceeds 256 MiB")
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Failed archive construction must not retain its staging file.
+struct PendingPayload<'a>(&'a Path);
+
+impl Drop for PendingPayload<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+    }
+}
+
 /// Freeze the native file after the stop fence. pi and omp have portable per-seat transcripts.
 pub fn seal(
     state: &Path,
@@ -240,38 +392,55 @@ pub fn seal(
                 "the suspended native transcript is missing",
             )
         })?;
-    if fs::metadata(&transcript)?.len() > MAX_BYTES
-        || fs::metadata(dir.join("workspace.bundle"))?.len() > MAX_BYTES
-    {
-        return Err(refusal(
-            "snapshot-too-large",
-            "snapshot content exceeds 256 MiB",
-        ));
+    let in_place = suspension.mode() == "in-place";
+    // Imported transcripts can be symlinks: bound their followed file, as before.
+    let transcript_bytes = fs::metadata(&transcript)?.len();
+    let bundle_bytes = if in_place {
+        0
+    } else {
+        fs::metadata(dir.join("workspace.bundle"))?.len()
+    };
+    let mut remaining = MAX_BYTES.checked_sub(transcript_bytes)
+        .and_then(|remaining| remaining.checked_sub(bundle_bytes))
+        .ok_or_else(|| refusal("snapshot-too-large", "snapshot content exceeds 256 MiB"))?;
+    let companion = transcript.with_extension("");
+    if companion.is_dir() {
+        account_companion_bytes(&companion, &mut remaining)?;
     }
     let filename = transcript
         .file_name()
         .context("transcript has no filename")?
         .to_string_lossy()
         .into_owned();
-    let workspace: serde_json::Value =
-        serde_json::from_slice(&fs::read(dir.join("workspace.json"))?)?;
+    let workspace: serde_json::Value = if in_place {
+        serde_json::json!({})
+    } else {
+        serde_json::from_slice(&fs::read(dir.join("workspace.json"))?)?
+    };
     let manifest = Manifest {
         subject: subject.into(),
         suspend_operation: operation.into(),
         source_host: member.host.clone(),
         workspace: member.workspace.clone(),
-        head: workspace["head"].as_str().unwrap().into(),
+        mode: suspension.mode().into(),
+        workspace_kind: if in_place { in_place_kind(&dir)? } else { WorkspaceKind::Git },
+        head: workspace["head"].as_str().unwrap_or_default().into(),
         branch: workspace["branch"].as_str().map(str::to_owned),
-        commit: workspace["commit"].as_str().unwrap().into(),
-        reference: workspace["reference"].as_str().unwrap().into(),
+        commit: workspace["commit"].as_str().unwrap_or_default().into(),
+        reference: workspace["reference"].as_str().unwrap_or_default().into(),
         harness: harness.into(),
         native_session_id: id.into(),
         transcript: filename.clone(),
+        transcript_path: in_place.then(|| transcript.clone()),
         transcript_sha256: hex::encode(Sha256::digest(fs::read(&transcript)?)),
     };
-    let mut archive = tar::Builder::new(fs::File::create(dir.join("payload.tmp"))?);
+    let pending = dir.join("payload.tmp");
+    let _cleanup = PendingPayload(&pending);
+    let mut archive = tar::Builder::new(fs::File::create(&pending)?);
     archive.follow_symlinks(false);
-    archive.append_path_with_name(dir.join("workspace.bundle"), "workspace.bundle")?;
+    if !in_place {
+        archive.append_path_with_name(dir.join("workspace.bundle"), "workspace.bundle")?;
+    }
     let bytes = serde_json::to_vec(&manifest)?;
     let mut header = tar::Header::new_gnu();
     header.set_size(bytes.len() as u64);
@@ -279,7 +448,6 @@ pub fn seal(
     header.set_cksum();
     archive.append_data(&mut header, "manifest.json", &bytes[..])?;
     archive.append_path_with_name(&transcript, Path::new("native").join(&filename))?;
-    let companion = transcript.with_extension("");
     if companion.is_dir() {
         archive.append_dir_all(
             Path::new("native").join(companion.file_name().unwrap()),
@@ -292,9 +460,9 @@ pub fn seal(
     if file.metadata()?.len() > MAX_BYTES {
         return Err(refusal("snapshot-too-large", "snapshot exceeds 256 MiB"));
     }
-    let digest = hex::encode(Sha256::digest(fs::read(dir.join("payload.tmp"))?));
+    let digest = hex::encode(Sha256::digest(fs::read(&pending)?));
     fs::write(dir.join("payload.sha256"), digest)?;
-    fs::rename(dir.join("payload.tmp"), dir.join("payload.tar"))?;
+    fs::rename(&pending, dir.join("payload.tar"))?;
     Ok(Some(manifest))
 }
 
@@ -360,8 +528,19 @@ pub fn restore(
         anyhow::ensure!(total <= MAX_BYTES, "snapshot exceeds its size bound");
         entry.unpack_in(staging.path())?;
     }
-    let manifest: Manifest =
-        serde_json::from_slice(&fs::read(staging.path().join("manifest.json"))?)?;
+    let manifest_bytes = fs::read(staging.path().join("manifest.json"))?;
+    let manifest_value: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+    let has_kind = manifest_value.get("workspace_kind").is_some();
+    let mut manifest: Manifest = serde_json::from_value(manifest_value)?;
+    // Historical in-place writers did not record kind, including Git limitations
+    // such as unborn repositories. Do not invent historical equality evidence.
+    if !has_kind && manifest.mode == "in-place" {
+        manifest.workspace_kind = WorkspaceKind::LegacyUnknown;
+    }
+    if manifest.mode == "in-place" && manifest.source_host != member.host {
+        return Err(refusal("snapshot-in-place", "an in-place suspension can only resume on its source host"));
+    }
+    anyhow::ensure!(matches!(manifest.mode.as_str(), "git" | "in-place"), "unknown snapshot mode");
     anyhow::ensure!(
         manifest.subject == subject
             && manifest.source_host == member.host
@@ -410,6 +589,32 @@ pub fn restore(
         ));
     }
     let workspace = Path::new(&member.workspace);
+    if manifest.mode == "in-place" {
+        if !workspace.is_dir() {
+            return Err(refusal("workspace-path-mismatch", "the in-place workspace is missing"));
+        }
+        if manifest.workspace_kind != WorkspaceKind::LegacyUnknown
+            && workspace_kind(workspace)? != manifest.workspace_kind
+        {
+            return Err(refusal(
+                "workspace-kind-mismatch",
+                "the workspace changed between Git and non-Git while suspended",
+            ));
+        }
+        // Resume the existing authoritative file, not an inventory-detached copy. Future
+        // ordinary restarts must see every post-resume turn through the same inventory.
+        let path = manifest.transcript_path.as_deref()
+            .filter(|path| path.is_absolute())
+            .context("in-place snapshot has no absolute native binding")?;
+        let current = fs::read(path).map_err(|_| refusal(
+            "transcript-missing", "the in-place native binding is missing",
+        ))?;
+        anyhow::ensure!(
+            hex::encode(Sha256::digest(&current)) == manifest.transcript_sha256,
+            "in-place transcript differs from its sealed content"
+        );
+        return Ok(manifest);
+    }
     if fs::symlink_metadata(workspace).is_ok() {
         return Err(refusal(
             "workspace-occupied",
@@ -522,6 +727,9 @@ pub async fn transfer(
     suspension: Suspension,
 ) -> Result<()> {
     use base64::Engine as _;
+    if suspension.mode() == "in-place" {
+        return Err(refusal("snapshot-in-place", "an in-place suspension cannot move to another host"));
+    }
     let operation = suspension
         .suspend_operation_id
         .as_deref()
@@ -669,6 +877,30 @@ pub async fn transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_resume_validates_captured_evidence_but_preserves_legacy_without_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, _, _) = fixture(root.path());
+        let state = root.path().join("state");
+        let source = Path::new(&member.workspace);
+        // Legacy native-only suspensions have no Git capture to compare against.
+        validate_git_workspace(&state, "legacy", source).unwrap();
+        validate_git_workspace(&state, "legacy", &root.path().join("absent")).unwrap();
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        validate_git_workspace(&state, "snapshot", source).unwrap();
+        fs::rename(source.join(".git"), root.path().join("saved-git")).unwrap();
+        assert_eq!(
+            code(&validate_git_workspace(&state, "snapshot", source).unwrap_err()),
+            "workspace-kind-mismatch"
+        );
+        validate_git_workspace(&state, "legacy", source).unwrap();
+        fs::rename(root.path().join("saved-git"), source.join(".git")).unwrap();
+        validate_git_workspace(&state, "snapshot", source).unwrap();
+        // Corrupt existing evidence is not mistaken for a legacy missing capture.
+        fs::write(directory(&state, "snapshot").join("workspace.json"), b"{}").unwrap();
+        assert!(validate_git_workspace(&state, "snapshot", source).is_err());
+    }
     fn member(path: &Path) -> MemberSpec {
         crate::parse_intent(&format!("version 2\nagent \"sample\" {{ host \"amber\"; workspace \"{}\"; harness \"omp\" {{}} }}", path.display()), "amber")
             .unwrap().subjects.into_values().find_map(|desired| desired.member).unwrap()
@@ -763,6 +995,87 @@ mod tests {
     }
 
     #[test]
+    fn oversized_companion_refuses_before_creating_a_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let companion = sessions(&state.join("drivers"), "agent/sample", "omp")
+            .join("time_native/nested");
+        fs::create_dir_all(&companion).unwrap();
+        for name in ["first", "second"] {
+            fs::File::create(companion.join(name)).unwrap()
+                .set_len(MAX_BYTES / 2).unwrap();
+        }
+        let error = seal(&state, &store, "agent/sample", &member, &suspension).unwrap_err();
+        assert_eq!(code(&error), "snapshot-too-large");
+        let dir = directory(&state, "snapshot");
+        assert!(!dir.join("payload.tmp").exists());
+        assert!(!dir.join("payload.tar").exists());
+        assert!(!dir.join("payload.sha256").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_symlinked_transcript_refuses_before_creating_a_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let transcript = sessions(&state.join("drivers"), "agent/sample", "omp")
+            .join("time_native.jsonl");
+        let imported = root.path().join("imported.jsonl");
+        fs::rename(&transcript, &imported).unwrap();
+        fs::OpenOptions::new().write(true).open(&imported).unwrap()
+            .set_len(MAX_BYTES + 1).unwrap();
+        std::os::unix::fs::symlink(&imported, &transcript).unwrap();
+        let error = seal(&state, &store, "agent/sample", &member, &suspension).unwrap_err();
+        assert_eq!(code(&error), "snapshot-too-large");
+        let dir = directory(&state, "snapshot");
+        assert!(!dir.join("payload.tmp").exists());
+        assert!(!dir.join("payload.tar").exists());
+    }
+
+    #[test]
+    fn deep_companion_is_accounted_iteratively_and_refuses_beyond_the_depth_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let companion = sessions(&state.join("drivers"), "agent/sample", "omp")
+            .join("time_native");
+        fs::create_dir(&companion).unwrap();
+        let mut leaf = companion.clone();
+        for _ in 0..MAX_COMPANION_DEPTH {
+            leaf.push("d");
+            fs::create_dir(&leaf).unwrap();
+        }
+        fs::write(leaf.join("content"), b"bounded").unwrap();
+        let mut remaining = MAX_BYTES;
+        account_companion_bytes(&companion, &mut remaining).unwrap();
+        assert_eq!(remaining, MAX_BYTES - 7);
+        fs::create_dir(leaf.join("too-deep")).unwrap();
+        let error = seal(&state, &store, "agent/sample", &member, &suspension).unwrap_err();
+        assert_eq!(code(&error), "snapshot-depth-limit");
+        let dir = directory(&state, "snapshot");
+        assert!(!dir.join("payload.tmp").exists());
+        assert!(!dir.join("payload.tar").exists());
+    }
+
+    #[test]
+    fn seal_removes_staging_when_digest_publication_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let dir = directory(&state, "snapshot");
+        fs::create_dir(dir.join("payload.sha256")).unwrap();
+        assert!(seal(&state, &store, "agent/sample", &member, &suspension).is_err());
+        assert!(!dir.join("payload.tmp").exists());
+        assert!(!dir.join("payload.tar").exists());
+    }
+
+    #[test]
     fn a_snapshot_preserves_the_source_index_and_restores_dirty_files_and_conversation() {
         let root = tempfile::tempdir().unwrap();
         let (member, suspension, store) = fixture(root.path());
@@ -785,6 +1098,10 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let payload_dir = directory(&root.path().join("state"), "snapshot");
+        assert!(payload_dir.join("payload.tar").is_file());
+        assert!(payload_dir.join("payload.sha256").is_file());
+        assert!(!payload_dir.join("payload.tmp").exists());
         assert_eq!(fs::read(source.join(".git/index")).unwrap(), index);
         assert_eq!(
             git(source, &["rev-parse", "HEAD"], None, None).unwrap(),
@@ -928,5 +1245,185 @@ mod tests {
             ),
             "workspace-not-git"
         );
+    }
+
+    #[test]
+    fn manual_non_git_and_idle_git_in_place_sessions_survive_restarts() {
+        for refusal_class in ["workspace-not-git", "workspace-unborn",
+            "workspace-not-root", "workspace-submodule-unsupported"] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut member, mut suspension, store) = fixture(root.path());
+            let native = "5f9a6e16-5e30-4bce-b327-9a8241321bd6";
+            suspension.native_session_id = Some(native.into());
+            let original = PathBuf::from(&member.workspace);
+            match refusal_class {
+                "workspace-not-git" => fs::remove_dir_all(original.join(".git")).unwrap(),
+                "workspace-unborn" => {
+                    fs::remove_dir_all(original.join(".git")).unwrap();
+                    git(&original, &["init", "-q"], None, None).unwrap();
+                }
+                "workspace-not-root" => {
+                    let nested = original.join("nested");
+                    fs::create_dir(&nested).unwrap();
+                    fs::write(nested.join("tracked"), "changed\n").unwrap();
+                    member.workspace = nested.to_string_lossy().into_owned();
+                }
+                _ => {
+                    let source = root.path().join("submodule-source");
+                    git(root.path(), &["clone", "-q", &original.to_string_lossy(), &source.to_string_lossy()], None, None).unwrap();
+                    git(&original, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &source.to_string_lossy(), "nested"], None, None).unwrap();
+                }
+            }
+            let transcript = sessions(&root.path().join("state/drivers"), "agent/sample", "omp")
+                .join(format!("2026-11-18_{native}.jsonl"));
+            fs::write(&transcript, format!("{}\n{}\n",
+                serde_json::json!({"type":"session", "id":native, "cwd":member.workspace}),
+                serde_json::json!({"role":"user", "content":"frozen"}))).unwrap();
+            let state = root.path().join("state");
+            // Manual non-Git requests preserve the session in place too. The other
+            // Git limitations remain idle-only.
+            if refusal_class == "workspace-not-git" {
+                assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "in-place");
+            } else {
+                assert_eq!(code(&capture(&state, "agent/sample", &member, &suspension).unwrap_err()), refusal_class);
+                suspension.cause = Some("idle".into());
+            }
+            assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "in-place");
+            // Reopening between capture and the receipt must retain the mode decision.
+            let mut reopened = suspension.clone();
+            assert_eq!(capture(&state, "agent/sample", &member, &reopened).unwrap(), "in-place");
+            reopened.mode = Some("in-place".into());
+            let manifest = seal(&state, &store, "agent/sample", &member, &reopened).unwrap().unwrap();
+            assert_eq!(manifest.mode, "in-place");
+            assert_eq!(manifest.workspace_kind, if refusal_class == "workspace-not-git" {
+                WorkspaceKind::NonGit
+            } else {
+                WorkspaceKind::Git
+            });
+            assert!(manifest.commit.is_empty());
+            let dir = directory(&state, "snapshot");
+            let payload = dir.join("payload.tar");
+            let names: Vec<_> = tar::Archive::new(fs::File::open(&payload).unwrap())
+                .entries().unwrap().map(|entry| entry.unwrap().path().unwrap().into_owned()).collect();
+            assert!(!names.contains(&PathBuf::from("workspace.bundle")));
+            // Missing native authority refuses instead of publishing a detached inventory copy.
+            let frozen = fs::read(&transcript).unwrap();
+            fs::remove_file(&transcript).unwrap();
+            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap_err()), "transcript-missing");
+            fs::write(&transcript, &frozen).unwrap();
+            for _restart in 0..2 {
+                let restored = restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap();
+                assert_eq!(restored.native_session_id, native);
+                assert_eq!(restored.transcript_path.as_ref(), Some(&transcript));
+                assert!(fs::read_to_string(&transcript).unwrap().contains("frozen"));
+            }
+            // A kind change must refuse before resuming or copying any session.
+            let workspace = Path::new(&member.workspace);
+            if refusal_class == "workspace-not-git" {
+                git(workspace, &["init", "-q"], None, None).unwrap();
+                assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap_err()), "workspace-kind-mismatch");
+                fs::remove_dir_all(workspace.join(".git")).unwrap();
+            } else if refusal_class == "workspace-unborn" {
+                fs::rename(workspace.join(".git"), root.path().join("saved-git")).unwrap();
+                assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap_err()), "workspace-kind-mismatch");
+                fs::rename(root.path().join("saved-git"), workspace.join(".git")).unwrap();
+            }
+            assert_eq!(fs::read_to_string(Path::new(&member.workspace).join("tracked")).unwrap(), "changed\n");
+            let mut moved = member.clone();
+            moved.host = "birch".into();
+            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &moved, native).unwrap_err()), "snapshot-in-place");
+            assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "wrong-session").is_err());
+            // A new turn after strict resume must remain visible to ordinary continuation,
+            // which selects by native ID from the managed inventory.
+            let inventory = sessions(&state.join("drivers"), "agent/sample", "omp");
+            let resumed = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, native, Some(&transcript)).unwrap();
+            assert_eq!(resumed[2], transcript.to_string_lossy());
+            let mut continued = frozen;
+            continued.extend_from_slice(b"{\"role\":\"assistant\",\"content\":\"post-resume turn\"}\n");
+            fs::write(&transcript, &continued).unwrap();
+            let restarted = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, native, None).unwrap();
+            assert_eq!(restarted, resumed);
+            assert!(fs::read_to_string(&restarted[2]).unwrap().contains("post-resume turn"));
+            // Another strict restore must not overwrite divergent native state.
+            assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_unknown_in_place_snapshot_resumes_non_git_and_unborn_git() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, mut suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        let native = "5f9a6e16-5e30-4bce-b327-9a8241321bd6";
+        suspension.native_session_id = Some(native.into());
+        suspension.cause = Some("idle".into());
+        fs::remove_dir_all(Path::new(&member.workspace).join(".git")).unwrap();
+        let transcript = sessions(&state.join("drivers"), "agent/sample", "omp")
+            .join(format!("2026-11-18_{native}.jsonl"));
+        fs::write(&transcript, format!("{}\n",
+            serde_json::json!({"type":"session", "id":native, "cwd":member.workspace}))).unwrap();
+        assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "in-place");
+        let dir = directory(&state, "snapshot");
+        // A restart between the old capture and seal finds an empty marker.
+        fs::write(dir.join("in-place"), b"").unwrap();
+        assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "in-place");
+        suspension.mode = Some("in-place".into());
+        seal(&state, &store, "agent/sample", &member, &suspension).unwrap();
+        let legacy = dir.join("legacy.tar");
+        let mut archive = tar::Archive::new(fs::File::open(dir.join("payload.tar")).unwrap());
+        let mut output = tar::Builder::new(fs::File::create(&legacy).unwrap());
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            let mut header = entry.header().clone();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if path == Path::new("manifest.json") {
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                value.as_object_mut().unwrap().remove("workspace_kind");
+                bytes = serde_json::to_vec(&value).unwrap();
+            }
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            output.append_data(&mut header, path, &bytes[..]).unwrap();
+        }
+        output.finish().unwrap();
+        drop(output);
+        let restored = restore(&legacy, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap();
+        assert_eq!(restored.workspace_kind, WorkspaceKind::LegacyUnknown);
+        assert_eq!(restored.transcript_path.as_ref(), Some(&transcript));
+        git(Path::new(&member.workspace), &["init", "-q"], None, None).unwrap();
+        let restored = restore(&legacy, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap();
+        assert_eq!(restored.workspace_kind, WorkspaceKind::LegacyUnknown);
+        assert_eq!(restored.transcript_path.as_ref(), Some(&transcript));
+    }
+
+    #[test]
+    fn historical_git_manifest_defaults_workspace_kind_and_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        workspace(&state, "agent/sample", "snapshot", &member).unwrap();
+        let manifest = seal(&state, &store, "agent/sample", &member, &suspension).unwrap().unwrap();
+        let mut bytes = serde_json::to_value(&manifest).unwrap();
+        bytes.as_object_mut().unwrap().remove("workspace_kind");
+        bytes.as_object_mut().unwrap().remove("mode");
+        let historical: Manifest = serde_json::from_value(bytes).unwrap();
+        assert_eq!(historical.workspace_kind, WorkspaceKind::Git);
+        assert_eq!(historical.mode, "git");
+    }
+
+    #[test]
+    fn idle_git_capture_stays_portable_and_in_place_requires_a_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, mut suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        suspension.cause = Some("idle".into());
+        assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "git");
+        fs::remove_dir_all(Path::new(&member.workspace).join(".git")).unwrap();
+        assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "in-place");
+        suspension.mode = Some("in-place".into());
+        fs::remove_dir_all(sessions(&state.join("drivers"), "agent/sample", "omp")).unwrap();
+        assert_eq!(code(&seal(&state, &store, "agent/sample", &member, &suspension).unwrap_err()), "transcript-missing");
     }
 }

@@ -176,6 +176,8 @@ pub const AUTHORITY_FEATURE: &str = "mission_authority";
 pub const PROGRAM_FEATURE: &str = "mission_program";
 /// The `daemon.started` feature of a build that reads finite execution resource lanes.
 pub const RESOURCE_LANE_FEATURE: &str = "mission_resource_lane";
+pub const RESOURCE_PROFILE_FEATURE: &str = "resource_profile_keys";
+pub const PER_RUN_MISSIONS_FEATURE: &str = "per_run_missions";
 
 /// One mission field behind a fleet barrier: the feature that says a member reads it, the
 /// refusal code, and what to do once every member is upgraded.
@@ -187,7 +189,7 @@ struct Barrier {
     later: &'static str,
 }
 
-const BARRIERS: [Barrier; 5] = [
+const BARRIERS: [Barrier; 7] = [
     Barrier {
         feature: FEATURE,
         minimum_version: 1,
@@ -222,6 +224,20 @@ const BARRIERS: [Barrier; 5] = [
         code: "mission-resource-lane-unavailable",
         declares: declares_extended_resource_lane,
         later: "declare resource lane classes, disk reservations or IO-heavy admission",
+    },
+    Barrier {
+        feature: RESOURCE_PROFILE_FEATURE,
+        minimum_version: 1,
+        code: "resource-profile-keys-unavailable",
+        declares: declares_profile_key,
+        later: "declare a host-resolved resource profile key",
+    },
+    Barrier {
+        feature: PER_RUN_MISSIONS_FEATURE,
+        minimum_version: 1,
+        code: "per-run-missions-unavailable",
+        declares: crate::mission::declares_per_run_missions,
+        later: "declare a run-scoped produced mission",
     },
 ];
 
@@ -258,6 +274,17 @@ fn declares_extended_resource_lane(mission: &MissionSpec) -> bool {
             || step.loop_spec.as_ref().is_some_and(|spec| {
                 [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
                     .into_iter().flatten().any(|branch| declares_extended_resource_lane(branch))
+            })
+    })
+}
+
+fn declares_profile_key(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.resource_lane.as_ref().is_some_and(|lane| lane.profile.is_some())
+            || step.nested_mission.as_deref().is_some_and(declares_profile_key)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_profile_key(branch))
             })
     })
 }
@@ -300,7 +327,20 @@ pub(super) fn validate_mission(
 }
 
 fn validate_barrier(connection: &Connection, origin: &str, barrier: &Barrier) -> Result<(), FractalError> {
-    let Barrier { feature, minimum_version, code, later, .. } = barrier;
+    require_fleet_feature(connection, origin, barrier.feature, barrier.minimum_version,
+        barrier.code, barrier.later)
+}
+
+/// Check the current fleet's reader support inside the caller's writer transaction.
+/// Missing/ambiguous members and unfenced writers fail closed, as mission field admission does.
+pub fn require_fleet_feature(
+    connection: &Connection,
+    origin: &str,
+    feature: &str,
+    minimum_version: u64,
+    code: &'static str,
+    later: &str,
+) -> Result<(), FractalError> {
     let refused = |reason: String| FractalError::new(code, reason);
     let membership = fleet_membership_tx(connection).map_err(internal)?;
     for member in membership.incarnations().filter(|member| member.end.is_none()) {
@@ -329,8 +369,8 @@ fn validate_barrier(connection: &Connection, origin: &str, barrier: &Barrier) ->
             .map_err(internal)?;
         let advertised = features.flatten()
             .and_then(|features| serde_json::from_str::<Value>(&features).ok())
-            .and_then(|features| features.get(*feature).and_then(Value::as_u64))
-            .is_some_and(|version| version >= *minimum_version);
+            .and_then(|features| features.get(feature).and_then(Value::as_u64))
+            .is_some_and(|version| version >= minimum_version);
         if !advertised {
             return Err(refused(format!(
                 "host/{} runs an older build that would refuse this revision (it has not advertised {feature}>={minimum_version}); {later} once every member is upgraded",
@@ -582,6 +622,36 @@ mission "plain" state="ready" {
         sync(&peer, &store);
         assert!(publish(&store, LANED, "upgraded").unwrap().is_empty());
         assert_eq!(store.mission_spec("laned", None).unwrap().unwrap().capacity, mission.capacity);
+    }
+
+    #[test]
+    fn run_scoped_outputs_wait_for_every_reader_and_carry_a_closed_schema_marker() {
+        const SOURCE: &str = r#"version 2
+mission "producer" state="ready" {
+  goal "Publish isolated work."
+  step "compile" { produces-mission "consent/${ST_MISSION_RUN}"; }
+}
+"#;
+        let (store, peer) = two_members();
+        let refusal = publish(&store, SOURCE, "older").unwrap_err();
+        assert_eq!(refusal.code, "per-run-missions-unavailable");
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status":"running", "features":{PER_RUN_MISSIONS_FEATURE:1}}));
+        sync(&peer, &store);
+        publish(&store, SOURCE, "upgraded").unwrap();
+        let mission = store.mission_spec("producer", None).unwrap().unwrap();
+        let publication = store.latest_claim("mission/producer", Some("mission.published")).unwrap().unwrap();
+        assert_eq!(publication.body["fields"]["per_run_missions"], 1);
+        let fields = super::super::schema_fields_for_body("mission.published", &publication.body).unwrap();
+        assert_eq!(fields["per_run_missions"], 1);
+        let mut downgraded = fractal_schema::registry().clone();
+        downgraded.claims.get_mut("mission.published").unwrap().fields.remove("per_run_missions");
+        let refusal = downgraded.validate_replicated_claim(
+            "mission/producer", "mission.published", &fields,
+        ).unwrap_err();
+        assert_eq!(refusal.code, "unknown-claim-field");
+        sync(&store, &peer);
+        assert_eq!(peer.mission_spec("producer", None).unwrap().unwrap().revision, mission.revision);
     }
 
     #[test]

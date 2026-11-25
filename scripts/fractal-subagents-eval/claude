@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A stand-in `claude` that runs subagents the way Claude reports them to its hooks, with no model.
 
-It runs every hook command from the `--settings` JSON st passes (through `bash -c`, with the hook
+It runs every hook command from the `--settings` JSON Fractal passes (through `bash -c`, with the hook
 payload on stdin), as Claude does, and writes Claude-format transcripts beneath
 ~/.claude/projects. The eval drives it through control.jsonl in its workspace, one JSON operation
 per line, applied in order:

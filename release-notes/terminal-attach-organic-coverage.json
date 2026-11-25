@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose sparse organic terminal attachment evidence and observation coverage",
+  "replay": { "status": "none", "detail": "No replay or projection changes." },
+  "schema": { "status": "none", "detail": "No persisted schema or migration changes." },
+  "rules": { "status": "changed", "detail": "Terminal attachment and fresh-read latency rows with no qualifying recent observations explicitly say No qualifying events. With no retained qualifying events they remain no-data with no remaining-budget verdict, including under complete observation-time coverage. Retained eligible history still determines an existing verdict." },
+  "compatibility": { "status": "changed", "detail": "Native operational objective rows add nullable numeric coverage for their accounting horizon and explicitly describe unavailable coverage as unknown. Singular stream terminal remains the attachment key; plural stream terminals remains a listing and is excluded. Dedicated terminal stream first-screen instrumentation is not changed by this release." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout." },
+  "manual": { "status": "none", "detail": "No configuration changes required. Observation-time coverage is not a claim that all terminal viewers or attempts are instrumented." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback restores the previous objective presentation." }
+}

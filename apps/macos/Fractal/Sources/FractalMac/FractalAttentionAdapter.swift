@@ -332,7 +332,7 @@ actor FractalAttentionAdapter: AttentionAdapter {
     return WorkDoneAnswer(summary: summary, answerID: id, answerText: text)
   }
 
-  private static func entry(_ row: SloRow) -> SloEntry {
+  static func entry(_ row: SloRow) -> SloEntry {
     SloEntry(
       id: row.id, kind: row.kind == "budget" ? .budget : .objective, about: row.about,
       target: row.target, current: row.current, window: row.window, status: row.status,

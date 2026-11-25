@@ -12,6 +12,7 @@ export interface Agent {
   readonly launch: Launch
   readonly under?: Under
   readonly principal?: `person/${string}`
+  readonly idleSuspend?: IdleSuspend
 }
 
 export interface Under {
@@ -72,6 +73,8 @@ export type Completion = "all-steps-exhausted"
 
 export type CatchUp = "all" | "latest" | "skip"
 
+export type IdleSuspend = "never" | "member"
+
 // KDL uses braced Unicode escapes, not JSON's four-digit Unicode escapes.
 const quote = (value: string): string => `"${value.replace(
   /["\\\u0000-\u001f\u007f-\u009f\u200e-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/gu,
@@ -112,6 +115,7 @@ export const encodeKdl = (declarations: Declarations): string => {
   for (const agent of declarations.agents ?? []) {
     lines.push('', `agent ${quote(canonicalAgentId(agent.id))} {`, `  workspace ${quote(agent.workspace)}`)
     if (agent.principal !== undefined) lines.push(`  principal ${quote(agent.principal)}`)
+    if (agent.idleSuspend !== undefined) lines.push(`  idle-suspend ${quote(agent.idleSuspend)}`)
     if (agent.under !== undefined) {
       lines.push(`  under ${quote(agentSubject(agent.under.agent))} reason=${quote(agent.under.reason)}`)
     }

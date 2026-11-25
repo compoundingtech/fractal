@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Verified runtime starts are adopted from their completion signal without waiting for a running broad reconcile pass to finish (#6711).",
+  "replay": {"status": "none", "detail": "No graph replay. A narrowly serialized completion lane reuses the existing fenced start-result application and per-item panic isolation; the broad pass still recovers durable pending results. A completion fault is recorded without restarting or dropping the running broad pass."},
+  "schema": {"status": "none", "detail": "No stored schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "No client, wire or code generation change. Exact operation, incarnation, request, desired-state and provenance fences remain in force. The existing observation-generation fence also refuses same-incarnation snapshots captured before completion, so older running status cannot overwrite newer terminal evidence. Conversely, the completion writer preserves an exact runtime observation published after its physical capture, using the existing claim store index, while still recording launch success. Fresh running observations are adopted for command-only seats as well as native drivers; starts whose exact runtime already ended publish terminal evidence instead of running."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No manual step. Successful completion consumption logs result_to_adoption_ms."},
+  "recovery": {"status": "none", "detail": "Reverting restores adoption at the next broad pass; durable start operations remain compatible."}
+}

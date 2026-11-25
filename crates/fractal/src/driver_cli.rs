@@ -132,7 +132,7 @@ mod managed_declaration_tests {
     }
 }
 
-/// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
+/// `fractal driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
 pub(super) fn run_driver_hook() -> ExitCode {
     fractal_client::set_client_name(format!(
         "fractal-driver-hook {}",
@@ -141,7 +141,7 @@ pub(super) fn run_driver_hook() -> ExitCode {
     let arguments = std::env::args().skip(2).collect::<Vec<_>>();
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
-            "usage: st {} NAME [ARGS]; NAME is one of {}",
+            "usage: fractal {} NAME [ARGS]; NAME is one of {}",
             fractal_daemon::driver_hook::SUBCOMMAND,
             fractal_daemon::driver_hook::HOOKS.join(", ")
         );
@@ -262,7 +262,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         .as_deref()
         .context("the driver has no subject")?;
     if fractal_daemon::skill::HARNESSES.contains(&args.driver.as_str()) {
-        // A seat starts idle: a declaration stored before st dropped the startup prompt still
+        // A seat starts idle: a declaration stored before fractal dropped the startup prompt still
         // carries it, and it would start a turn nobody asked for.
         let mut argv = args.argv;
         fractal_daemon::boot::strip_legacy_prompt(&args.driver, &mut argv);
@@ -272,13 +272,13 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             let _ = write_driver_log(
                 subject,
                 &format!(
-                    "could not install the st skill for {}: {error:#}",
+                    "could not install the fractal skill for {}: {error:#}",
                     args.driver
                 ),
             );
         }
         // Harness-session state (OpenCode delivery ledgers, Claude resume bindings) stays beneath
-        // st3's driver directory, never st2's; the seat's hooks choose the same root.
+        // fractal's driver directory, never st2's; the seat's hooks choose the same root.
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
@@ -323,26 +323,38 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         }
         return run_st2_native_driver(client, subject, &args.driver, argv, paths).await;
     }
+    if args.driver == "exec" {
+        fractal_runtime::payload_receipt::publish_from_environment(
+            fractal_runtime::payload_receipt::PayloadState::Running)?;
+    }
     let (program, arguments) = args.argv.split_first().context("driver argv is empty")?;
     let mut child = tokio::process::Command::new(program)
         .args(arguments)
+        .env_remove(fractal_runtime::payload_receipt::PATH_ENV)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
         .with_context(|| format!("start {} provider", args.driver))?;
     let status = child.wait().await?;
+    // Capture the payload edge before retrying delivery to a restarting daemon.
+    let exec_exited_at_unix_ms = now_ms() as u64;
+    if args.driver == "exec" {
+        fractal_runtime::payload_receipt::publish_from_environment(
+            fractal_runtime::payload_receipt::PayloadState::Exited { at_unix_ms: exec_exited_at_unix_ms })?;
+    }
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt as _;
         status.signal()
     };
-    let exit = ClaimInput {
+    let mut exit = ClaimInput {
         subject: subject.into(),
         kind: "runtime.observed".into(),
         actor: Some(subject.into()),
         fields: BTreeMap::from([
             ("status".into(), Value::String("exited".into())),
+            ("exec_exited_at_unix_ms".into(), Value::from(exec_exited_at_unix_ms)),
             (
                 "exit_code".into(),
                 status.code().map(Value::from).unwrap_or(Value::Null),
@@ -356,6 +368,9 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         expected_subject: None,
         idempotency_key: None,
     };
+    if let Ok(operation) = std::env::var("ST3_START_OPERATION") {
+        exit.fields.insert("start_operation".into(), Value::from(operation));
+    }
     // A provider that exits while the daemon restarts still reports its own exit status.
     let _: ClaimRecord =
         retry_while_daemon_unreachable(subject, || client.post("/v1/claims", &exit)).await?;
@@ -537,6 +552,7 @@ async fn run_st2_native_driver(
     let loop_state = NativeLoopState {
         paths: Some(paths.resolved()),
         predecessor_harness_record: fs::read(&harness_state_path).ok(),
+        provider_started_at_ms: fractal_drivers::subagents::now_ms(),
         ..NativeLoopState::default()
     };
     let task = spawn_st3_provider(
@@ -712,7 +728,7 @@ async fn resume_native_driver(
     let _ = write_driver_log(
         subject,
         &format!(
-            "the {driver} driver resumed in {} after its st binary was replaced; the provider kept running",
+            "the {driver} driver resumed in {} after its fractal binary was replaced; the provider kept running",
             fractal_drivers::reexec::installed_binary()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "a replacement binary".into())
@@ -822,6 +838,7 @@ async fn drive_st2_native_loop(
     task: &mut tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
     let settle = loop_state.settle;
+    paths.delivery_gate.bind_incarnation(&incarnation);
     let NativePaths {
         session_dir,
         agent_dir,
@@ -881,7 +898,7 @@ async fn drive_st2_native_loop(
             driver,
             &incarnation,
             &agent_dir,
-            fractal_drivers::subagents::now_ms(),
+            loop_state.provider_started_at_ms,
         )
     });
     let mut completion_announced = false;
@@ -1218,7 +1235,7 @@ async fn drive_st2_native_loop(
                                 loop_state.ready = true;
                             }
                             publish_harness_activity(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 if driver == "claude" {
@@ -1255,7 +1272,7 @@ async fn drive_st2_native_loop(
                             if let Some(context) = fractal_drivers::harness_context::read(
                                 &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 &incarnation,
@@ -1264,7 +1281,7 @@ async fn drive_st2_native_loop(
                             )
                             .await?;
                             publish_harness_limits(
-                                &ObservationClient { client, event: None },
+                                &ObservationClient { client, event: None, source_runtime: None },
                                 subject,
                                 driver,
                                 &incarnation,
@@ -1419,7 +1436,7 @@ async fn publish_harness_timeline(
         // fields here; the client projection joins the exact desired owner run/generation/step at
         // its snapshot index and overwrites attribution on every explicit usage entry.
         let claim = native_timeline_claim(client, subject, incarnation, operation).await?;
-        let _: ClaimRecord = ObservationClient { client, event: None }
+        let _: ClaimRecord = ObservationClient { client, event: None, source_runtime: None }
             .post(
                 "/v1/claims",
                 &claim,
@@ -1630,6 +1647,33 @@ async fn publish_harness_state(
     Ok(())
 }
 
+fn activate_channel_input_acceptance(
+    catalog: &Path, subject: &str, state: &mut PiChannelResume,
+) -> Result<()> {
+    let seat = hex::encode(Sha256::digest(subject.as_bytes()));
+    let incarnation = hex::encode(Sha256::digest(state.incarnation.as_bytes()));
+    let dir = catalog.join(".st3-input-acceptance").join(seat).join(incarnation);
+    fs::create_dir_all(&dir)?;
+    if let Some(previous) = &state.pending.input_source_dir {
+        if previous != &dir {
+            for (message, timestamp) in fractal_drivers::native_channel::input_attempts(previous)? {
+                fractal_drivers::native_channel::record_input_attempt(&dir, &message, timestamp)?;
+            }
+            for (message, timestamp) in fractal_drivers::native_channel::input_acceptances(previous)? {
+                fractal_drivers::native_channel::record_input_acceptance(&dir, &message, timestamp)?;
+            }
+        }
+    } else {
+        for message in &state.delivered {
+            fractal_drivers::native_channel::record_input_attempt(&dir, message, None)?;
+        }
+    }
+    state.pending.input_acceptances =
+        fractal_drivers::native_channel::input_acceptances(&dir)?;
+    state.pending.input_source_dir = Some(dir);
+    Ok(())
+}
+
 fn activate_channel_todo_observations(
     catalog: &Path, subject: &str, state: &mut PiChannelResume,
 ) -> Result<NativeObservations> {
@@ -1664,7 +1708,7 @@ async fn run_pi_channel(
         Some(state) => {
             let _ = write_driver_log(
                 subject,
-                &format!("the {driver} channel resumed after its st binary was replaced"),
+                &format!("the {driver} channel resumed after its fractal binary was replaced"),
             );
             state
         }
@@ -1750,6 +1794,7 @@ async fn run_pi_channel(
     } else {
         None
     };
+    activate_channel_input_acceptance(catalog, subject, &mut state)?;
     let mut last_warning = PiChannelWarnings::default();
     let mut todo_observations = None;
     if driver == "omp" && observer.is_none() {
@@ -2081,7 +2126,7 @@ async fn run_pi_channel(
                             continue;
                         }
                     };
-                    let frame = pi_family_message_frame(&message, &body, identity, &attachments);
+                    let frame = pi_family_message_frame(&message, &body, identity, &incarnation, &attachments);
                     if let Some(text) = frame["content"].as_str()
                         && let Err(error) = publish_native_invocation_input(
                             client, subject, &incarnation, &message, text,
@@ -2089,6 +2134,7 @@ async fn run_pi_channel(
                     {
                         warn_pi_channel(subject, &error, &mut last_warning);
                     }
+                    state.record_input_attempt(&message.subject)?;
                     stdout.write_all(serde_json::to_string(&frame)?.as_bytes()).await?;
                     stdout.write_all(b"\n").await?;
                     stdout.flush().await?;
@@ -2141,7 +2187,7 @@ async fn run_pi_channel(
                     let _ = write_driver_log(
                         subject,
                         &format!(
-                            "the st binary at {} was replaced; the {driver} channel re-executes into it",
+                            "the fractal binary at {} was replaced; the {driver} channel re-executes into it",
                             binary.display()
                         ),
                     );
@@ -2586,6 +2632,9 @@ async fn drive_codex_native_loop(
     ))
         .then(|| codex_continued_thread(&argv))
         .flatten();
+    if matches!(start, ProviderStart::Launch(..)) {
+        loop_state.provider_started_at_ms = fractal_drivers::subagents::now_ms();
+    }
     let task = task.insert(spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start));
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
@@ -2594,7 +2643,7 @@ async fn drive_codex_native_loop(
         "codex",
         &incarnation,
         &agent_dir,
-        fractal_drivers::subagents::now_ms(),
+        loop_state.provider_started_at_ms,
     );
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2857,7 +2906,7 @@ async fn drive_codex_native_loop(
                         .flatten()
                     {
                         publish_harness_activity(
-                            &ObservationClient { client, event: None },
+                            &ObservationClient { client, event: None, source_runtime: None },
                             subject,
                             "codex",
                             "app-server",
@@ -2893,7 +2942,7 @@ async fn drive_codex_native_loop(
                     if let Some(context) = fractal_drivers::harness_context::read(
                         &fractal_drivers::harness_context::harness_context_path(&agent_dir)) {
                     publish_harness_usage(
-                        &ObservationClient { client, event: None },
+                        &ObservationClient { client, event: None, source_runtime: None },
                         subject,
                         "codex",
                         &incarnation,
@@ -2902,7 +2951,7 @@ async fn drive_codex_native_loop(
                     )
                     .await?;
                     publish_harness_limits(
-                        &ObservationClient { client, event: None },
+                        &ObservationClient { client, event: None, source_runtime: None },
                         subject,
                         "codex",
                         &incarnation,
@@ -2912,7 +2961,7 @@ async fn drive_codex_native_loop(
                     .await?;
                     }
                     // The Codex runtime stamps its timeline with its own incarnation, which
-                    // outlives st's runtime incarnation when a resident Codex is adopted.
+                    // outlives fractal's runtime incarnation when a resident Codex is adopted.
                     let codex_incarnation = fractal_drivers::codex_app_server::current_runtime_incarnation(
                         &state_dir,
                         &identity,
@@ -3130,6 +3179,41 @@ async fn run_channel_renewals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_family_acceptance_storage_is_independent_of_optional_todo_observation() {
+        for mode in ["pi", "omp-observed", "omp-todo"] {
+            let root = tempfile::tempdir().unwrap();
+            let subject = format!("agent/{mode}");
+            let mut state = PiChannelResume {
+                incarnation: "runtime-a".into(),
+                ..Default::default()
+            };
+            activate_channel_input_acceptance(root.path(), &subject, &mut state).unwrap();
+            let source = state.pending.input_source_dir.clone().unwrap();
+            if mode == "omp-todo" {
+                state.todo_outbox = Some(prepare_channel_todo_outbox(root.path(), &subject, "runtime-a").unwrap());
+            }
+            // Both Pi and observed OMP run without the optional todo observer; stopping it must
+            // also leave the mandatory pre-frame and acceptance ingress paths fully functional.
+            state.todo_outbox = None;
+            state.record_input_attempt("message/first").unwrap();
+            let mut observer = None;
+            accept_managed_channel_frame(&mut state, &mut observer, &json!({
+                "type":"delivered", "meta":{"messageId":"message/first","inputIncarnation":"runtime-a"},
+                "acceptedAtUnixMs":123,
+            }).to_string(), &subject).unwrap();
+            assert_eq!(state.pending.input_acceptances["message/first"], 123, "{mode}");
+            assert_eq!(fractal_drivers::native_channel::input_acceptances(&source).unwrap()["message/first"], 123);
+            prepare_channel_todo_outbox(root.path(), &subject, "runtime-b").unwrap();
+            assert!(source.join("input-attempts.json").is_file(), "todo cleanup removed {mode} acceptance evidence");
+            let mut replacement = PiChannelResume { incarnation:"runtime-b".into(), ..Default::default() };
+            activate_channel_input_acceptance(root.path(), &subject, &mut replacement).unwrap();
+            assert_ne!(replacement.pending.input_source_dir.as_ref(), Some(&source));
+            assert!(source.join("input-acceptances.json").is_file(), "restart removed old source evidence");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn binding_longer_than_a_lease_keeps_renewing() {
         binding_renewal_case(false).await;

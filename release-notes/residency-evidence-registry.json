@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Register idle residency evidence readers before enabling writers",
+  "replay": {"status": "none", "detail": "No producer or historical evidence replay is activated."},
+  "schema": {"status": "none", "detail": "No SQLite schema or storage version changes; the replicated claim registry gains eight residency evidence kinds."},
+  "rules": {"status": "changed", "detail": "The registry digest and durable retention inventory add the residency subject family and evidence kinds. Deploy this reader baseline before enabling any residency writer. Checkpoint rules version is unchanged."},
+  "compatibility": {"status": "changed", "detail": "Older registries quarantine residency evidence as unknown kinds. Upgraded readers admit original records using the existing quarantine replay path. No client-v0 response fields change."},
+  "downtime": {"status": "none", "detail": "No added startup scan, migration, or enabled producer."},
+  "manual": {"status": "none", "detail": "No operator action until a separately reviewed residency writer cutover."},
+  "recovery": {"status": "none", "detail": "This inert reader change writes no residency evidence. Older readers retain existing unknown-kind quarantine behavior; no database rollback is required."}
+}

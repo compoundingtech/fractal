@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Agent resource execs accept native work-claim ownership, including receipts written with an unprefixed run ID by earlier builds.",
+  "replay": { "status": "none", "detail": "No replay or projection rebuild is required. Existing raw owner_run receipts remain readable." },
+  "schema": { "status": "none", "detail": "No storage schema, client-v0 contract or generated client changes." },
+  "rules": { "status": "none", "detail": "No checkpoint, retention or graph digest changes." },
+  "compatibility": { "status": "changed", "detail": "New work-turn receipts consistently write mission-run/<run_id>. Resource admission compares prefixed and raw run IDs as the same identity while retaining invocation, attempt and live-step fences. No stored receipts are rewritten." },
+  "downtime": { "status": "none", "detail": "Use the ordinary managed daemon replacement path." },
+  "manual": { "status": "none", "detail": "No migration, store edits or operator repair is needed." },
+  "recovery": { "status": "none", "detail": "No new rollback restrictions. Older binaries retain the resource-exec rejection for existing raw work-claim receipts." }
+}

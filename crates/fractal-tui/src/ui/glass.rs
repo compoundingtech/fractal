@@ -1812,7 +1812,7 @@ impl Ui {
             }
             spans.push(Span::styled(label, style));
         }
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+        self.draw_line(buf, area.x, area.y, &Line::from(spans), area.width);
         self.draw_list_as(
             buf,
             Rect {
@@ -2587,7 +2587,7 @@ impl Ui {
             if x + width > area.x + area.width {
                 break;
             }
-            buf.set_line(x, area.y, &line, width);
+            self.draw_line(buf, x, area.y, &line, width);
             self.hit(Rect { x, width, ..area }, hit);
             x += width + 2;
         }
@@ -2831,7 +2831,7 @@ impl Ui {
                 self.hit(rect, hit);
             }
         }
-        buf.set_line(area.x, area.y, &Line::from(spans), left_width);
+        self.draw_line(buf, area.x, area.y, &Line::from(spans), left_width);
         // ▢: one space.
         let width = selector_width;
         let x = area.x + left_width;
@@ -3265,7 +3265,7 @@ impl Ui {
             Span::styled(palette.query.clone(), theme::text().bg(theme::MANTLE)),
             Span::styled("▏", theme::fg(theme::ACCENT).bg(theme::MANTLE)),
         ]);
-        buf.set_line(rect.x + 1, rect.y + 1, &input, rect.width - 2);
+        self.draw_line(buf, rect.x + 1, rect.y + 1, &input, rect.width - 2);
         let matches = self.matches(palette);
         let mut rows: Vec<(Option<usize>, Line<'static>)> = Vec::new();
         let mut current = None;
@@ -3342,7 +3342,7 @@ impl Ui {
         self.frame.borrow_mut().palette_top = top;
         for (offset, (index, line)) in rows.iter().skip(top).take(list_height).enumerate() {
             let y = rect.y + 2 + offset as u16;
-            buf.set_line(rect.x + 1, y, line, rect.width - 2);
+            self.draw_line(buf, rect.x + 1, y, line, rect.width - 2);
             if let Some(index) = index {
                 self.hit(
                     Rect {
@@ -4571,8 +4571,7 @@ impl Ui {
                 }
             }
             MenuAction::CopyText(text) => {
-                copy(&text);
-                self.flash("Copied message text");
+                self.copy_text(&text);
             }
             MenuAction::Reply { agent, message } => {
                 self.open(&agent);
@@ -4603,8 +4602,7 @@ impl Ui {
                 self.drop_tab((group, tab), Drop::Strip { group: to, index: end });
             }
             MenuAction::CopyPath(path) => {
-                copy(&path);
-                self.flash(format!("Copied {path}"));
+                self.copy_text(&path);
             }
             MenuAction::SplitGroup { group, right } => {
                 self.focus_group(group);
@@ -5118,28 +5116,38 @@ fn visible_tabs(
         };
     }
     let current = current.min(count - 1);
-    let fits = |first: usize, last: usize| {
-        let tabs: u16 = widths[first..=last].iter().sum();
-        let before = if first > 0 { marker } else { 0 };
-        let after = if last + 1 < count { marker } else { 0 };
-        tabs + before + after <= room
+    let fits = |first: usize, last: usize, tabs: usize| {
+        let before = if first > 0 { usize::from(marker) } else { 0 };
+        let after = if last + 1 < count { usize::from(marker) } else { 0 };
+        tabs + before + after <= usize::from(room)
     };
+    // Maintain interval totals while moving each boundary. Re-summing every candidate
+    // interval makes narrow strips quadratic in the number of (mostly hidden) tabs.
     let mut most = count - 1;
-    while most > 0 && fits(most - 1, count - 1) {
+    let mut suffix = usize::from(widths[most]);
+    while most > 0 && fits(most - 1, count - 1, suffix + usize::from(widths[most - 1])) {
+        suffix += usize::from(widths[most - 1]);
         most -= 1;
     }
     let mut first = start.min(most);
     if follow {
         // The front tab always shows, even alone and cut short.
         first = first.min(current);
-        while first < current && !fits(first, current) {
+        let mut cells: usize = widths[first..=current].iter().map(|width| usize::from(*width)).sum();
+        while first < current && !fits(first, current, cells) {
+            cells -= usize::from(widths[first]);
             first += 1;
         }
     }
-    let last = (first..count)
-        .rev()
-        .find(|last| fits(first, *last))
-        .unwrap_or(first);
+    let mut cells = 0;
+    let mut last = first;
+    for (at, width) in widths.iter().enumerate().skip(first) {
+        cells += usize::from(*width);
+        // Do not stop at the first miss: reaching the end removes the trailing marker.
+        if fits(first, at, cells) {
+            last = at;
+        }
+    }
     TabWindow { first, last, most }
 }
 
@@ -5553,6 +5561,36 @@ mod tests {
         view.stale = None;
         ui.effects.clear();
         ui
+    }
+
+    #[test]
+    fn details_preview_enter_is_scoped_and_expanded_text_scrolls() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut ui = terminal_details_fixture();
+        let agent = "agent/example/atlas/builder";
+        let Load::Ready(agents) = &mut ui.world.agents else { panic!() };
+        let row = agents.iter_mut().find(|row| row.id == agent).unwrap();
+        row.details.goal = Some("A long goal with enough prose to fill the details pane. ".repeat(100));
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.details_expanded.is_empty());
+        assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(key)) if key.code == KeyCode::Enter));
+        ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(ui.terminal_details_have_focus());
+        ui.effects.clear();
+        press(&mut ui, KeyCode::Enter, KeyModifiers::CONTROL);
+        assert!(ui.details_expanded.is_empty(), "modified Enter retains its existing scope");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.details_expanded.contains_key(agent));
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        press(&mut ui, KeyCode::PageDown, KeyModifiers::NONE);
+        let key = format!("details:{agent}");
+        assert!(ui.conversation_state.panes.borrow().get(&key).is_some_and(|state| state.top > 0));
+        assert!(ui.effects.is_empty(), "details never forward Enter or scrolling to the terminal");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!ui.details_expanded.contains_key(agent));
     }
 
     #[test]
@@ -7166,6 +7204,62 @@ mod tests {
         ui.click(Hit::GlassTabMore(0, more));
         assert_eq!(tabs(&ui).1, more, "the marker shows that tab");
         assert!(screen(&ui).contains(&format!("example/m{:02}", more - 1)), "and it is on screen");
+    }
+
+    #[test]
+    fn strip_window_totals_match_interval_sums() {
+        // Keep the interval-summing definition as an independent oracle for unequal
+        // widths, zero-width labels, clipped tabs, and disappearing end markers.
+        let reference = |widths: &[u16], current: usize, start: usize, follow, marker, room| {
+            let count = widths.len();
+            if count == 0 {
+                return TabWindow { first: 0, last: 0, most: 0 };
+            }
+            let current = current.min(count - 1);
+            let fits = |first: usize, last: usize| {
+                let tabs: u16 = widths[first..=last].iter().sum();
+                let before = if first > 0 { marker } else { 0 };
+                let after = if last + 1 < count { marker } else { 0 };
+                tabs + before + after <= room
+            };
+            let mut most = count - 1;
+            while most > 0 && fits(most - 1, count - 1) {
+                most -= 1;
+            }
+            let mut first = start.min(most);
+            if follow {
+                first = first.min(current);
+                while first < current && !fits(first, current) {
+                    first += 1;
+                }
+            }
+            let last = (first..count).rev().find(|last| fits(first, *last)).unwrap_or(first);
+            TabWindow { first, last, most }
+        };
+        for count in 0..=4 {
+            for mut encoding in 0..4usize.pow(count) {
+                let widths: Vec<u16> = (0..count).map(|_| {
+                    let width = [0, 1, 3, 11][encoding % 4];
+                    encoding /= 4;
+                    width
+                }).collect();
+                for current in 0..=widths.len() {
+                    for start in 0..=widths.len() {
+                        for follow in [false, true] {
+                            for marker in [0, 4] {
+                                for room in 0..=20 {
+                                    assert_eq!(
+                                        visible_tabs(&widths, current, start, follow, marker, room),
+                                        reference(&widths, current, start, follow, marker, room),
+                                        "{widths:?}, current={current}, start={start}, follow={follow}, marker={marker}, room={room}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -10414,7 +10508,7 @@ mod tests {
             agent: shell.clone(),
             title: "shell".into(),
             name: "shell".into(),
-            lines: vec![ratatui::text::Line::from("$ echo in the shell")],
+            lines: vec![Line::from("$ echo in the shell")],
             cursor: None,
             stale: None,
             ended: None,
@@ -10462,7 +10556,7 @@ mod tests {
         assert!(
             ui.flash
                 .as_ref()
-                .is_some_and(|(text, _)| text == "Copied 1 line"),
+                .is_some_and(|(text, _)| text.starts_with("Clipboard request sent (OSC 52)")),
             "{:?}",
             ui.flash
         );
@@ -10661,7 +10755,7 @@ mod tests {
         assert!(
             ui.flash
                 .as_ref()
-                .is_some_and(|(text, _)| text == "Copied 1 line"),
+                .is_some_and(|(text, _)| text.starts_with("Clipboard request sent (OSC 52)")),
             "{:?}",
             ui.flash
         );

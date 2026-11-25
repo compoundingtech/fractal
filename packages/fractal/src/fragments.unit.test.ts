@@ -232,7 +232,7 @@ describe('immutable fragments and scoped rounds', () => {
       const wire = missionWire(input)
       const loop = wire.steps[0]!
       expect('round' in loop).toBe(true)
-      if (!('round' in loop)) throw new TypeError('Expected loop')
+      if (loop.round === undefined) throw new TypeError('Expected loop')
       expect(loop.round.steps[1]?.dependsOn).toEqual([{ step: 'inspect', state: 'failed' }])
       expect(loop.round.steps[2]?.dependsOn).toEqual([{ step: 'inspect', state: 'terminal' }])
       expect(loop.round.finally?.[0].id).toBe('round-cleanup')

@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Contract tests for the separate quiet-reference receipt, not measured CPU evidence."""
+import copy
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import sys
+import unittest
+
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("quiet_reference", str(Path(__file__).with_name("commission-cpu-quiet-reference")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+reference = importlib.util.module_from_spec(spec)
+loader.exec_module(reference)
+
+
+def quiet():
+    return [{"minute": 100 + k, "cpu_ns": 12_000_000_000, "wall_ns": 60_000_000_000,
+             "expected_workers": 1, "idle": True, "seats_busy": False,
+             "missing_reason": None, "busy": []} for k in range(10)]
+
+
+class QuietReference(unittest.TestCase):
+    def test_health_requires_a_real_nonempty_build_commit(self):
+        # /v1/health supplies an object, not a bare build string.
+        health = {"version": "0.1.0", "build": {"commit": "a" * 40}}
+        self.assertEqual(reference.build_commit(health), "a" * 40)
+        for build in [None, {}, {"commit": None}, {"commit": ""}, {"commit": " "},
+                      {"commit": 1}, "a" * 40]:
+            with self.subTest(build=build), self.assertRaises(ValueError):
+                reference.build_commit({"build": build})
+        with self.assertRaises(ValueError):
+            reference.build_commit({})
+
+    def test_final_health_failure_cannot_leave_a_met_receipt(self):
+        initial = {"build": {"commit": "a" * 40}}
+        for final in [{}, {"build": {}}, {"build": {"commit": "b" * 40}}]:
+            receipt = {"status": "no-data", "production_objective": False}
+            with self.subTest(final=final), self.assertRaises(ValueError):
+                reference.finish_receipt(receipt, quiet(), 1, initial, final)
+            self.assertEqual(receipt["status"], "no-data")
+            self.assertNotIn("cores", receipt)
+        receipt = {"status": "no-data", "production_objective": False}
+        reference.finish_receipt(receipt, quiet(), 1, initial, initial)
+        self.assertEqual(receipt["status"], "met")
+
+    def test_separate_population_and_real_denominator(self):
+        result = reference.baseline(quiet(), 1)
+        self.assertEqual(result["cores"], 0.2)
+        self.assertEqual(result["minutes"], 10)
+        self.assertFalse(result["production_objective"])
+        self.assertEqual(result["objective"], "cpu/quiet-reference")
+        self.assertEqual(result["status"], "met")
+
+    def test_above_unchanged_half_core_limit_misses(self):
+        minutes = quiet()
+        for minute in minutes:
+            minute["cpu_ns"] = 31_000_000_000
+        self.assertEqual(reference.baseline(minutes, 1)["status"], "missed")
+
+    def test_missing_busy_stale_and_wrong_topology_never_pass(self):
+        for fields in [
+            {"cpu_ns": None, "missing_reason": "worker-stale"},
+            {"idle": False, "seats_busy": True},
+            {"idle": False, "seats_busy": None},
+            {"busy": ["deploy"]},
+            {"expected_workers": 0},
+            {"wall_ns": 0},
+        ]:
+            minutes = copy.deepcopy(quiet())
+            minutes[5].update(fields)
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                reference.baseline(minutes, 1)
+        for minutes in [quiet()[:-1], quiet()[:5] + quiet()[6:]]:
+            with self.assertRaises(ValueError):
+                reference.baseline(minutes, 1)
+        minutes = quiet()
+        minutes[5]["minute"] += 1
+        with self.assertRaises(ValueError):
+            reference.baseline(minutes, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

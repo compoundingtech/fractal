@@ -258,6 +258,23 @@ export const AgentMailCustody = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentMailCustody = typeof AgentMailCustody.Type
 export type AgentMailCustodyEncoded = typeof AgentMailCustody.Encoded
 
+export const AgentModelDrift = /*#__PURE__*/ (() => Schema.Struct({
+  /** Age of the matching current drift episode; null when the state is not drifted or its start is unknown. */
+  "drift_age_seconds": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Age of the matching current drift episode; null when the state is not drifted or its start is unknown." }),
+  /** Start of the durable drift episode for this incarnation and model pair; null without a matching episode. */
+  "drift_since": Schema.OptionFromNullOr(Timestamp).annotate({ description: "Start of the durable drift episode for this incarnation and model pair; null without a matching episode." }),
+  /** Sanitized cause from native fallback evidence fenced to this session, incarnation, and model selection; null means no matching positive fallback evidence. A model mismatch alone is not fallback. */
+  "fallback_reason": Schema.OptionFromNullOr(Schema.Literals(["transient","quota","auth","unknown"])).annotate({ description: "Sanitized cause from native fallback evidence fenced to this session, incarnation, and model selection; null means no matching positive fallback evidence. A model mismatch alone is not fallback." }),
+  /** Timestamp of the current incarnation's own model observation, never subagent response spend; null when unknown. */
+  "observed_at": Schema.OptionFromNullOr(Timestamp).annotate({ description: "Timestamp of the current incarnation's own model observation, never subagent response spend; null when unknown." }),
+  /** Durably admitted model-return attempts for this incarnation; null when the incarnation is unknown. Zero is a known empty count. */
+  "return_attempts": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Durably admitted model-return attempts for this incarnation; null when the incarnation is unknown. Zero is a known empty count." }),
+  /** Fresh comparable evidence distinguishes at-declared from drifted. Missing, stale, and uncomparable observations remain separate states. */
+  "state": Schema.Literals(["at-declared","drifted","unknown","stale","uncomparable"]).annotate({ description: "Fresh comparable evidence distinguishes at-declared from drifted. Missing, stale, and uncomparable observations remain separate states." })
+}).annotate({ identifier: "AgentModelDrift" }))()
+export type AgentModelDrift = typeof AgentModelDrift.Type
+export type AgentModelDriftEncoded = typeof AgentModelDrift.Encoded
+
 export const StepRunId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:step-run)/[^\\s]+$", "u"), "step-run").annotate({ identifier: "StepRunId" }))()
 export type StepRunId = typeof StepRunId.Type
 export type StepRunIdEncoded = typeof StepRunId.Encoded
@@ -328,6 +345,19 @@ export const AgentRelationship = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentRelationship = typeof AgentRelationship.Type
 export type AgentRelationshipEncoded = typeof AgentRelationship.Encoded
 
+export const AgentResidency = /*#__PURE__*/ (() => Schema.Struct({
+  /** Exact eligible epoch plus configured threshold. */
+  "due_at": Schema.OptionFromNullOr(Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" }))).annotate({ description: "Exact eligible epoch plus configured threshold." }),
+  /** Start of continuous eligibility, never the received-mail activity clock. */
+  "eligible_since": Schema.OptionFromNullOr(Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" }))).annotate({ description: "Start of continuous eligibility, never the received-mail activity clock." }),
+  /** Effective off, never or member policy. */
+  "policy": Schema.String.annotate({ description: "Effective off, never or member policy." }),
+  /** Why this snapshot cannot become idle-suspended. */
+  "refusal_reason": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Why this snapshot cannot become idle-suspended." })
+}).annotate({ identifier: "AgentResidency" }))()
+export type AgentResidency = typeof AgentResidency.Type
+export type AgentResidencyEncoded = typeof AgentResidency.Encoded
+
 /** Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`. */
 export const AgentState = /*#__PURE__*/ (() => openEnum([
   "desired",
@@ -371,12 +401,16 @@ export const AgentSuspension = /*#__PURE__*/ (() => Schema.Struct({
   "action": Schema.Literals(["suspend","resume"]),
   /** Why a refused suspend did not find the seat quiet, such as turn-in-flight, pending-ask, unsent-input, claimed-work or subagent-running. */
   "blocking": Schema.Array(Schema.String).annotate({ description: "Why a refused suspend did not find the seat quiet, such as turn-in-flight, pending-ask, unsent-input, claimed-work or subagent-running." }),
+  /** manual or idle. Absent or null means manual; unknown values are retained. */
+  "cause": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "manual or idle. Absent or null means manual; unknown values are retained." }),
   /** Stable reason the last suspend or resume failed, such as not-quiescent, native-session-mismatch or native-resume-unavailable. */
   "code": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Stable reason the last suspend or resume failed, such as not-quiescent, native-session-mismatch or native-resume-unavailable." }),
   "harness": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "host": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   /** The suspended incarnation, or the one a completed resume launched. */
   "incarnation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The suspended incarnation, or the one a completed resume launched." }),
+  /** git or in-place. Absent or null means git; unknown values are retained. */
+  "mode": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "git or in-place. Absent or null means git; unknown values are retained." }),
   /** The harness's own session the seat suspended on and resumes. */
   "native_session_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The harness's own session the seat suspended on and resumes." }),
   /** The request claim; each phase change is a change of this agent. */
@@ -604,6 +638,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "current_work": optionalKey(Schema.Array(WorkLabel)).annotate({ description: "current_work_ids named for display, in the same order." }),
   "current_work_ids": optionalKey(Schema.Array(StepRunId)),
   "declared_admission": optionalKey(DeclaredAdmission),
+  /** Model selected by the agent's current harness declaration; null when undeclared. Independent of the observed live_model and omitted by older daemons. */
+  "declared_model": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Model selected by the agent's current harness declaration; null when undeclared. Independent of the observed live_model and omitted by older daemons." }),
   /** Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`. */
   "delivery": Schema.OptionFromOptionalNullOr(AgentDelivery, NULL_NONE).annotate({ description: "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." }),
   /** When a `down` seat began waiting for a session; null in every other state. */
@@ -634,6 +670,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "live_model": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The model the seat actually runs on: the model its own session last reported (harness.usage context_occupancy or session_cumulative) for the card's incarnation, or null when it reported none. Response spend, which includes subagents' models, never counts. Differs from the declaration while the harness silently fell back to another model." }),
   /** Pending mail held for the named successor; omitted without custody. */
   "mail_custody": optionalKey(AgentMailCustody),
+  /** Current-incarnation model comparison and positive native fallback evidence. Missing or stale evidence never establishes drift or fallback. Omitted by older daemons. */
+  "model_drift": optionalKey(AgentModelDrift),
   "name": Schema.String,
   "next_work": Schema.OptionFromOptionalNullOr(WorkLabel, NULL_NONE),
   "next_work_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
@@ -647,6 +685,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "reachability": AgentReachability,
   /** Diagnostic harness reason, not a machine-readable verdict. */
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Diagnostic harness reason, not a machine-readable verdict." }),
+  /** Off-by-default idle residency diagnostics at this snapshot. No automatic suspension is performed. */
+  "residency": Schema.OptionFromOptionalNullOr(AgentResidency, NULL_NONE).annotate({ description: "Off-by-default idle residency diagnostics at this snapshot. No automatic suspension is performed." }),
   /** The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field. */
   "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
@@ -680,6 +720,8 @@ export const AgentDeclaration = /*#__PURE__*/ (() => Schema.Struct({
   "accountable": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^person/[A-Za-z0-9_.-]+$", "u")))),
   "declared_admission": optionalKey(DeclaredAdmission),
   "id": Id,
+  /** Authored idle-suspend participation. Omission and member inherit the current host policy; never opts the seat out. This is declaration metadata, not a launch change. */
+  "idle_suspend": optionalKey(Schema.Literals(["never","member"])).annotate({ description: "Authored idle-suspend participation. Omission and member inherit the current host policy; never opts the seat out. This is declaration metadata, not a launch change." }),
   "kdl": Schema.String,
   "revision": Schema.String,
   "revisions": Schema.Array(Schema.String),

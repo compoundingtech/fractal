@@ -2,21 +2,21 @@
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Build one evidence bundle from a live onboarding run. Everything it reads is the graph and the
 # Assistant's own conversation; the Assistant's claims are never taken as evidence.
-# Usage: collect.sh VARIANT STARTED_MS SKIP_MS_OR_NONE   (ST_BIN and the isolated environment set)
+# Usage: collect.sh VARIANT STARTED_MS SKIP_MS_OR_NONE   (FRACTAL_BIN and the isolated environment set)
 set -euo pipefail
 
 variant="${1:?variant}"; started_ms="${2:?started_ms}"; skip_ms="${3:-none}"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-st="${FRACTAL_BIN-${ST_BIN:-st}}"
+fractal_bin="${FRACTAL_BIN-${ST_BIN:-fractal}}"
 assistant="agent/st/assistant"; demo="agent/st/demo"; person="${EVAL_PERSON:-person/avery}"
 now_ms() { date +%s%N | cut -c1-13; }
 
 # The Assistant's conversation: what it printed for the person and what the person sent it.
-session="$("$st" conversations sessions --as "$assistant" --json \
+session="$("$fractal_bin" conversations sessions --as "$assistant" --json \
   | jq -r --arg a "$assistant" '[.value.items[] | select(.owner_id == $a)] | sort_by(.started_at) | last | .id // empty')"
 timeline='[]'
 if [ -n "$session" ]; then
-  timeline="$("$st" conversations timeline "$session" --as "$assistant" --json --limit 500 \
+  timeline="$("$fractal_bin" conversations timeline "$session" --as "$assistant" --json --limit 500 \
     | jq '[.value.items[] | select(.type == "content" and .final == true and (.body.text // "") != "")
            | {ms: ((.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) * 1000), role, text: .body.text}]')"
 fi
@@ -28,9 +28,9 @@ person_messages="$(jq --arg p "$person" '[.[] | select(.role == "user" and (.tex
 now="$(now_ms)"
 messages='[]'
 for mailbox in "$assistant" "$demo"; do
-  rows="$("$st" conversations ls "$mailbox" --archive --json 2>/dev/null || echo '[]')"
+  rows="$("$fractal_bin" conversations ls "$mailbox" --archive --json 2>/dev/null || echo '[]')"
   for id in $(jq -r '.[] | select((.from | startswith("agent/")) and (.to | startswith("agent/"))) | .subject' <<<"$rows"); do
-    age="$("$st" conversations status "$id" --json | jq -r '.delivery.age_ms // 0')"
+    age="$("$fractal_bin" conversations status "$id" --json | jq -r '.delivery.age_ms // 0')"
     messages="$(jq --argjson m "$(jq --arg id "$id" --argjson now "$now" --argjson age "$age" \
       '.[] | select(.subject == $id) | {id: .subject, from, to, ms: ($now - $age)}' <<<"$rows")" \
       '. + [$m]' <<<"$messages")"
@@ -41,9 +41,9 @@ messages="$(jq 'unique_by(.id)' <<<"$messages")"
 # `agents show` answers for a seat that was never declared (reason "undeclared"), so ask the graph
 # whether the declaration exists rather than whether the command worked.
 demo_agent_exists=false
-"$st" agents show "$demo" --all --json 2>/dev/null \
+"$fractal_bin" agents show "$demo" --all --json 2>/dev/null \
   | jq -e '(.value.operational.reasons // []) | index("undeclared") | not' >/dev/null && demo_agent_exists=true
-demo_mission_state="$("$st" missions ls --all --json 2>/dev/null \
+demo_mission_state="$("$fractal_bin" missions ls --all --json 2>/dev/null \
   | jq -r '[.. | objects | select((.id? // "") | test("st/onboarding-demo"))] | first | .status // .state // empty' || true)"
 welcome_bytes=0
 # `fractal agents new st/demo` with no workspace works in its own folder inside the work folder.
@@ -52,9 +52,9 @@ demo_workspace="${FRACTAL_WORK_ROOT-${ST_WORK_ROOT:-$HOME/st}}/agents/st/demo"
 [ -f "$demo_workspace/welcome.md" ] && welcome_bytes="$(wc -c <"$demo_workspace/welcome.md" | tr -d ' ')"
 # Act three raises an alert for the person: ask the graph for the person's alerts, resolved ones
 # included, and look for the one about the demo folder. Its words are the guide's, not the judge's.
-alert_raised="$("$st" alerts ls --as "$person" --all --json 2>/dev/null \
+alert_raised="$("$fractal_bin" alerts ls --as "$person" --all --json 2>/dev/null \
   | jq '[.. | objects | select(((.title? // .question? // "") | test("ready"; "i")))] | length > 0' 2>/dev/null || echo false)"
-onboarding_run_state="$("$st" missions ls --all --json 2>/dev/null \
+onboarding_run_state="$("$fractal_bin" missions ls --all --json 2>/dev/null \
   | jq -r '[.. | objects | select((.id? // "") | test("^st/onboarding(/|$)"))] | first | .status // .state // empty' || true)"
 
 jq -n \

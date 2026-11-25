@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -23,11 +24,31 @@ class AuditLimit(Exception):
     """An audit cap with a shareable, non-private reason."""
 
 
+def stored_signature_text(query, claim_id, value):
+    """Resolve either storage representation without reserializing original text."""
+    if value is None or isinstance(value, str):
+        return value
+    if not isinstance(value, bytes) or len(value) != 32:
+        raise AuditLimit("invalid signature reference")
+    originals = query("""SELECT signature,candidate FROM claim_signature_originals
+        WHERE claim_id=? AND reference=?""", (claim_id, value))
+    if len(originals) != 1:
+        raise AuditLimit("missing signature reference")
+    text, candidate = originals[0]["signature"], originals[0]["candidate"]
+    if (not isinstance(text, str) or candidate not in (0, 1)
+            or hashlib.sha256(text.encode("utf-8")).digest() != value):
+        raise AuditLimit("signature reference integrity mismatch")
+    if candidate and not query("""SELECT 1 FROM claim_signature_candidates
+            WHERE claim_id=? AND signature=?""", (claim_id, text)):
+        raise AuditLimit("missing canonical signature candidate")
+    return text
+
+
 def audit(database):
     result = {"audit_started_at_utc": datetime.now(timezone.utc).isoformat(),
               "complete": False, "limitations": []}
     try:
-        # mode=ro refuses a missing database. Do not use st's store opener here.
+        # mode=ro refuses a missing database. Do not use Fractal's store opener here.
         with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=2) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA query_only=ON")
@@ -52,6 +73,8 @@ def audit(database):
                 FROM claims c LEFT JOIN claim_signatures s ON s.claim_id=c.id
                 WHERE c.kind='principal.key-granted' ORDER BY c.store_index LIMIT ?""",
                 (ROW_LIMIT + 1,))
+            for grant in grants[:ROW_LIMIT]:
+                grant["signature"] = stored_signature_text(query, grant["id"], grant["signature"])
             invalid = query("""SELECT reason FROM claim_verdicts
                 WHERE verdict='invalid' LIMIT ?""", (ROW_LIMIT + 1,))
             result.update({

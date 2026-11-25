@@ -127,6 +127,7 @@ export type Agent = ResourceHeader & {
   current_work?: Array<WorkLabel>;
   current_work_ids?: Array<StepRunId>;
   declared_admission?: DeclaredAdmission;
+  declared_model?: string | null;
   delivery?: (AgentDelivery | null);
   down_since?: (Timestamp | null);
   driver?: string | null;
@@ -147,6 +148,7 @@ export type Agent = ResourceHeader & {
   lifecycle?: AgentLifecycle;
   live_model?: string | null;
   mail_custody?: AgentMailCustody;
+  model_drift?: AgentModelDrift;
   name: string;
   next_work?: (WorkLabel | null);
   next_work_id?: (Id | null);
@@ -156,6 +158,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  residency?: (AgentResidency | null);
   resources?: Array<DeclaredResource>;
   rollout?: {
 
@@ -200,6 +203,7 @@ export type AgentDeclaration = {
   accountable?: string;
   declared_admission?: DeclaredAdmission;
   id: Id;
+  idle_suspend?: "never" | "member";
   kdl: string;
   revision: string;
   revisions: Array<string>;
@@ -276,6 +280,15 @@ export type AgentMessageEstimate = {
   fallback_low_microusd: number;
   method: string;
   source: string;
+};
+
+export type AgentModelDrift = {
+  drift_age_seconds: number | null;
+  drift_since: (Timestamp | null);
+  fallback_reason: ("transient" | "quota" | "auth" | "unknown" | null);
+  observed_at: (Timestamp | null);
+  return_attempts: number | null;
+  state: "at-declared" | "drifted" | "unknown" | "stale" | "uncomparable";
 };
 
 export type AgentPresentation = {
@@ -397,6 +410,13 @@ export type AgentRepository = {
   workspaces: Array<string>;
 };
 
+export type AgentResidency = {
+  due_at: string | null;
+  eligible_since: string | null;
+  policy: string;
+  refusal_reason: string | null;
+};
+
 export type AgentResumeParameters = {
   agent: Id;
   host?: string;
@@ -453,10 +473,12 @@ export type AgentSuspendParameters = {
 export type AgentSuspension = {
   action: "suspend" | "resume";
   blocking: Array<string>;
+  cause?: string | null;
   code?: string | null;
   harness?: string | null;
   host?: string | null;
   incarnation_id?: string | null;
+  mode?: string | null;
   native_session_id?: string | null;
   operation_id: string;
   phase: 

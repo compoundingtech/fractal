@@ -1,4 +1,4 @@
-//! `st missions waiting-on RUN` and `st missions blocked`: what a run waits on, and every blocked
+//! `fractal missions waiting-on RUN` and `fractal missions blocked`: what a run waits on, and every blocked
 //! run in the fleet by cause, rendered from the daemon's published answer.
 
 use fractal_daemon::waiting_on::{BlockedRuns, RunWaitingOn, StepSettled, StepWait, WaitKind, describe_age};
@@ -15,7 +15,7 @@ fn age(now: u128, at: Option<u128>) -> Option<String> {
     at.map(|at| describe_age(now.saturating_sub(at)))
 }
 
-/// One open step: its kind, path, whom it waits on, for how long, and what st knows of it.
+/// One open step: its kind, path, whom it waits on, for how long, and what Fractal knows of it.
 fn step_line(wait: &StepWait, now: u128) -> String {
     let mut line = format!("{:<12} {}", wait.kind.name(), wait.path);
     if let Some(who) = &wait.who {

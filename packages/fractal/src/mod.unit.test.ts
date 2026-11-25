@@ -4,7 +4,7 @@ import { writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { join } from 'node:path'
 
-import { Effect, Schema } from 'effect'
+import { Duration, Effect, Schema } from 'effect'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import {
@@ -14,9 +14,14 @@ import {
   AgentSchema,
   type CodexSchema,
   emit,
+  EscalationSchema,
+  silence,
+  residency,
   type GateSchema,
   type HumanGateSchema,
   Launch,
+  LoopSchema,
+  RoundSchema,
   Review,
   Timing,
   mission,
@@ -102,7 +107,7 @@ describe('KDL v2 string emission', () => {
   })
 })
 
-describe('declared admission', () => {
+describe('canonical budget authoring', () => {
   const base = {
     id: 'example/admission',
     state: 'ready',
@@ -110,39 +115,48 @@ describe('declared admission', () => {
     goal: 'Check admission.',
     steps: [],
   } as const
-  const admission = {
-    declaredPriority: 'background',
-    declaredLane: 'check',
-    declaredBudgets: { cpuSeconds: 300, tokenBudget: 100000, memoryMax: '8G', diskMax: '20G' },
-  } as const
-  const metadata = `  declared-priority "background"
-  declared-lane "check"
-  declared-budgets {
-    cpu-seconds 300
-    token-budget 100000
-    memory-max "8G"
-    disk-max "20G"
-  }
-`
-
+  const scheduling = { priority: 'background', lane: 'check' } as const
+  const resources = { cpuSeconds: 300, tokenBudget: 100000, memoryMax: '8G', diskMax: '20G' }
+  const budget = { scheduling, resources }
   it('renders agent and mission admission in native order', () => {
-    expect(emit([agent({ id: base.id, identity: 'worker', ...admission })])).toBe(
-      `version 2
-agent "example/admission" {
-  identity "worker"
-${metadata}}
-`,
-    )
-    expect(emit([mission({ ...base, ...admission })])).toBe(
-      `version 2
-mission "example/admission" report-to="agent/example/owner" state="ready" {
-${metadata}  goal "Check admission."
-}
-`,
-    )
-    expect(missionWire({ ...base, ...admission })).toMatchObject(admission)
+    expect(
+      emit([
+        agent({
+          id: base.id,
+          identity: 'worker',
+          budget: { scheduling, resources: { memoryMax: '8G', diskMax: '20G' } },
+        }),
+      ]),
+    ).toMatchInlineSnapshot(`
+  "version 2
+  agent "example/admission" {
+    identity "worker"
+    declared-priority "background"
+    declared-lane "check"
+    declared-budgets {
+      memory-max "8G"
+      disk-max "20G"
+    }
+  }
+  "
+  `)
+    expect(emit([mission({ ...base, budget })])).toMatchInlineSnapshot(`
+  "version 2
+  mission "example/admission" report-to="agent/example/owner" state="ready" {
+    declared-priority "background"
+    declared-lane "check"
+    declared-budgets {
+      cpu-seconds 300
+      token-budget 100000
+      memory-max "8G"
+      disk-max "20G"
+    }
+    goal "Check admission."
+  }
+  "
+  `)
+    expect(missionWire({ ...base, budget })).toMatchObject({ budget })
   })
-
   it('keeps output unchanged when admission is absent', () => {
     expect(emit([agent({ id: base.id }), mission(base)])).toBe(
       `version 2
@@ -157,10 +171,9 @@ mission "example/admission" report-to="agent/example/owner" state="ready" {
 
   it.each([
     [{}, ''],
-    [{ cpuSeconds: 1, diskMax: '20g' }, '    cpu-seconds 1\n    disk-max "20g"\n'],
-    [{ tokenBudget: Number.MAX_SAFE_INTEGER }, '    token-budget 9007199254740991\n'],
-  ])('renders empty and partial budgets %j', (declaredBudgets, children) => {
-    expect(emit([agent({ id: base.id, declaredBudgets })])).toBe(
+    [{ memoryMax: '1', diskMax: '20g' }, '    memory-max "1"\n    disk-max "20g"\n'],
+  ])('renders empty and partial agent resources %j', (resources, children) => {
+    expect(emit([agent({ id: base.id, budget: { resources } })])).toBe(
       `version 2
 agent "example/admission" {
   declared-budgets {
@@ -168,7 +181,7 @@ ${children}  }
 }
 `,
     )
-    expect(emit([mission({ ...base, declaredBudgets })])).toBe(
+    expect(emit([mission({ ...base, budget: { resources } })])).toBe(
       `version 2
 mission "example/admission" report-to="agent/example/owner" state="ready" {
   declared-budgets {
@@ -180,26 +193,32 @@ ${children}  }
   })
 
   it.each([
-    { declaredPriority: 'urgent' },
-    { declaredLane: 'free-lane' },
+    { scheduling: { priority: 'urgent' } },
+    { scheduling: { lane: 'free-lane' } },
     ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity].flatMap((value) => [
-      { declaredBudgets: { cpuSeconds: value } },
-      { declaredBudgets: { tokenBudget: value } },
+      { resources: { cpuSeconds: value } },
+      { resources: { tokenBudget: value } },
     ]),
     ...['8GB', '0', '0G', '00K', '1.5G', '-1G', ''].flatMap((value) => [
-      { declaredBudgets: { memoryMax: value } },
-      { declaredBudgets: { diskMax: value } },
+      { resources: { memoryMax: value } },
+      { resources: { diskMax: value } },
     ]),
   ])('rejects invalid admission %j on agents and missions', (invalid) => {
-    expect(() => Schema.decodeUnknownSync(AgentSchema)({ id: base.id, ...invalid })).toThrow()
-    expect(() => Schema.decodeUnknownSync(MissionSchema)({ ...base, ...invalid })).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(AgentSchema, { onExcessProperty: 'error' })({
+        id: base.id,
+        budget: invalid,
+      }),
+    ).toThrow()
+    expect(() => Schema.decodeUnknownSync(MissionSchema)({ ...base, budget: invalid })).toThrow()
   })
 
   it('accepts both literal alternatives and positive sizes with leading zeros', () => {
     const value = {
-      declaredPriority: 'normal',
-      declaredLane: 'build',
-      declaredBudgets: { memoryMax: '001k', diskMax: '1' },
+      budget: {
+        scheduling: { priority: 'normal', lane: 'build' },
+        resources: { memoryMax: '001k', diskMax: '1' },
+      },
     } as const
     expect(Schema.decodeSync(AgentSchema)({ id: base.id, ...value })).toMatchObject(value)
     expect(Schema.decodeSync(MissionSchema)({ ...base, ...value })).toMatchObject(value)
@@ -211,7 +230,7 @@ ${children}  }
       emit([
         node({
           ...parent,
-          children: [...(parent.children ?? []), mission({ ...base, id: 'child', ...admission })],
+          children: [...(parent.children ?? []), mission({ ...base, id: 'child', budget })],
         }),
       ]),
     ).toBe(
@@ -234,17 +253,95 @@ mission "example/admission" report-to="agent/example/owner" state="ready" {
     )
   })
 
-  it.each(['declaredPriority', 'declaredLane', 'declaredBudgets'] as const)(
-    'rejects %s on steps',
-    (field) => {
-      expect(() =>
-        Schema.decodeSync(StepSchema, { onExcessProperty: 'error' })({
-          id: 'check',
-          [field]: admission[field],
-        }),
-      ).toThrow()
-    },
-  )
+  it.each(['cpuSeconds', 'tokenBudget'] as const)('rejects agent resource %s', (field) => {
+    const input: unknown = { id: base.id, budget: { resources: { [field]: 1 } } }
+    expect(() => Schema.decodeUnknownSync(AgentSchema)(input)).toThrow()
+  })
+
+  it('rejects step budgets', () => {
+    // @ts-expect-error Steps have no budget.
+    expect(() => step({ id: 'check', budget: {} })).toThrow()
+  })
+
+  const round = { completion: { when: 'all-steps-exhausted' }, steps: [] } as const
+  const boundedLoop = { id: 'retry', maxRounds: 2, round }
+  it('rejects loop and round budgets in authoring helpers', () => {
+    expect(Schema.decodeSync(LoopSchema)(boundedLoop).maxRounds).toBe(2)
+    expect(
+      Schema.decodeSync(MissionSchema)({ ...base, steps: [boundedLoop] }).steps[0],
+    ).toMatchObject({
+      maxRounds: 2,
+    })
+    // @ts-expect-error Loops have no budget.
+    expect(() => loop({ ...boundedLoop, budget: {} })).toThrow()
+    // @ts-expect-error Loops nested in missions have no budget.
+    expect(() => mission({ ...base, steps: [{ ...boundedLoop, budget: {} }] })).toThrow()
+    // @ts-expect-error Round containers have no budget.
+    expect(() => loop({ ...boundedLoop, round: { ...round, budget: {} } })).toThrow()
+  })
+
+  it.each([
+    [AgentSchema, { id: base.id, budget: { resources: { cpuSeconds: 1 } } }],
+    [AgentSchema, { id: base.id, budget: { scheduling: { extra: true } } }],
+    [AgentSchema, { id: base.id, budget: { extra: true } }],
+    [MissionSchema, { ...base, budget: { timeout: '30m' } }],
+    [MissionSchema, { ...base, budget: { resources: { extra: true } } }],
+    [MissionSchema, { ...base, budget: { scheduling: { extra: true } } }],
+    [StepSchema, { id: 'check', budget: { resources: { cpuSeconds: 1 } } }],
+    [StepSchema, { id: 'check', budget: { attention: {} } }],
+    [
+      MissionSchema,
+      { ...base, steps: [{ id: 'check', budget: { resources: { cpuSeconds: 1 } } }] },
+    ],
+    [LoopSchema, { ...boundedLoop, budget: {} }],
+    [RoundSchema, { ...round, budget: {} }],
+    [MissionSchema, { ...base, steps: [{ ...boundedLoop, budget: {} }] }],
+    [MissionSchema, { ...base, steps: [{ ...boundedLoop, round: { ...round, budget: {} } }] }],
+  ] as const)('refuses unknown budget keys with raw decoders (%#)', (schema, input) => {
+    expect(() => Schema.decodeUnknownSync(schema)(input)).toThrow()
+    expect(() => Schema.decodeUnknownSync(schema, { onExcessProperty: 'ignore' })(input)).toThrow()
+  })
+
+  it('refuses invalid loops instead of stripping them to plain steps', () => {
+    const input: unknown = { ...base, steps: [{ ...boundedLoop, round: { steps: [] } }] }
+    expect(() => Schema.decodeUnknownSync(MissionSchema)(input)).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(MissionSchema, { onExcessProperty: 'ignore' })(input),
+    ).toThrow()
+  })
+
+  it('has no legacy authoring aliases', () => {
+    // @ts-expect-error Scheduling is authored through budget.
+    expect(() => agent({ id: base.id, declaredPriority: 'normal' })).toThrow()
+    // @ts-expect-error Scheduling is authored through budget.
+    expect(() => mission({ ...base, declaredLane: 'build' })).toThrow()
+    // @ts-expect-error Resources are authored through budget.
+    expect(() => agent({ id: base.id, declaredBudgets: {} })).toThrow()
+  })
+
+  it.each(
+    (
+      [
+        ['declaredPriority', 'normal'],
+        ['declaredLane', 'build'],
+        ['declaredBudgets', { memoryMax: '8G' }],
+      ] as const
+    ).flatMap(([field, value]) => [value, null, undefined].map((input) => [field, input] as const)),
+  )('refuses retired %s=%j even when excess keys are ignored', (field, value) => {
+    const oldAgent = { id: base.id, [field]: value }
+    const oldMission = { ...base, [field]: value }
+    const rawAgent: unknown = oldAgent
+    const rawMission: unknown = oldMission
+    expect(() =>
+      Schema.decodeUnknownSync(AgentSchema, { onExcessProperty: 'ignore' })(rawAgent),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(MissionSchema, { onExcessProperty: 'ignore' })(rawMission),
+    ).toThrow()
+    expect(() => agent(oldAgent)).toThrow()
+    expect(() => mission(oldMission)).toThrow()
+    expect(() => node({ ...mission(base), children: [mission(oldMission)] })).toThrow()
+  })
 })
 
 describe('mission lanes', () => {
@@ -1007,7 +1104,7 @@ schedule "daily" {
     )
   })
   it.each(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const)(
-    'renders a weekly %s calendar using st DAY HH:MM syntax',
+    'renders a weekly %s calendar using fractal DAY HH:MM syntax',
     (day) => {
       expect(
         emit([
@@ -1192,6 +1289,79 @@ describe('Fractal declarations', () => {
     expect(() =>
       Schema.decodeUnknownSync(MissionSchema)({ ...fanInMission(), reportStalls }),
     ).toThrow()
+  })
+  it('renders silence and residency policies with explicit step overrides', () => {
+    const stages = [
+      { after: Duration.minutes(30), action: { _tag: 'notify' as const, recipient: owner } },
+      { after: Duration.hours(24), action: { _tag: 'ask' as const, recipient: person('person/reviewer') } },
+    ] as const
+    const escalation = [
+      silence({ id: 'silence', state: 'claimed', stages }),
+      residency({ id: 'residency', state: 'blocked', stages }),
+    ] as const
+    const decoded = Schema.decodeSync(EscalationSchema)(escalation[0]!)
+    expect(Duration.toMillis(decoded.stages[0].after)).toBe(1_800_000)
+    const rendered = emit([mission({
+      ...fanInMission(),
+      escalation: { _tag: 'replace', policies: [silence({ id: 'silence', state: 'running', stages })] },
+      steps: [
+        { id: 'approval', escalation: { _tag: 'disable' } },
+        { id: 'work', escalation: { _tag: 'replace', policies: escalation } },
+      ],
+    })])
+    expect(rendered).toContain('clock="since-progress"')
+    expect(rendered).toContain('clock="since-entered"')
+    expect(rendered).toContain('stage "30m" notify="agent/example/owner"')
+    expect(rendered).toContain('stage "1d" ask="person/reviewer"')
+    expect(rendered.match(/escalation/g)).toHaveLength(3)
+    expect(rendered).toContain('escalation disabled=#true')
+    expect(Schema.decodeSync(StepSchema)({ id: 'approval', escalation: { _tag: 'disable' } }).escalation).toEqual({ _tag: 'disable' })
+    expect(Schema.decodeSync(StepSchema)({ id: 'inherited', escalation: { _tag: 'inherit' } }).escalation).toEqual({ _tag: 'inherit' })
+    expect(Schema.decodeSync(StepSchema)({ id: 'inherited' }).escalation).toBeUndefined()
+  })
+  it('rejects malformed actions, delays, ordering and duplicate policy IDs', () => {
+    const notify = { _tag: 'notify', recipient: owner }
+    const valid = { after: Duration.minutes(30), action: notify }
+    for (const stages of [
+      [{ after: Duration.minutes(30), action: { _tag: 'notify', recipient: operator } }],
+      [{ after: Duration.minutes(30), action: { _tag: 'ask', recipient: owner } }],
+      [{ after: Duration.zero, action: notify }],
+      [{ after: Duration.infinity, action: notify }],
+      [{ after: Duration.nanos(1n), action: notify }],
+      [{ after: '30m', action: notify }],
+      [valid, valid],
+      [{ after: Duration.hours(4), action: notify }, valid],
+      [],
+    ]) {
+      expect(() => Schema.decodeUnknownSync(EscalationSchema)({
+        id: 'silence', when: { state: 'claimed', clock: 'since-progress' }, stages,
+      })).toThrow()
+    }
+    const policy = silence({ id: 'silence', state: 'claimed', stages: [
+      { after: Duration.minutes(30), action: { _tag: 'notify', recipient: owner } },
+    ] })
+    expect(() => Schema.decodeUnknownSync(StepSchema)({
+      id: 'duplicate', escalation: { _tag: 'replace', policies: [policy, policy] },
+    })).toThrow()
+    for (const escalation of [[], { _tag: 'replace', policies: [] }]) {
+      expect(() => Schema.decodeUnknownSync(StepSchema)({ id: 'work', escalation })).toThrow()
+    }
+    for (const state of ['working', 'unknown', 'normal', 'running', 'queued']) {
+      expect(() => Schema.decodeUnknownSync(StepSchema)({
+        id: 'work', escalation: { _tag: 'replace', policies: [{ ...policy, when: { state, clock: 'since-entered' } }] },
+      })).toThrow()
+    }
+    for (const state of ['working', 'unknown', 'normal', 'ready', 'claimed', 'blocked', 'verifying', 'waiting-person']) {
+      expect(() => Schema.decodeUnknownSync(MissionSchema)({
+        ...fanInMission(), escalation: { _tag: 'replace', policies: [{ ...policy, when: { state, clock: 'since-entered' } }] },
+      })).toThrow()
+    }
+    for (const id of [undefined, '', 'bad id']) {
+      expect(() => Schema.decodeUnknownSync(EscalationSchema)({ ...policy, id })).toThrow()
+    }
+    expect(() => Schema.decodeUnknownSync(EscalationSchema)({
+      ...policy, when: { state: 'claimed', clock: 'in-state' },
+    })).toThrow()
   })
   it('requires imported objects for step assignment and under targets', () => {
     type AssignedTo = NonNullable<(typeof StepSchema.Encoded)['assignedTo']>
@@ -2650,18 +2820,18 @@ describe('native mission grammar', () => {
     ).toThrow()
   })
 })
-const stBin = process.env.ST_BIN
-const testWithSt = stBin !== undefined && stBin !== '' ? it : it.skip
+const fractalBin = process.env.ST_BIN
+const testWithFractal = fractalBin !== undefined && fractalBin !== '' ? it : it.skip
 
 // Explicitly opt in to upstream's separate test-support executable, never a production fallback.
 // It exercises gate semantics with synthetic person attribution, not production authentication.
-const stFixtureBin = process.env.ST_FIXTURE_BIN
-const testWithStFixture = stFixtureBin !== undefined && stFixtureBin !== '' ? it : it.skip
+const fractalFixtureBin = process.env.ST_FIXTURE_BIN
+const testWithFractalFixture = fractalFixtureBin !== undefined && fractalFixtureBin !== '' ? it : it.skip
 
 // This person exists only in each private scratch daemon's config, never in a live fleet.
 const gateReviewer = 'person/step-reviewer'
 
-type IsolatedSt = {
+type IsolatedFractal = {
   dir: string
   socket: string
   isolatedEnv: NodeJS.ProcessEnv
@@ -2674,7 +2844,7 @@ type IsolatedSt = {
  * Polls real daemon projections until a condition is observed. The isolated daemon has no
  * deterministic clock seam; the elapsed time never stands in for the asserted condition.
  */
-const pollSt = async <T>(
+const pollFractal = async <T>(
   read: () => Promise<T>,
   ready: (value: T) => boolean,
   description: string,
@@ -2692,11 +2862,11 @@ const pollSt = async <T>(
   throw new Error(`Timed out waiting for ${description}; last observation: ${JSON.stringify(last)}`)
 }
 
-const withIsolatedSt = async (
+const withIsolatedFractal = async (
   { kind, signal }: { kind: 'production' | 'fixture'; signal: AbortSignal },
-  run: (st: IsolatedSt) => Promise<void>,
+  run: (fractal: IsolatedFractal) => Promise<void>,
 ) => {
-  const binary = kind === 'fixture' ? stFixtureBin : stBin
+  const binary = kind === 'fixture' ? fractalFixtureBin : fractalBin
   if (binary === undefined || binary === '')
     throw new Error(
       `${kind === 'fixture' ? 'ST_FIXTURE_BIN' : 'ST_BIN'} is required for ${kind} mode`,
@@ -2765,8 +2935,8 @@ const withIsolatedSt = async (
   )
 }
 
-const stJson = <T>(st: IsolatedSt, ...args: string[]): T => {
-  const result = st.command(...args)
+const fractalJson = <T>(fractal: IsolatedFractal, ...args: string[]): T => {
+  const result = fractal.command(...args)
   expect(
     result.status,
     `${args.join(' ')}: ${result.error ?? ''}\n${result.stderr}\n${result.stdout}`,
@@ -2774,10 +2944,10 @@ const stJson = <T>(st: IsolatedSt, ...args: string[]): T => {
   return JSON.parse(result.stdout) as T
 }
 
-testWithSt(
+testWithFractal(
   'admits canonical task launches through native grammar and rejects invalid native options',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'production', signal }, async ({ dir, command }) => {
+    withIsolatedFractal({ kind: 'production', signal }, async ({ dir, command }) => {
       const taskLaunch = Launch.argv({
         argv: ['true'],
         cwd: dir,
@@ -2851,10 +3021,10 @@ testWithSt(
   30000,
 )
 
-testWithSt(
+testWithFractal(
   'plans native OMP role launch without a thinking override',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'production', signal }, async ({ dir, command, get }) => {
+    withIsolatedFractal({ kind: 'production', signal }, async ({ dir, command, get }) => {
       const source = join(dir, 'role.kdl')
       writeFileSync(
         source,
@@ -2884,10 +3054,10 @@ testWithSt(
   30000,
 )
 
-testWithSt(
-  'round-trips canonical mission and strict agent fields through isolated st daemon',
+testWithFractal(
+  'round-trips canonical mission and strict agent fields through isolated fractal daemon',
   async ({ signal }) =>
-    withIsolatedSt(
+    withIsolatedFractal(
       { kind: 'production', signal },
       async ({ dir, socket, isolatedEnv, runCommand }) => {
         const source = join(dir, 'mission.kdl')
@@ -2895,7 +3065,7 @@ testWithSt(
         writeFileSync(source, canonical())
         const publish = () =>
           spawnSync(
-            stBin!,
+            fractalBin!,
             [
               '--endpoint',
               `unix://${socket}`,
@@ -2932,7 +3102,7 @@ testWithSt(
         const applySeat = (declaration: string) => {
           writeFileSync(seatSource, declaration)
           return spawnSync(
-            stBin!,
+            fractalBin!,
             [
               '--endpoint',
               `unix://${socket}`,
@@ -2973,7 +3143,7 @@ testWithSt(
         )
         expect(xhigh.status, xhigh.stderr).toBe(0)
         const xhighShown = spawnSync(
-          stBin!,
+          fractalBin!,
           ['--endpoint', `unix://${socket}`, 'subject', 'show', 'agent/garden/xhigh', '--kdl'],
           { encoding: 'utf8', timeout: 30000, env: isolatedEnv },
         )
@@ -3047,7 +3217,7 @@ testWithSt(
         const documentFile = join(dir, 'guide.txt')
         writeFileSync(documentFile, guideText)
         const storedGuide = spawnSync(
-          stBin!,
+          fractalBin!,
           [
             '--endpoint',
             `unix://${socket}`,
@@ -3107,7 +3277,7 @@ testWithSt(
         expect(inputPublished.status, inputPublished.stderr).toBe(0)
         const observePr = (state: string) =>
           spawnSync(
-            stBin!,
+            fractalBin!,
             [
               '--endpoint',
               `unix://${socket}`,
@@ -3129,7 +3299,7 @@ testWithSt(
         const claimId = JSON.parse(observedPr.stdout).id
         const startLanding = (values: readonly string[], id = 'input-proof') =>
           spawnSync(
-            stBin!,
+            fractalBin!,
             [
               '--endpoint',
               `unix://${socket}`,
@@ -3181,7 +3351,7 @@ testWithSt(
         const laterObservation = observePr('closed')
         expect(laterObservation.status, laterObservation.stderr).toBe(0)
         const inputShown = spawnSync(
-          stBin!,
+          fractalBin!,
           [
             '--endpoint',
             `unix://${socket}`,
@@ -3254,7 +3424,7 @@ testWithSt(
         const watchPublished = publish()
         expect(watchPublished.status, watchPublished.stderr).toBe(0)
         const watchStarted = spawnSync(
-          stBin!,
+          fractalBin!,
           [
             '--endpoint',
             `unix://${socket}`,
@@ -3299,7 +3469,7 @@ testWithSt(
         })
         const showOwned = (subject: string) => {
           const result = spawnSync(
-            stBin!,
+            fractalBin!,
             ['--endpoint', `unix://${socket}`, '--json', 'subject', 'show', subject],
             { encoding: 'utf8', timeout: 30000, env: isolatedEnv },
           )
@@ -3307,7 +3477,7 @@ testWithSt(
           return Schema.decodeUnknownSync(OwnedProjection)(JSON.parse(result.stdout)).status
             .subjects[0]
         }
-        const ownedObserver = await pollSt(
+        const ownedObserver = await pollFractal(
           async () => showOwned(observerSubject),
           (value) => value?.desired != null,
           'run-scoped ref observer',
@@ -3326,7 +3496,7 @@ testWithSt(
             ]),
           },
         })
-        const ownedSubscription = await pollSt(
+        const ownedSubscription = await pollFractal(
           async () => showOwned(subscriptionSubject),
           (value) => value?.desired != null,
           'run-scoped ref subscription',
@@ -3363,7 +3533,7 @@ testWithSt(
             ]),
           )
           return spawnSync(
-            stBin!,
+            fractalBin!,
             ['--endpoint', `unix://${socket}`, 'missions', 'check', source, '--workspace', dir],
             { encoding: 'utf8', timeout: 30000, env: isolatedEnv },
           )
@@ -3431,13 +3601,13 @@ const nativeStep = (run: NativeRun, id: string) => {
   expect(found, `${run.subject} must contain step ${id}`).toBeDefined()
   return found!
 }
-const nativeRun = (st: IsolatedSt, subject: string) =>
-  stJson<NativeRun>(st, 'missions', 'show', subject)
-const nativeReviews = (st: IsolatedSt) =>
-  st.get<NativeReview[]>(`/v1/reviews?reviewer=${encodeURIComponent(gateReviewer)}`)
-const nativeCards = (st: IsolatedSt) => {
-  const page = stJson<{ value: { items: NativeCard[]; page: { has_more: boolean } } }>(
-    st,
+const nativeRun = (fractal: IsolatedFractal, subject: string) =>
+  fractalJson<NativeRun>(fractal, 'missions', 'show', subject)
+const nativeReviews = (fractal: IsolatedFractal) =>
+  fractal.get<NativeReview[]>(`/v1/reviews?reviewer=${encodeURIComponent(gateReviewer)}`)
+const nativeCards = (fractal: IsolatedFractal) => {
+  const page = fractalJson<{ value: { items: NativeCard[]; page: { has_more: boolean } } }>(
+    fractal,
     'alerts',
     'ls',
     '--as',
@@ -3449,8 +3619,8 @@ const nativeCards = (st: IsolatedSt) => {
   return page.value.items.filter((item) => item.kind === 'attention')
 }
 /** Every recorded answer bound to this exact native request episode. */
-const nativeResults = async (st: IsolatedSt, review: NativeReview) => {
-  const page = await st.get<{ claims: NativeClaim[]; next_cursor: number | null }>(
+const nativeResults = async (fractal: IsolatedFractal, review: NativeReview) => {
+  const page = await fractal.get<{ claims: NativeClaim[]; next_cursor: number | null }>(
     `/v1/claims?subject=${encodeURIComponent(review.operation)}&limit=500`,
   )
   expect(page.next_cursor).toBeNull()
@@ -3463,21 +3633,21 @@ const nativeResults = async (st: IsolatedSt, review: NativeReview) => {
  * Publishes an agentless critical approval checkpoint before a risky worker step.
  * Every mutation names the person explicitly; this is R1 attribution, not a person credential.
  */
-const publishHumanFixture = (st: IsolatedSt, id: string, checkpointTimeout?: string) => {
+const publishHumanFixture = (fractal: IsolatedFractal, id: string, checkpointTimeout?: string) => {
   const seat = (seatId: string) =>
     ({
       id: seatId,
       command: 'true',
-      workspace: st.dir,
+      workspace: fractal.dir,
       restart: 'never',
       rollout: 'manual',
     }) as const
   const worker = seat('acceptance/worker')
   const observer = seat('acceptance/observer')
-  const seats = join(st.dir, 'human-gate-agents.kdl')
+  const seats = join(fractal.dir, 'human-gate-agents.kdl')
   writeFileSync(seats, emit([agent(worker), agent(observer)]))
-  stJson(st, 'agents', 'apply', seats, '--as', gateReviewer)
-  const source = join(st.dir, `${id.replace('/', '-')}.kdl`)
+  fractalJson(fractal, 'agents', 'apply', seats, '--as', gateReviewer)
+  const source = join(fractal.dir, `${id.replace('/', '-')}.kdl`)
   writeFileSync(
     source,
     emit([
@@ -3511,29 +3681,29 @@ const publishHumanFixture = (st: IsolatedSt, id: string, checkpointTimeout?: str
       }),
     ]),
   )
-  stJson(st, 'missions', 'publish', source, '--as', gateReviewer)
+  fractalJson(fractal, 'missions', 'publish', source, '--as', gateReviewer)
   return () =>
-    stJson<{ mission_run: NativeRun }>(
-      st,
+    fractalJson<{ mission_run: NativeRun }>(
+      fractal,
       'missions',
       'start',
       `mission/${id}`,
       '--workspace',
-      st.dir,
+      fractal.dir,
       '--as',
       gateReviewer,
     ).mission_run
 }
 
 /** Captures the current native request, its exact binding, and its person attention card. */
-const pendingHumanEpisode = async (st: IsolatedSt, started: NativeRun) => {
-  const reviews = await pollSt(
-    () => nativeReviews(st),
+const pendingHumanEpisode = async (fractal: IsolatedFractal, started: NativeRun) => {
+  const reviews = await pollFractal(
+    () => nativeReviews(fractal),
     (items) => items.some((item) => item.mission_run === started.subject),
     `human request for ${started.subject}`,
   )
   const review = reviews.find((item) => item.mission_run === started.subject)!
-  const run = nativeRun(st, started.subject)
+  const run = nativeRun(fractal, started.subject)
   const checkpoint = nativeStep(run, 'authorize')
   expect(review).toMatchObject({
     owner: checkpoint.subject,
@@ -3550,7 +3720,7 @@ const pendingHumanEpisode = async (st: IsolatedSt, started: NativeRun) => {
     claimant: null,
     worker_reported: false,
   })
-  const requested = await st.get<NativeClaim>(
+  const requested = await fractal.get<NativeClaim>(
     `/v1/claims/by-id/${encodeURIComponent(review.request)}`,
   )
   expect(requested).toMatchObject({
@@ -3568,8 +3738,8 @@ const pendingHumanEpisode = async (st: IsolatedSt, started: NativeRun) => {
       },
     },
   })
-  const cards = await pollSt(
-    async () => nativeCards(st),
+  const cards = await pollFractal(
+    async () => nativeCards(fractal),
     (items) => items.some((item) => item.episode === review.request),
     `attention card for ${review.request}`,
   )
@@ -3584,24 +3754,24 @@ const pendingHumanEpisode = async (st: IsolatedSt, started: NativeRun) => {
   })
   expect(card.actions).toEqual(expect.arrayContaining(['review.approve', 'review.reject']))
   expect(card.actions).not.toContain('review.request-changes')
-  expect(stJson(st, 'alerts', 'show', card.id, '--as', gateReviewer)).toMatchObject({
+  expect(fractalJson(fractal, 'alerts', 'show', card.id, '--as', gateReviewer)).toMatchObject({
     episode: review.request,
     kind: 'human-gate',
     subject: checkpoint.subject,
     person: gateReviewer,
   })
-  expect(await nativeResults(st, review)).toEqual([])
+  expect(await nativeResults(fractal, review)).toEqual([])
   return { run, review, card }
 }
 
-const expectEpisodeClosed = async (st: IsolatedSt, review: NativeReview) => {
-  await pollSt(
-    () => nativeReviews(st),
+const expectEpisodeClosed = async (fractal: IsolatedFractal, review: NativeReview) => {
+  await pollFractal(
+    () => nativeReviews(fractal),
     (items) => items.every((item) => item.request !== review.request),
     `closed human request ${review.request}`,
   )
-  await pollSt(
-    async () => nativeCards(st),
+  await pollFractal(
+    async () => nativeCards(fractal),
     (items) => items.every((item) => item.episode !== review.request),
     `removed attention card for ${review.request}`,
   )
@@ -3612,24 +3782,24 @@ const expectRefused = (result: SpawnSyncReturns<string>, pattern: RegExp) => {
   expect(result.stderr).toMatch(pattern)
 }
 
-testWithStFixture(
+testWithFractalFixture(
   'isolated human gate: critical silence holds readiness until the named reviewer approves',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'fixture', signal }, async (st) => {
-      const start = publishHumanFixture(st, 'acceptance/critical')
-      const { run, review, card } = await pendingHumanEpisode(st, start())
+    withIsolatedFractal({ kind: 'fixture', signal }, async (fractal) => {
+      const start = publishHumanFixture(fractal, 'acceptance/critical')
+      const { run, review, card } = await pendingHumanEpisode(fractal, start())
       // Re-observe the same episode; unanswered critical review stays held, never approved.
       expect(
-        (await nativeReviews(st)).filter((item) => item.request === review.request),
+        (await nativeReviews(fractal)).filter((item) => item.request === review.request),
       ).toHaveLength(1)
-      expect(nativeStep(nativeRun(st, run.subject), 'risky').status).toBe('pending')
-      expect(await nativeResults(st, review)).toEqual([])
+      expect(nativeStep(nativeRun(fractal, run.subject), 'risky').status).toBe('pending')
+      expect(await nativeResults(fractal, review)).toEqual([])
       expectRefused(
-        st.command('alerts', 'approve', card.id, '--as', 'person/someone-else'),
+        fractal.command('alerts', 'approve', card.id, '--as', 'person/someone-else'),
         /wrong-reviewer|requires `person\/step-reviewer`/u,
       )
-      expect(await nativeResults(st, review)).toEqual([])
-      const result = stJson<NativeClaim>(st, 'alerts', 'approve', card.id, '--as', gateReviewer)
+      expect(await nativeResults(fractal, review)).toEqual([])
+      const result = fractalJson<NativeClaim>(fractal, 'alerts', 'approve', card.id, '--as', gateReviewer)
       expect(result).toMatchObject({
         subject: review.operation,
         kind: 'gate.result',
@@ -3639,8 +3809,8 @@ testWithStFixture(
           evidence: expect.arrayContaining([review.request]),
         },
       })
-      const admitted = await pollSt(
-        async () => nativeRun(st, run.subject),
+      const admitted = await pollFractal(
+        async () => nativeRun(fractal, run.subject),
         (value) => nativeStep(value, 'risky').status === 'ready',
         'approved dependent worker readiness',
       )
@@ -3649,9 +3819,9 @@ testWithStFixture(
         claimant: null,
         worker_reported: false,
       })
-      await expectEpisodeClosed(st, review)
+      await expectEpisodeClosed(fractal, review)
       expectRefused(
-        st.command(
+        fractal.command(
           'alerts',
           'reject',
           card.id,
@@ -3662,20 +3832,20 @@ testWithStFixture(
         ),
         closedReview,
       )
-      expect((await nativeResults(st, review)).map((claim) => claim.id)).toEqual([result.id])
-      expect(nativeStep(nativeRun(st, run.subject), 'risky').status).toBe('ready')
+      expect((await nativeResults(fractal, review)).map((claim) => claim.id)).toEqual([result.id])
+      expect(nativeStep(nativeRun(fractal, run.subject), 'risky').status).toBe('ready')
     }),
   120000,
 )
 
-testWithStFixture(
+testWithFractalFixture(
   'isolated human gate: an expired agentless checkpoint fails instead of approving',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'fixture', signal }, async (st) => {
-      const start = publishHumanFixture(st, 'acceptance/timeout', '2s')
-      const { run, review, card } = await pendingHumanEpisode(st, start())
-      const failed = await pollSt(
-        async () => nativeRun(st, run.subject),
+    withIsolatedFractal({ kind: 'fixture', signal }, async (fractal) => {
+      const start = publishHumanFixture(fractal, 'acceptance/timeout', '2s')
+      const { run, review, card } = await pendingHumanEpisode(fractal, start())
+      const failed = await pollFractal(
+        async () => nativeRun(fractal, run.subject),
         (value) => value.status === 'failed',
         'agentless checkpoint timeout failure',
         90000,
@@ -3686,28 +3856,28 @@ testWithStFixture(
         claimant: null,
         worker_reported: false,
       })
-      expect(await nativeResults(st, review)).toEqual([])
-      await expectEpisodeClosed(st, review)
-      expectRefused(st.command('alerts', 'approve', card.id, '--as', gateReviewer), closedReview)
-      expect(await nativeResults(st, review)).toEqual([])
-      expect(nativeRun(st, run.subject).status).toBe('failed')
+      expect(await nativeResults(fractal, review)).toEqual([])
+      await expectEpisodeClosed(fractal, review)
+      expectRefused(fractal.command('alerts', 'approve', card.id, '--as', gateReviewer), closedReview)
+      expect(await nativeResults(fractal, review)).toEqual([])
+      expect(nativeRun(fractal, run.subject).status).toBe('failed')
     }),
   150000,
 )
 
-testWithStFixture(
+testWithFractalFixture(
   'isolated human gate: rejection fails the checkpoint without admitting its dependent',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'fixture', signal }, async (st) => {
-      const start = publishHumanFixture(st, 'acceptance/rejected')
-      const { run, review, card } = await pendingHumanEpisode(st, start())
+    withIsolatedFractal({ kind: 'fixture', signal }, async (fractal) => {
+      const start = publishHumanFixture(fractal, 'acceptance/rejected')
+      const { run, review, card } = await pendingHumanEpisode(fractal, start())
       expectRefused(
-        st.command('alerts', 'reject', card.id, '--as', gateReviewer),
+        fractal.command('alerts', 'reject', card.id, '--as', gateReviewer),
         /missing-review-reason|needs a reason|--reason/u,
       )
       const reason = 'The isolated plan is not authorized.'
-      const result = stJson<NativeClaim>(
-        st,
+      const result = fractalJson<NativeClaim>(
+        fractal,
         'alerts',
         'reject',
         card.id,
@@ -3724,8 +3894,8 @@ testWithStFixture(
           evidence: expect.arrayContaining([review.request]),
         },
       })
-      const stopped = await pollSt(
-        async () => nativeRun(st, run.subject),
+      const stopped = await pollFractal(
+        async () => nativeRun(fractal, run.subject),
         (value) => value.status === 'failed',
         'rejected mission failure',
       )
@@ -3735,22 +3905,22 @@ testWithStFixture(
         claimant: null,
         worker_reported: false,
       })
-      await expectEpisodeClosed(st, review)
-      expectRefused(st.command('alerts', 'approve', card.id, '--as', gateReviewer), closedReview)
-      expect((await nativeResults(st, review)).map((claim) => claim.id)).toEqual([result.id])
-      expect(nativeRun(st, run.subject).status).toBe('failed')
+      await expectEpisodeClosed(fractal, review)
+      expectRefused(fractal.command('alerts', 'approve', card.id, '--as', gateReviewer), closedReview)
+      expect((await nativeResults(fractal, review)).map((claim) => claim.id)).toEqual([result.id])
+      expect(nativeRun(fractal, run.subject).status).toBe('failed')
     }),
   120000,
 )
 
-testWithStFixture(
+testWithFractalFixture(
   'isolated human gate: cancellation fences late decisions from a fresh run episode',
   async ({ signal }) =>
-    withIsolatedSt({ kind: 'fixture', signal }, async (st) => {
-      const start = publishHumanFixture(st, 'acceptance/stale')
-      const old = await pendingHumanEpisode(st, start())
-      stJson(
-        st,
+    withIsolatedFractal({ kind: 'fixture', signal }, async (fractal) => {
+      const start = publishHumanFixture(fractal, 'acceptance/stale')
+      const old = await pendingHumanEpisode(fractal, start())
+      fractalJson(
+        fractal,
         'missions',
         'cancel',
         old.run.subject,
@@ -3759,45 +3929,45 @@ testWithStFixture(
         '--as',
         gateReviewer,
       )
-      await pollSt(
-        async () => nativeRun(st, old.run.subject),
+      await pollFractal(
+        async () => nativeRun(fractal, old.run.subject),
         (value) => value.status === 'cancelled',
         'cancelled old run',
       )
-      await expectEpisodeClosed(st, old.review)
-      const fresh = await pendingHumanEpisode(st, start())
+      await expectEpisodeClosed(fractal, old.review)
+      const fresh = await pendingHumanEpisode(fractal, start())
       expect(fresh.run.subject).not.toBe(old.run.subject)
       expect(fresh.review.request).not.toBe(old.review.request)
       expect(fresh.review.operation).not.toBe(old.review.operation)
       expect(fresh.card.id).not.toBe(old.card.id)
       expectRefused(
-        st.command('alerts', 'approve', old.card.id, '--as', gateReviewer),
+        fractal.command('alerts', 'approve', old.card.id, '--as', gateReviewer),
         closedReview,
       )
-      expect(await nativeResults(st, old.review)).toEqual([])
-      expect(await nativeResults(st, fresh.review)).toEqual([])
-      expect(nativeRun(st, old.run.subject).status).toBe('cancelled')
-      expect(nativeStep(nativeRun(st, fresh.run.subject), 'risky').status).toBe('pending')
+      expect(await nativeResults(fractal, old.review)).toEqual([])
+      expect(await nativeResults(fractal, fresh.review)).toEqual([])
+      expect(nativeRun(fractal, old.run.subject).status).toBe('cancelled')
+      expect(nativeStep(nativeRun(fractal, fresh.run.subject), 'risky').status).toBe('pending')
       expect(
-        (await nativeReviews(st)).filter((item) => item.request === fresh.review.request),
+        (await nativeReviews(fractal)).filter((item) => item.request === fresh.review.request),
       ).toHaveLength(1)
-      const result = stJson<NativeClaim>(
-        st,
+      const result = fractalJson<NativeClaim>(
+        fractal,
         'alerts',
         'approve',
         fresh.card.id,
         '--as',
         gateReviewer,
       )
-      await pollSt(
-        async () => nativeRun(st, fresh.run.subject),
+      await pollFractal(
+        async () => nativeRun(fractal, fresh.run.subject),
         (value) => nativeStep(value, 'risky').status === 'ready',
         'fresh episode dependent readiness',
       )
-      await expectEpisodeClosed(st, fresh.review)
-      expect(await nativeResults(st, old.review)).toEqual([])
-      expect((await nativeResults(st, fresh.review)).map((claim) => claim.id)).toEqual([result.id])
-      expect(nativeRun(st, old.run.subject).status).toBe('cancelled')
+      await expectEpisodeClosed(fractal, fresh.review)
+      expect(await nativeResults(fractal, old.review)).toEqual([])
+      expect((await nativeResults(fractal, fresh.review)).map((claim) => claim.id)).toEqual([result.id])
+      expect(nativeRun(fractal, old.run.subject).status).toBe('cancelled')
     }),
   120000,
 )

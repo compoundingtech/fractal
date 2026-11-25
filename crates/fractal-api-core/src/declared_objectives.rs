@@ -38,6 +38,9 @@ use crate::store::objective_series::time_ms;
 mod budget;
 pub(crate) use budget::{BudgetEvidence, classify_budget};
 
+#[path = "declared_github_objectives.rs"]
+mod github;
+
 /// Claims read per page while catching up.
 const PAGE: usize = 1_000;
 /// Open samples over target an explanation names; the rest are counted.
@@ -260,19 +263,59 @@ fn objective_series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds:
 
 /// The declared objectives' rows, evaluated at `now`.
 pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Vec<Value>> {
-    let declared = store.declared_objectives()?;
+    rows_selected(store, now, native_rows, None, store.declared_objectives()?.iter())
+}
+
+pub fn rows_from_declarations<'a>(
+    store: &Store, now: u64, native_rows: &[Value],
+    declared: impl Iterator<Item = &'a DeclaredObjective> + Clone,
+) -> anyhow::Result<Vec<Value>> {
+    rows_selected(store, now, native_rows, None, declared)
+}
+
+/// Evaluate and report declarations bound to this producer's native source.
+/// Ancestor selectors require full evaluation; otherwise other producers retain ownership.
+pub(crate) fn check_native_and_report(store: &Store, now: u64, source: &str, native_rows: &[Value]) -> anyhow::Result<()> {
+    // An ancestor selector also judges other producers' children. It needs the full
+    // population, otherwise this producer could retire a sibling's open episode.
+    if store.declared_objectives()?.iter().any(|declaration|
+        declaration.objective.as_ref().is_ok_and(|objective|
+            matches!(&objective.indicator, Indicator::Native { objective: selector }
+                if selector != source && native_owns(selector, source)))) {
+        let rows = crate::api::slo_rows(store, native_rows.to_vec())?;
+        check(store, &rows)?;
+        return Ok(());
+    }
+    let rows = rows_selected(store, now, native_rows, Some(source), store.declared_objectives()?.iter())?;
+    check_selected(store, &rows, Some(source))?;
+    Ok(())
+}
+
+fn rows_selected<'a>(
+    store: &Store, now: u64, native_rows: &[Value], native_scope: Option<&str>,
+    declared: impl Iterator<Item = &'a DeclaredObjective> + Clone,
+) -> anyhow::Result<Vec<Value>> {
     let evaluations = store.fractal.extensions.get::<Evaluations>();
     let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
-    tracked.retain(|subject, _| declared.iter().any(|declaration| &declaration.subject == subject));
+    tracked.retain(|subject, _| declared.clone().any(|declaration| &declaration.subject == subject));
     let mut rows = Vec::new();
     for declaration in declared {
+        if let Some(scope) = native_scope
+            && !declaration.objective.as_ref().is_ok_and(|objective|
+                matches!(&objective.indicator, Indicator::Native { objective: source } if native_owns(scope, source))) {
+            continue;
+        }
         let entry = tracked
             .entry(declaration.subject.clone())
-            .or_insert_with(|| Tracked::new(&declaration));
+            .or_insert_with(|| Tracked::new(declaration));
         if entry.revision != declaration.revision {
-            *entry = Tracked::new(&declaration);
+            *entry = Tracked::new(declaration);
         }
         let name = declaration.name();
+        if entry.objective.as_ref().is_ok_and(|objective| objective.declarable() &&
+            matches!(objective.indicator, Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_))) {
+            continue;
+        }
         if let Ok(objective) = &entry.objective
             && let Indicator::Native { objective: source } = &objective.indicator
         {
@@ -284,10 +327,12 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 ),
             );
             let mut produced = Vec::new();
+            let mut incomplete_scope = false;
             for source_row in native_rows {
                 if source_row["kind"] != "objective" { continue; }
                 let Some(id) = source_row["id"].as_str() else { continue };
                 if !native_owns(source, id) { continue; }
+                incomplete_scope |= source_row["source"]["scope_complete"] == false;
                 let mut row = source_row.clone();
                 row["id"] = Value::String(format!("{}{}", objective.name, &id[source.len()..]));
                 row["about"] = Value::String(objective.about.clone());
@@ -297,17 +342,21 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 ));
                 produced.push(row);
             }
-            if produced.is_empty() {
-                // A wholly missing source is unknown, not proof its previously burning children ended.
+            if produced.is_empty() || incomplete_scope {
+                // Partial source populations are unknown too. Retain mapped child identities
+                // from this declaration, never raw native prefixes or another owner's subtree.
                 let mut ids = entry.ids.clone();
                 ids.extend(crate::objective_faults::owned_rows(store, &objective.name)?);
-                if ids.is_empty() { ids.insert(objective.name.clone()); }
+                for row in &produced {
+                    if let Some(id) = row["id"].as_str() { ids.remove(id); }
+                }
+                if ids.is_empty() && produced.is_empty() { ids.insert(objective.name.clone()); }
                 for id in ids {
                     produced.push(json!({
                         "id": id, "kind": "objective", "about": objective.about,
-                        "target": "native objective", "current": "native source unavailable", "window": "now",
+                        "target": "native objective", "current": "native source scope unavailable", "window": "now",
                         "remaining_percent": null, "status": "no-data",
-                        "explain": format!("Native objective {source} has no source row on this member. {response}"),
+                        "explain": format!("Native objective {source} has no complete source scope for this child on this member. {response}"),
                     }));
                 }
             }
@@ -389,6 +438,31 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
     Ok(rows)
 }
 
+/// Source-backed objectives use only the committed domain projection, never the generic
+/// earliest-claim-wins interval/count cache. The state directory belongs to the caller.
+pub fn github_rows(store: &Store, state_dir: &std::path::Path, now: u64) -> anyhow::Result<Vec<Value>> {
+    github_rows_from_declarations(store, state_dir, now, store.declared_objectives()?.iter())
+}
+
+pub fn github_rows_from_declarations<'a>(
+    store: &Store, state_dir: &std::path::Path, now: u64,
+    declared: impl Iterator<Item = &'a DeclaredObjective>,
+) -> anyhow::Result<Vec<Value>> {
+    let evaluations = store.fractal.extensions.get::<Evaluations>();
+    let mut tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut rows = Vec::new();
+    for declaration in declared {
+        let entry = tracked.entry(declaration.subject.clone()).or_insert_with(|| Tracked::new(declaration));
+        if entry.revision != declaration.revision { *entry = Tracked::new(declaration); }
+        let Ok(objective) = &entry.objective else { continue; };
+        if !objective.declarable() || !matches!(objective.indicator, Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_)) { continue; }
+        let row = github::row(store, state_dir, objective, &declaration.revision, now);
+        entry.ids = if objective.on_breach.is_some() { BTreeSet::from([objective.name.clone()]) } else { BTreeSet::new() };
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
 /// Respond to `rows`, the rows just evaluated, and report a failure once until a check succeeds
 /// again.
 pub fn check_and_report(store: &Store, rows: &[Value]) {
@@ -407,6 +481,10 @@ pub fn check_and_report(store: &Store, rows: &[Value]) {
 /// fault for each of its missed rows and end it when the row is met again, or once the objective
 /// no longer judges the row.
 pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalError> {
+    check_selected(store, rows, None)
+}
+
+fn check_selected(store: &Store, rows: &[Value], native_scope: Option<&str>) -> Result<ObjectiveFaults, FractalError> {
     let responders: Vec<(String, Breach, BTreeSet<String>, bool)> = {
         let evaluations = store.fractal.extensions.get::<Evaluations>();
         let tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -414,6 +492,10 @@ pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalEr
             .values()
             .filter_map(|tracked| {
                 let objective = tracked.objective.as_ref().ok()?;
+                if let Some(scope) = native_scope
+                    && !matches!(&objective.indicator, Indicator::Native { objective: source } if native_owns(scope, source)) {
+                    return None;
+                }
                 let native = matches!(objective.indicator, Indicator::Native { .. });
                 Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone(), native))
             })

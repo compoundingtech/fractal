@@ -21,28 +21,28 @@ export class ScratchDaemonError extends Data.TaggedError('ScratchDaemonError')<{
   readonly message: string
 }> {}
 
-/** Result of one `st` CLI invocation against the scratch daemon. */
+/** Result of one `fractal` CLI invocation against the scratch daemon. */
 export interface ScratchCommandResult {
   readonly status: number | null
   readonly stdout: string
   readonly stderr: string
 }
 
-/** Isolated `st up` daemon bound to a scoped temp directory. */
+/** Isolated `fractal up` daemon bound to a scoped temp directory. */
 export class ScratchDaemon extends Context.Service<
   ScratchDaemon,
   {
     /** Scratch root holding state, sockets and the isolated HOME/XDG directories. */
     readonly directory: string
-    /** Absolute `st` binary path used for the daemon and `run`. */
+    /** Absolute `fractal` binary path used for the daemon and `run`. */
     readonly binary: string
     /** Daemon unix socket path. */
     readonly socket: string
-    /** `unix://` endpoint for `st --endpoint`. */
+    /** `unix://` endpoint for `fractal --endpoint`. */
     readonly endpoint: string
-    /** Isolated environment (HOME, XDG_*, PATH) for every `st` invocation. */
+    /** Isolated environment (HOME, XDG_*, PATH) for every `fractal` invocation. */
     readonly env: Readonly<Record<string, string>>
-    /** Runs `st --endpoint <endpoint> ...args` in the isolated environment; never fails on non-zero exit. */
+    /** Runs `fractal --endpoint <endpoint> ...args` in the isolated environment; never fails on non-zero exit. */
     readonly run: (
       args: ReadonlyArray<string>,
     ) => Effect.Effect<ScratchCommandResult, ScratchDaemonError>
@@ -51,7 +51,7 @@ export class ScratchDaemon extends Context.Service<
 
 /** Options for {@link scratchDaemonLayer}. */
 export interface ScratchDaemonOptions {
-  /** `st` binary: absolute path, or a name resolved against the caller's PATH. */
+  /** `fractal` binary: absolute path, or a name resolved against the caller's PATH. */
   readonly binary: string
   /** Daemon node name. Default `scratch`. */
   readonly node?: string
@@ -113,7 +113,7 @@ const escapedProcesses = (marker: string) => {
 }
 
 /**
- * Stops `st up` (its own process-group leader) and every process still carrying the scratch
+ * Stops `fractal up` (its own process-group leader) and every process still carrying the scratch
  * environment, so nothing can recreate files in the directory after it is removed. SIGTERM first,
  * SIGKILL after 5 seconds; gives up 2 seconds later (unreapable zombies, D-state) and logs the
  * survivors instead of hanging the finalizer.
@@ -171,7 +171,7 @@ const capture = ({
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk))
     child.once('error', (cause) =>
       resume(
-        Effect.fail(new ScratchDaemonError({ message: `st ${args.join(' ')}: ${cause.message}` })),
+        Effect.fail(new ScratchDaemonError({ message: `fractal ${args.join(' ')}: ${cause.message}` })),
       ),
     )
     child.once('close', (status) => resume(Effect.succeed({ status, stdout, stderr })))
@@ -179,7 +179,7 @@ const capture = ({
   })
 
 /**
- * Starts an isolated `st up` (own HOME/XDG dirs, state dir, PTY root, daemon and gateway sockets
+ * Starts an isolated `fractal up` (own HOME/XDG dirs, state dir, PTY root, daemon and gateway sockets
  * under one temp directory), waits for its socket, and on scope close stops the daemon and removes
  * the directory. Node-only.
  */
@@ -269,7 +269,7 @@ export const scratchDaemonLayer = (options: ScratchDaemonOptions) =>
         if (daemon.exitCode !== null || daemon.signalCode !== null)
           return Effect.fail(
             new ScratchDaemonError({
-              message: `st up failed to start or exited: ${stderr.join('')}`,
+              message: `fractal up failed to start or exited: ${stderr.join('')}`,
             }),
           )
         if (existsSync(socket) === true) return Effect.void
@@ -284,7 +284,7 @@ export const scratchDaemonLayer = (options: ScratchDaemonOptions) =>
           orElse: () =>
             Effect.fail(
               new ScratchDaemonError({
-                message: `st up socket ${socket} not ready: ${stderr.join('')}`,
+                message: `fractal up socket ${socket} not ready: ${stderr.join('')}`,
               }),
             ),
         }),
@@ -302,7 +302,7 @@ export const scratchDaemonLayer = (options: ScratchDaemonOptions) =>
             Effect.timeoutOrElse({
               duration: commandTimeout,
               orElse: () =>
-                Effect.fail(new ScratchDaemonError({ message: `st ${args.join(' ')} timed out` })),
+                Effect.fail(new ScratchDaemonError({ message: `fractal ${args.join(' ')} timed out` })),
             }),
           ),
       }

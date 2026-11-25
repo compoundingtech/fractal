@@ -153,7 +153,7 @@ impl Ui {
             Hit::Resize => "drag resize; double-click equalize".into(),
             Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
             Hit::Key(_) | Hit::Availability(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,
-            Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
+            Hit::DetailsPreview(_) | Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
             Hit::Pane(PaneIntent::Image(_)) => "open image".into(),
             Hit::ContentImage(_) => "load image".into(),
@@ -664,7 +664,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .0
-                .contains("Copied https://example.com/notes")
+                .contains("Clipboard request sent (OSC 52) for https://example.com/notes")
         );
         ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(ui.popover.is_none());

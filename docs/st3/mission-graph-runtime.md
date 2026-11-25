@@ -10,6 +10,38 @@ A mission is an immutable definition in the claims graph. Initial publication do
 
 A mission run has one stable subject. Each immutable run generation binds that run to one exact mission revision.
 
+## Escalation delivery
+
+Mission and step `escalation` declarations contain uniquely named policies with
+ordered, absolute-delay stages. Each policy matches a runtime state and uses
+`since-entered` or `since-progress`. Progress starts a new silence episode;
+repeated observations or lease renewals do not restart the state-entry clock.
+Step declarations inherit, replace, or disable the mission's policies.
+
+Canonical episode metadata is projected incrementally on receipt admission,
+replication and replay. Evaluation uses indexed, single-row seeks rather than
+replaying subject history. Out-of-order status receipts update only adjacent
+transition boundaries; same-state renewals never create a new entry episode.
+An explicit `work wait` pauses step silence until its declared deadline, including
+ordinary progress during the wait. Automatic expiry keeps that deadline as the
+stable silence anchor; `work resume` starts a fresh progress episode.
+
+Reconciliation delivers every overdue stage in order, not just the latest one,
+and registers the next stage as a deadline on the run's existing incremental
+evaluation. `notify` uses native message routing; `ask` creates an independent
+native person ask without blocking or changing the source step. The source
+subject, policy ID, stage position, and durable episode identity determine the
+delivery key. Native receipts survive restarts and prevent re-firing even after
+an ask is answered. A local restart index keeps terminal ladders scheduled until
+their remaining deadlines have been delivered.
+
+Publication, including direct `mission.published` claims, requires signed
+`features.mission-escalation-v1=1` advertisements from every active anchored
+member. Missing, unsigned, or older reader advertisements refuse publication;
+upgrade or fence those readers rather than silently dropping policy fields.
+Only mission/step declaration fields (including nested and loop missions) require
+the capability; ordinary step or input names such as `escalation` do not.
+
 ## Retrying a failed run
 
 `fractal missions retry RUN [--same-revision] [--reason REASON] --as ACTOR` creates a new run from a failed, terminal source. A person or the owning agent must have ordinary run-start authority. The trusted API is `POST /v1/mission-runs/{run}/retry`, with `actor`, `same_revision` (default `false`), optional `reason`, and a stable `idempotency_key`. Repeating the same idempotency key must not create another run.
@@ -23,6 +55,21 @@ The source's status, generation, and execution history are immutable. Append-onl
 ## Automatic publication supersession
 
 For a mission without a revision policy, publishing a new mission revision automatically considers runs already active on stale revisions at that transaction's publication boundary. Explicit run-revision operations in the same transaction finish first; runs already moved to the published revision are not replaced again. Republishing the same revision does nothing. This is reactive publication behavior, not a continuous scan: `retry --same-revision` started after a newer publication is not immediately superseded.
+
+An explicit CLI `missions start --revision REVISION`, API request `revision`, or declarative
+`mission "mission/ID@REVISION"` pins the run against automatic supersession. A CLI start
+without `--revision` still resolves an exact revision for admission, but emits
+`follow-head "true"` in its mission-run declaration so that this internal resolution does
+not become a user pin. Declarative callers can use the same flag when their selected
+revision is intended to follow later publications. Same-revision retries preserve the pin.
+
+The daemon advertises `capabilities.mission_run_follow_head = 1` in `/v1/health`.
+The CLI emits `follow-head` only when that capability is at least 1. Against an older
+daemon (capability absent or 0), it sends the legacy exact-revision declaration so starts
+continue to work during rolling upgrades; those admissions may be recorded as pinned.
+Authored declarations using `follow-head` require an upgraded publishing daemon. This
+authored flag keeps the exact admission binding (including validated readiness and
+workspace) while explicitly opting into later automatic head supersession.
 
 Native `work revise` and targeted launch revision proposals publish their candidate with the explicit run-revision operation atomically. Automatic publication supersession therefore cannot cancel the source between publication and its authorized explicit revision or proposal. Direct and proposal responses retain their durable idempotency correlation.
 
@@ -1552,6 +1599,13 @@ mission's policy; schedules retain their timers, catch-up and no-overlap behavio
 does not change schedule admission or schedule faults. `stalled-after` remains a positive
 duration even when stall reports are disabled.
 
+An agentless exec step also makes progress while its host observes its owned exec running.
+The run, step and current generation must match the declaration, and the observed incarnation
+must match both its launch receipt and physical launch provenance. A queue wait inside that exec
+therefore needs no synthetic `work wait` heartbeat. Missing, exited, stale or foreign processes
+do not count; neither does an unverified remote observation. This does not pause or extend the
+step's execution timeout. Agent-held work still requires the progress described below.
+
 A stall is measured from the run's last sign of life: its last state change and any step's last
 change or progress record. A step that a worker holds counts from the start of its current
 execution interval (its claim, or the end of its last wait), its last progress record, and a
@@ -1740,6 +1794,25 @@ fractal work publish-mission step-run/GENERATION/compile-mission generated.kdl -
 ```
 
 The published document must contain exactly one ready mission with the declared ID. Fractal publishes the immutable revision and binds it to the producing definition and attempt.
+
+For an isolated output per producer run, declare
+`produces-mission "consent/${ST_MISSION_RUN}"`. Only this output-ID field expands the
+`${ST_MISSION_RUN}` placeholder; the worker publishes the concrete ID using the same
+`ST_MISSION_RUN` environment value (the durable run ID, without `mission-run/`).
+Retries, replays and daemon restarts within that run resolve the same ID. A new run,
+including an explicit successor, resolves a different ID. Resolution uses the producer's
+pinned revision, and `uses-mission output-of` still binds the exact produced revision.
+Other template variables are refused. Run-scoped IDs must resolve to 1–160 bytes of
+ASCII letters, digits, `/`, `-`, `.`, or `_`, without leading/trailing or doubled slashes.
+Literal output IDs retain their existing validation.
+
+Publication requires every active fleet member to advertise
+`daemon.started.features.per_run_missions=1`; unfenced legacy writers also block it.
+Run-scoped revisions carry the closed-schema `mission.published.per_run_missions=1`
+marker, so downgraded replicas quarantine them as unknown fields instead of selecting
+a literal shared ID. Upgrade or fence every peer before publication. This does not
+automatically retire the produced mission when its runs finish; explicit retirement
+continues to use the normal ownership and active-run fences.
 
 A later step can start that exact output:
 
@@ -2168,6 +2241,76 @@ The default work list shows ready, active, and blocked work. It summarizes waiti
 Add `--all` to show waiting and terminal work. Add `--json` to keep the stable machine view for the selected set.
 
 The default `work show` and `work claim` output gives a human-readable step view. It keeps every actionable subject exact.
+
+On a native daemon endpoint, human-readable `work show` also reads internal
+`step.execution-phase` claims for the current attempt. Its execution-phase section
+shows `dispatched`, `received`, `admitted`, `exec-started`, `exec-exited`,
+`result-replicated`, `execution-timeout`, and `dispatch-stalled` when recorded, with the exact exec
+subject, host, and millisecond UTC phase timestamp. The leading trace timestamp
+is the claim's acceptance time; `at_unix_ms` is the originating phase time.
+All claim pages are read, so a retry's phases cannot hide behind earlier attempts.
+The execution timeout starts at the executor's physical exec-registry creation,
+reported by `exec-started`, not at the coordinator's claim or dispatch. Only a live
+executor observation past that budget (`execution-timeout`), or a known exit
+duration past it, proves an execution timeout. A missing remote exit does not.
+The payload wrapper persists its running/completed state in an operation-fenced
+local receipt, independent of the daemon, and fsyncs completion before retrying
+its exit claim. Reconciliation checks that receipt before attesting an overrun;
+a wrapper waiting to deliver a completed result is not a running payload.
+A missing legacy receipt or exit timestamp remains unknown, never observation time.
+Result delivery does not lengthen a completed execution interval.
+Declared `work wait` intervals are excluded from both executor overrun evidence
+and known-exit duration, and appear as waited time in the native display clock.
+`work resume`, reclaim, submission, failure, or release ends the pause; otherwise
+its declared deadline resumes accounting automatically. Executor attestation and
+completed-duration enforcement consume the same ordered lifecycle history as the
+native display clock. The overall guard below remains wall-clock bounded, including waits.
+
+Native declared execs have a dispatch/replication/admission budget equal to the
+step's declared timeout and a separate result-replication budget of the same size.
+An overall guard is three declared timeouts plus execution extensions, measured
+from dispatch. `work extend` extends execution and the overall guard, not dispatch
+or result delivery. Without a declared execution timeout, dispatch and result
+delivery each default to one hour and the overall guard to 24 hours; these fail
+as `dispatch-stalled`, not as execution timeouts. Resource-lane payloads retain
+their separate admission/release budgets.
+These delivery guards close permanently once the exited actual state is
+replicated with the current attempt's exec incarnation and start operation;
+subject-scoped results from earlier attempts cannot close them. Later
+review/product waits are not delivery stalls. Known execution overruns remain
+independently enforceable. Terminal step transitions close any still-open display
+interval, preserving elapsed execution after failure/cancel.
+
+Only newly materialized native attempts (and retries of already tracked attempts)
+are enrolled. Existing declarations without dispatch evidence retain their
+original legacy execution clock and its deadline; upgrade does not shorten or
+disable that budget, or retroactively introduce new delivery-stall policy.
+Unknown legacy exit timestamps are not reconstructed from recovery time.
+New native attempts use the new policy.
+
+Deployment baseline `68cd28b9e2f5db8869b16f1426cfabb5bf8181d1` predates this
+feature: its `crates/fractal-reconcile/src/reconcile.rs:16898-16941` evaluates
+the legacy projected execution clock, not native `execution-timeout` phase
+claims. Its `crates/fractal-store/src/store.rs:22627-22656` folds that legacy
+clock, and `:22766-22782` already excludes declared waits. The baseline has
+neither the `step.execution-phase` registry kind nor the native phase emitter
+or evaluator; its `program_resources.rs:398` timeout is a separate resource
+command failure, not step-phase evidence. Thus the deployed baseline cannot
+produce or consume the pre-wait-fix native timeout evidence from intermediate
+revisions of this change. Those intermediate revisions are not deployment
+targets; participating coordinators and executors must adopt the final change
+together, as required by the release note.
+
+Expiry records `dispatch-stalled` with the exec and the waiting subphase, raises
+an operational fault, and fails the step with that reason, never with an execution
+timeout. This internal phase does not add a public work status. All new timing
+fields remain internal claims; the client-v0 schema and generated clients are unchanged.
+
+`fractal trace show STEP` and `fractal claims ls --subject STEP --kind step.execution-phase`
+show the same phase details across attempts; add `--json` to retain the raw numeric
+timestamps and claim evidence. `work show --json` keeps its frozen client resource
+shape. Fabric/client-only connections keep that resource-only view: the native
+`/v1/claims` evidence route is not part of client-v0.
 
 A worker completion report is not a correctness result. Products and gates still control final completion.
 

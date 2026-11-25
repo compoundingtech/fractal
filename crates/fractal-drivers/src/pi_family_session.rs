@@ -99,7 +99,7 @@ pub(crate) fn run_for_paths(
         None
     };
     let executable = std::env::current_exe()
-        .with_context(|| format!("resolving st executable for the {label} channel"))?;
+        .with_context(|| format!("resolving Fractal executable for the {label} channel"))?;
     let session = harness_state::session_token();
     // The claim is written: it supersedes whatever the predecessor left — including a
     // still-fresh live record — before the channel or terminal writer act under it.
@@ -321,20 +321,20 @@ fn record_session_end(
     .with_ownership(session, seq);
     if let Err(error) = writer.ended(label) {
         tracing::warn!(
-            "st {} driver: recording session end failed: {error}",
+            "fractal {} driver: recording session end failed: {error}",
             kind.label
         );
     }
 }
 
 pub(crate) fn channel_extension_set(kind: &HarnessKind, runtime_id: &str) -> Result<std::path::PathBuf> {
-    // st3 publishes a marked set with its environment substitutions applied. Admission and
+    // Fractal publishes a marked set with its environment substitutions applied. Admission and
     // the live launch must select that same asset rather than looking for an st2-only receipt.
     let exported = if std::env::var("ST3_MAILBOX_TRANSPORT").as_deref() == Ok("push") {
         std::env::var_os("ST_HOOKS")
             .map(std::path::PathBuf::from)
             .filter(|dir| {
-                dir.join(hooks::ST3_SET_MARKER).is_file() && dir.join(kind.extension).is_file()
+                dir.join(hooks::FRACTAL_SET_MARKER).is_file() && dir.join(kind.extension).is_file()
             })
     } else {
         hooks::exported_set_holding(kind.extension)
@@ -412,7 +412,7 @@ fn channel_env(
 ) -> Result<Vec<(String, String)>> {
     let executable = executable
         .to_str()
-        .context("st executable path is not UTF-8")?;
+        .context("Fractal executable path is not UTF-8")?;
     let catalog_root = catalog_root.to_str().context("catalog root is not UTF-8")?;
     Ok(vec![
         (kind.bin_env.to_string(), executable.to_string()),

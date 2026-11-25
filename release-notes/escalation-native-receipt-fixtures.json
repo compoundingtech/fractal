@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Repair escalation regression coverage to consume notifications through delivered/read/closed receipts and maintain episode clocks in the test replication importer.",
+  "replay": { "status": "none", "detail": "Production replication already flushes escalation clocks; the test-support importer now follows that contract." },
+  "schema": { "status": "none", "detail": "No schema or persistent data changes." },
+  "rules": { "status": "none", "detail": "Existing message lifecycle validation and native escalation deduplication authority are unchanged." },
+  "compatibility": { "status": "none", "detail": "No protocol or public API change." },
+  "downtime": { "status": "none", "detail": "No runtime or startup changes." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "No production recovery behavior changes." }
+}

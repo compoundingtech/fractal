@@ -35,7 +35,10 @@ pub const OPERATION_AUTHORIZED: &str = "client.operation-authorized";
 /// Admission receipts use a separate subject so the operation's CAS head is unchanged.
 pub fn append_operation_receipt_tx(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
     anyhow::ensure!(claim.kind.starts_with("custom.client.pairing")
-        || claim.kind.starts_with("custom.client.terminal"), "a client operation record is required");
+        || claim.kind.starts_with("custom.client.terminal")
+        || claim.kind == crate::store::observation_minutes::KIND
+        || matches!(claim.kind.as_str(), "custom.client.control-granted" | "custom.client.control-consumed"),
+        "a client operation record is required");
     let hash = record_hash(&claim.origin, claim.actor.as_deref(), &claim.body["fields"])?;
     let mut fields = serde_json::json!({
         "record_id":claim.id,
@@ -85,7 +88,12 @@ pub fn operation_is_trusted(
         let receipt: String = row.get(0)?;
         if row.get::<_, String>(1)? != expected { continue; }
         let quarantined: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM replica_records AS records JOIN replica_restore_quarantine AS quarantine USING(writer,sequence,envelope_hash) WHERE records.claim_id=?1)",
+            // The claim's batch names its envelopes, whether or not its valid record is stored
+            // (`record_bytes`). A quarantined envelope is never released (`envelope_release`).
+            "SELECT EXISTS(SELECT 1 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 JOIN replica_restore_quarantine AS quarantine ON quarantine.writer=envelopes.writer
+                     AND quarantine.sequence=envelopes.sequence AND quarantine.envelope_hash=envelopes.envelope_hash
+                 WHERE claims.id=?1)",
             [&receipt], |row| row.get(0),
         )?;
         if quarantined { continue; }
@@ -95,7 +103,12 @@ pub fn operation_is_trusted(
         )?;
         if local { return Ok(true); }
         let mut signatures = connection.prepare_cached(
-            "SELECT records.writer,records.sequence,signatures.member_key FROM replica_records AS records JOIN replica_envelope_signatures AS signatures ON signatures.writer=records.writer AND signatures.sequence=records.sequence AND signatures.envelope_hash=records.envelope_hash WHERE records.claim_id=?1 AND records.state='valid' AND records.writer=?2",
+            /* sqlite-large-value: allow-for-now lv-h03b40b8ae1cc owner=fractal_store::pairing TODO=trace-statement-and-value-representation */ &format!("SELECT envelopes.writer,envelopes.sequence,signatures.member_key FROM claims
+                 JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 JOIN replica_envelope_signatures AS signatures ON signatures.writer=envelopes.writer
+                     AND signatures.sequence=envelopes.sequence AND signatures.envelope_hash=envelopes.envelope_hash
+                 WHERE claims.id=?1 AND envelopes.writer=?2 AND NOT {}",
+                smallclaims::store::record_bytes::claim_record_not_valid_sql("claims")),
         )?;
         let mut signers = signatures.query(params![receipt, origin])?;
         while let Some(signer) = signers.next()? {
@@ -109,6 +122,21 @@ pub fn operation_is_trusted(
                 smallclaims::fleet::Window::Keyed(keys) if keys.contains(&key)) {
                 return Ok(true);
             }
+        }
+        drop(signers);
+        // A released envelope has no signature left; the receipt carries its writer's own, which
+        // counts by the same key membership admits for that writer and sequence.
+        if let Some(fleet_id) = smallclaims::store::fleet_meta(connection, "fleet_id")?
+            && smallclaims::store::envelope_release::released_claim_signed(connection, &fleet_id, &receipt, Some(origin),
+                |writer, sequence, key| {
+                    if membership.is_none() {
+                        membership = Some(smallclaims::store::fleet_membership_tx(connection)?);
+                    }
+                    Ok(matches!(membership.as_ref().unwrap().window(writer, sequence),
+                        smallclaims::fleet::Window::Keyed(keys) if keys.contains(key)))
+                })?
+        {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -274,6 +302,18 @@ fn legacy_allowance_deadline(
     Ok((now_unix_ms < deadline && hash == record_hash(origin, actor, fields)?).then_some(deadline))
 }
 
+/// The exact native worker claim whose live lease admits a client-control effect.
+pub struct ClientWorkClaimFence<'a> {
+    pub run: &'a str,
+    pub step: &'a str,
+    pub generation: &'a str,
+    pub attempt: u32,
+    pub actor: &'a str,
+    pub incarnation: Option<&'a str>,
+    pub claim_id: &'a str,
+    pub expires_at: u128,
+}
+
 impl Store {
     /// Consume the exact admitted challenge once, ignoring unadmitted retained subject rows.
     pub fn complete_client_pairing(
@@ -312,6 +352,56 @@ impl Store {
         crate::store::append_claim_with_commit_context(self, input, None, None, None, None,
             crate::store::ClaimCommitContext {
                 client_operation: true, admission: Some(&admission), ..Default::default()
+            }).map(|(claim, _)| claim)
+    }
+
+    /// Revalidate native ownership in the same writer transaction as the client receipt.
+    /// A grant-module mutex cannot serialize native cancellation, release or retry.
+    pub fn append_client_operation_claim_for_work(
+        &self,
+        input: &ClaimInput,
+        owner: &ClientWorkClaimFence<'_>,
+    ) -> Result<ClaimRecord, crate::FractalError> {
+        if !matches!(input.kind.as_str(), "custom.client.control-granted" | "custom.client.control-consumed")
+            || input.actor.as_deref() != Some(owner.actor) {
+            return Err(crate::FractalError::new("claim-write-forbidden", "a work-bound client admission record is required"));
+        }
+        let admission = |connection: &Connection| {
+            let now = smallclaims::store::now_ms();
+            if now >= owner.expires_at {
+                return Err(crate::FractalError::new("grant-expired", "the grant expired before client admission committed"));
+            }
+            let now = now.to_string();
+            let live: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM step_runs step
+                 JOIN mission_runs run ON run.id=step.run_id
+                 LEFT JOIN mission_run_deadlines deadline ON deadline.run_id=run.id
+                 JOIN claims claim ON claim.id=?8
+                 WHERE run.id=?1 AND step.subject=?2 AND step.generation_id=?3
+                   AND run.current_generation_id=step.generation_id
+                   AND run.status='running' AND run.phase!='terminal' AND run.phase NOT LIKE 'cleanup-%'
+                   AND (deadline.deadline_at_unix_ms IS NULL OR CAST(deadline.deadline_at_unix_ms AS INTEGER)>CAST(?9 AS INTEGER))
+                   AND step.status IN ('claimed','working','verifying') AND step.attempt=?4
+                   AND step.lease_owner=?5 AND step.lease_incarnation IS ?6
+                   AND CAST(step.lease_expires_at_unix_ms AS INTEGER)>CAST(?9 AS INTEGER)
+                   AND claim.subject=step.subject AND claim.kind='work.claimed' AND claim.actor=?5 AND claim.origin=?7
+                   AND json_extract(claim.body,'$.fields.attempt')=?4
+                   AND json_extract(claim.body,'$.fields.claim_incarnation') IS ?6
+                   AND claim.id=(SELECT id FROM claims WHERE subject=step.subject AND kind='work.claimed' AND origin=?7 ORDER BY store_index DESC LIMIT 1))",
+                params![owner.run.trim_start_matches("mission-run/"), owner.step,
+                    owner.generation.trim_start_matches("run-generation/"), owner.attempt,
+                    owner.actor, owner.incarnation, self.origin(), owner.claim_id, now],
+                |row| row.get(0),
+            ).map_err(smallclaims::error::internal)?;
+            if live { Ok(()) } else {
+                Err(crate::FractalError::new("grant-expired", "the native worker claim ended before client admission committed"))
+            }
+        };
+        let subjects = [owner.step.to_owned()];
+        crate::store::append_claim_with_commit_context(self, input, None, None, None, None,
+            crate::store::ClaimCommitContext {
+                client_operation: true, admission: Some(&admission),
+                run_projection_subjects: &subjects, ..Default::default()
             }).map(|(claim, _)| claim)
     }
 
@@ -440,6 +530,27 @@ mod tests {
             if restore { target.admit_restored_backlog() } else { target.validate_replication_backlog() }.unwrap();
             target.project_replication_backlog().unwrap();
             assert!(target.client_operation_is_trusted(&completed).unwrap());
+            // The authorization receipt counts only as an accepted copy: a record of it in any
+            // state but valid excludes it, and a valid one need not be stored (`record_bytes`).
+            let receipt_record = |state: Option<&str>| {
+                let connection = target.connection.write();
+                let receipt = format!("custom/client/operation-{}", completed.id);
+                match state {
+                    Some(state) => connection.execute(
+                        "UPDATE replica_records SET state=?1 WHERE claim_id IN (SELECT id FROM claims WHERE subject=?2)",
+                        rusqlite::params![state, receipt],
+                    ),
+                    None => connection.execute(
+                        "DELETE FROM replica_records WHERE claim_id IN (SELECT id FROM claims WHERE subject=?1)",
+                        [receipt],
+                    ),
+                }
+                .unwrap();
+            };
+            receipt_record(Some("invalid"));
+            assert!(!target.client_operation_is_trusted(&completed).unwrap());
+            receipt_record(None);
+            assert!(target.client_operation_is_trusted(&completed).unwrap());
         }
         let retained = Store::open_memory("retained").unwrap();
         let completed = retained.append_claim(&completion_input(Some("person/example"))).unwrap();
@@ -450,6 +561,64 @@ mod tests {
             })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
         }).unwrap();
         assert!(!retained.client_operation_is_trusted(&completed).unwrap());
+    }
+
+    /// A receiver that released the envelope of a client operation and its receipt still trusts
+    /// it, and still counts both admitted: the receipt carries its writer's own signature, by the
+    /// key membership admits for the issuer. Without that signature it is not trusted.
+    #[test]
+    fn an_operation_receipt_stays_trusted_once_its_envelope_is_released() {
+        let key = std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let source = Store::open_memory("issuer").unwrap();
+        source.bind_fleet("receipt-fleet").unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor("receipt-fleet", key.public(), "listening").unwrap();
+        let attached = source.append_client_operation_claim(&ClaimInput {
+            subject:"custom/client/terminal-sample".into(), kind:"custom.client.terminal-attached".into(),
+            actor:Some("person/example".into()),
+            fields:serde_json::from_value(json!({"person_id":"person/example","terminal_operation_version":1})).unwrap(),
+            evidence:vec![],expected_subject:None,idempotency_key:None,
+        }).unwrap();
+        // Later writes, so the receipt's envelope is not the issuer's newest.
+        for n in 0..2 {
+            let mut later = completion_input(None);
+            later.subject = format!("custom/client/later-{n}");
+            source.append_claim(&later).unwrap();
+        }
+        source.replication_snapshot().unwrap();
+        while !source.sign_own_claims().unwrap().done {}
+        let exchange = source.export_replication_exchange("receipt-fleet", &Default::default()).unwrap();
+        let target = Store::open_memory("receiver").unwrap();
+        target.bind_fleet("receipt-fleet").unwrap();
+        target.pin_fleet_anchor(key.public()).unwrap();
+        target.receive_replication_exchange("issuer", "receipt-fleet", &exchange).unwrap();
+        target.validate_replication_backlog().unwrap();
+        target.project_replication_backlog().unwrap();
+        while target.promote_claim_member_signatures().unwrap() > 0 {}
+        let admitted = || -> i64 {
+            target.readers.get().query_row(&format!(
+                "SELECT COUNT(*) FROM claims WHERE batch_id=?1 AND {}",
+                smallclaims::store::record_bytes::admitted_claim_sql("claims")),
+                [&attached.batch_id], |row| row.get(0)).unwrap()
+        };
+        assert!(target.client_operation_is_trusted(&attached).unwrap());
+        assert_eq!(admitted(), 2, "the operation and its receipt");
+
+        while !target.release_envelopes(0).unwrap().done {}
+        let released: bool = target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM released_envelopes WHERE batch_id=?1)
+                 AND NOT EXISTS(SELECT 1 FROM replica_envelopes WHERE batch_id=?1)",
+            [&attached.batch_id], |row| row.get(0)).unwrap();
+        assert!(released, "the operation's envelope is released");
+        assert!(target.client_operation_is_trusted(&attached).unwrap());
+        assert_eq!(admitted(), 2);
+
+        target.connection.write().execute(
+            "DELETE FROM claim_member_signatures WHERE claim_id IN (SELECT id FROM claims WHERE subject=?1)",
+            [format!("custom/client/operation-{}", attached.id)],
+        ).unwrap();
+        assert!(!target.client_operation_is_trusted(&attached).unwrap(), "the writer's signature is what it trusts");
     }
 
     #[test]

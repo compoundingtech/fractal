@@ -1,7 +1,7 @@
 //! The client gateway over Fabric: `st devices fabric enable` exposes this member's paired-only
 //! client socket as one Fabric service, and from then on pairing a device that sends its Fabric
 //! NodeID grants that NodeID exactly that service, inbound-only. Revoking the pairing removes the
-//! grant. st names every peer it adds `st-device-…` and never changes or removes a peer it did not
+//! grant. Fractal names every peer it adds `st-device-…` and never changes or removes a peer it did not
 //! add, so a grant someone made by hand stays theirs.
 
 use std::fs;

@@ -25,7 +25,7 @@ fn notices(
     tokio::sync::watch::Receiver<()>,
 ) {
     let (sender, receiver) = tokio::sync::watch::channel(());
-    let observer = store.observe_commits(move |_| {
+    let observer = store.connection.observe_tables(RESPONSE_EXPIRY_TABLES, move |_| {
         sender.send_replace(());
     });
     (observer, receiver)
@@ -118,13 +118,11 @@ async fn response_expiry_retries_a_busy_writer_and_recovers_after_release() {
         assert!(maintenance_contention(&error));
     }
     let (_observer, changes) = notices(&store);
-    let mut attempted = changes.clone();
+    let attempted = store.extension::<ResponseExpiryAttempts>();
     let task = spawn_response_expiry(store.clone());
-    tokio::time::timeout(Duration::from_secs(5), attempted.changed())
+    tokio::time::timeout(Duration::from_secs(5), attempted.0.notified())
         .await
-        .expect("the maintenance writer loan returned after a busy BEGIN")
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+        .expect("cleanup reports its busy attempt without publishing a no-op commit");
     assert!(
         !task.is_finished(),
         "transient contention must not stop cleanup"
@@ -245,7 +243,17 @@ async fn response_expiry_yields_between_sixty_four_row_commits() {
         .unwrap()
         .unwrap();
     count_becomes(&store, changes, 0).await;
-    assert_eq!(*counts.lock().unwrap(), [130, 66, 2, 0]);
+    let counts = counts.lock().unwrap();
+    assert_eq!(counts.first(), Some(&130));
+    assert_eq!(counts.last(), Some(&0), "all committed prefixes drain the backlog");
+    let deleted = counts.windows(2).map(|pair| {
+        let deleted = pair[0].checked_sub(pair[1]).expect("cleanup cannot add receipts");
+        assert!(deleted <= smallclaims::store::idempotency::CLEANUP_CHUNK as u64);
+        deleted
+    }).collect::<Vec<_>>();
+    assert_eq!(deleted.iter().sum::<u64>(), 130);
+    assert!(deleted.iter().filter(|count| **count != 0).count() >= 3,
+        "the daemon releases the writer between bounded committed prefixes");
     task.abort();
 }
 
@@ -262,4 +270,32 @@ async fn response_expiry_schema_read_failure_stops_visibly() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn replay_safe_receipts_older_than_the_window_go_and_zero_keeps_them() {
+    let retention = smallclaims::store::idempotency::RETENTION_MS;
+    let hour = smallclaims::store::idempotency::REPLAY_SAFE_WINDOW_MS;
+    for (window, kept) in [(hour, 1), (0, 2)] {
+        let (_directory, store) = fixture();
+        let now = now_ms() as i64;
+        // Completed two hours ago, and just now: only the first is past an hour.
+        insert(&store, "renewal-old", now - 2 * hour + retention);
+        insert(&store, "renewal-new", now + retention);
+        // As a renewal writes it: the step view. Any other replay-safe receipt is kept.
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hf43a33476e39 owner=fractal::response_expiry_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE idempotency SET response=?1",
+            [r#"{"subject":"step-run/example/work","run":"mission-run/example","status":"working"}"#],
+        ).unwrap();
+        let (_observer, changes) = notices(&store);
+        let task = spawn_response_expiry_with(store.clone(), window);
+        if window == 0 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        count_becomes(&store, changes, kept).await;
+        task.abort();
+        let left: String = store.readers.get()
+            .query_row("SELECT group_concat(operation_id) FROM (SELECT operation_id FROM idempotency ORDER BY operation_id)", [], |row| row.get(0)).unwrap();
+        assert_eq!(left, if window == 0 { "renewal-new,renewal-old" } else { "renewal-new" });
+    }
 }

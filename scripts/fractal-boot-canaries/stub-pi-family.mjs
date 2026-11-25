@@ -1,4 +1,4 @@
-// A token-free `pi` or `omp` for the boot canaries. st's real extension (-e FILE) runs unchanged in
+// A token-free `pi` or `omp` for the boot canaries. Fractal's real extension (-e FILE) runs unchanged in
 // a minimal host; only the provider API and the model turn are replaced. The host does what pi does
 // at each boundary: starts the session, hands the extension idle state, takes native user messages
 // and raises the `context` event for them, and acts on a message as a model would.
@@ -27,20 +27,21 @@ const receiptPath = `${process.cwd()}/receipts-${agent.replace(/[^A-Za-z0-9]/g, 
 const record = (event, fields = {}) => fs.appendFileSync(receiptPath,
   JSON.stringify({ event, at: Date.now() / 1000, pid: process.pid, ...fields }) + '\n');
 // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-const st = (...args) => childProcess.spawnSync(process.env.FRACTAL_BIN ?? process.env.ST3_BIN, args, { encoding: 'utf8', timeout: 60000 });
+const fractal = (...args) => childProcess.spawnSync(process.env.FRACTAL_BIN ?? process.env.ST3_BIN, args, { encoding: 'utf8', timeout: 60000 });
 
 // What a model does when woken: read the message, then run the command the wake gives, exactly as
 // written. Nothing is added: a wake a model cannot follow verbatim fails the canary.
 const act = (content) => {
   const message = content.match(/graph="(message\/[0-9a-f]+)"/) ?? content.match(/message\/[0-9a-f]+/);
+  // Match the current reconcile wake producer's command text verbatim.
   const command = content.match(/Run `(st work claim [^`]+)`/);
   if (message) {
     const reference = message[1] ?? message[0];
-    const result = st('conversations', 'read', reference, '--as', agent, '--json');
+    const result = fractal('conversations', 'read', reference, '--as', agent, '--json');
     record('read', { reference, exit: result.status, stderr: (result.stderr ?? '').slice(-1000) });
   }
   if (command) {
-    const result = st(...command[1].split(/\s+/).slice(1));
+    const result = fractal(...command[1].split(/\s+/).slice(1));
     record('claim', { command: command[1], exit: result.status, stderr: (result.stderr ?? '').slice(-1000) });
   }
 };
@@ -101,8 +102,9 @@ fs.appendFileSync(sessionFile, JSON.stringify({ type: 'launch', at: Date.now() }
 record('session', { sessionId, sessionFile, resumed });
 const events = new Map();
 let title = '';
+let running = false;
 const ctx = {
-  isIdle: () => true,
+  isIdle: () => !running,
   getAsyncJobSnapshot: () => ({ running: [] }),
   sessionManager: { getSessionId: () => sessionId, getSessionFile: () => sessionFile, getEntries: () => [] },
   ui: { notify: (message, level) => record('notification', { message, level }) },
@@ -115,9 +117,19 @@ const api = {
   // the model answers. Delivered and read evidence come from the extension, not from here.
   sendUserMessage: async (content) => {
     fs.appendFileSync(sessionFile, JSON.stringify({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: content }] } }) + '\n');
-    record('turn', { text: content });
-    await events.get('context')?.({ messages: [{ role: 'user', content }] }, ctx);
-    setTimeout(() => act(content), 0);
+    setTimeout(async () => {
+      running = true;
+      try {
+        await events.get('agent_start')?.({}, ctx);
+        record('turn', { text: content });
+        await events.get('context')?.({ messages: [{ role: 'user', content }] }, ctx);
+        act(content);
+      } finally {
+        running = false;
+        await events.get('agent_end')?.({ willContinue: false }, ctx);
+        if (harness === 'pi') await events.get('agent_settled')?.({}, ctx);
+      }
+    }, 0);
   },
 };
 const index = process.argv.findIndex((arg) => arg === '--extension' || arg === '-e');

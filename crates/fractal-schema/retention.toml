@@ -26,6 +26,17 @@
 #           local observation log of the node that made them, whatever `log` says
 
 [kinds]
+"resource.admission.observed" = { class = "durable" }
+"resource.admission.coverage" = { class = "durable" }
+"gate.admission.observed" = { class = "durable" }
+"residency.wake-demand" = { class = "durable" }
+"residency.resumed" = { class = "durable" }
+"residency.first-turn" = { class = "durable" }
+"residency.outcome" = { class = "durable" }
+"residency.sleep-ended" = { class = "durable" }
+"residency.eligibility-outcome" = { class = "durable" }
+"residency.unrouted" = { class = "durable" }
+"residency.host-sample" = { class = "durable" }
 "harness.invocation" = { class = "durable" }
 "effect.intended" = { class = "durable" }
 "effect.in-flight" = { class = "durable" }
@@ -42,6 +53,8 @@
 "agent.launcher-bound" = { class = "durable", log = "local" }
 "agent.helper-launched" = { class = "durable", log = "local" }
 "custom.client.action-result" = { class = "durable" }
+# Completed client minute summaries are durable history, not local observation samples.
+"custom.client.observation-minute" = { class = "durable" }
 "client.action-result" = { class = "durable", log = "local" }
 "client.operation-authorized" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
@@ -85,6 +98,11 @@
 "gate.review-verdict" = { class = "durable" }
 "gate.review-withdrawn" = { class = "durable" }
 "gate.reviewer-reassigned" = { class = "durable" }
+# Durable normalized history, capture visibility/coverage and fenced authority are not mirror events.
+"github.fact.observed" = { class = "durable" }
+"github.capture.committed" = { class = "durable" }
+"github.capture.authority" = { class = "durable" }
+"github.capture.fenced" = { class = "durable" }
 "github.posted" = { class = "durable" }
 # The GitHub plugin's keyed events and compact item state (docs/st3/plugins.md). Written only by a
 # repository's poller from step 3b of the plugin store; readers take the newest state per item.
@@ -107,6 +125,8 @@
 # Other nodes read the current harness state: step readiness is judged on the mission's node and
 # fleet views run anywhere. Nothing reads a heartbeat, so only changes replicate.
 "harness.observed" = { class = "current", log = "on-change" }
+# Native fallback/selection IDs are replay fences and reasoned return-policy evidence.
+"harness.model-fallback.observed" = { class = "durable" }
 "harness.session-file" = { class = "durable" }
 # The owner reads a transcript from the harness's own session file, or from the local log when
 # there is none. Other nodes relay timeline reads to the owner.
@@ -174,6 +194,8 @@
 "principal.key-revoked" = { class = "durable" }
 # A program run's journal: replay reads every completed and failed entry of its step run.
 "program.step" = { class = "durable" }
+# Native turn replay returns this verified report after the finite episode ends.
+"program.turn.report" = { class = "durable" }
 # Invocation correlation must outlive collector sampling and trace-backend retention.
 "mission.run.trace" = { class = "durable" }
 "program.attempt.trace" = { class = "durable" }
@@ -226,6 +248,7 @@
 "source.debt.closed" = { class = "durable" }
 "source.debt.recorded" = { class = "durable" }
 "source.mapped" = { class = "durable" }
+"step.execution-phase" = { class = "durable" }
 "step-run.carried" = { class = "durable" }
 "step-run.retried" = { class = "durable" }
 "step-run.state" = { class = "durable" }
@@ -264,6 +287,7 @@
 "work.person-override" = { class = "durable" }
 "work.person-reassigned" = { class = "durable" }
 "work.progress" = { class = "durable" }
+"work.rebound" = { class = "durable" }
 "work.released" = { class = "durable" }
 "work.handoff-returned" = { class = "durable" }
 "work.renewed" = { class = "current", pending = "the step timing fold reads every renewal" }
@@ -290,6 +314,7 @@ local_codes = [
     "native-delivery-degraded",
     "native-delivery-recovered",
     "message-unforwarded",
+    "omp-channel-admission-fallback",
     "claude-handoff-status-unavailable",
     "claude-receipt-unavailable",
     "claude-handoff-unconfirmed",

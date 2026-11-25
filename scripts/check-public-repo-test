@@ -53,6 +53,31 @@ class PublicRepositoryCheck(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(self.findings(text))
 
+    def test_macos_shared_directory_is_not_a_personal_home(self):
+        shared = Path("/Users") / "Shared"
+        for path in [shared, shared / "fractal-jobs" / "heavy1"]:
+            for text in [str(path), f'"{path}"', f"`{path}`"]:
+                with self.subTest(text=text):
+                    self.assertEqual(self.findings(text), [])
+        for name in ["alice", "SharedX", "shared"]:
+            with self.subTest(name=name):
+                self.assertTrue(self.findings(str(Path("/Users") / name / "work")))
+        for tail in ["../alice", "nested/../../alice", ".."]:
+            with self.subTest(tail=tail):
+                self.assertTrue(self.findings(str(shared / tail)))
+        self.assertTrue(self.findings(str(Path("/home") / "Shared" / "work")))
+
+    def test_shared_path_whitespace_does_not_hide_parent_traversal(self):
+        shared = Path("/Users") / "Shared"
+        for directory in ["some folder", r"some\ folder", "some\tfolder", r'some\"folder']:
+            clean = str(shared / directory / "work")
+            traversal = str(shared / directory / ".." / ".." / "alice" / "private")
+            for wrap in [lambda path: path, lambda path: f'"{path}"',
+                         lambda path: f"'{path}'", lambda path: f"`{path}`"]:
+                with self.subTest(directory=directory, text=wrap(traversal)):
+                    self.assertEqual(self.findings(wrap(clean)), [])
+                    self.assertTrue(self.findings(wrap(traversal)))
+
     def test_legacy_provider_templates_allow_only_invented_accounts(self):
         self.assertEqual(self.findings('person/discord-{id} person/discord-404 person/discord-606'), [])
         self.assertTrue(self.findings('person' + '/discord-123456789012345678'))
@@ -252,6 +277,26 @@ class PublicHistoryCheck(unittest.TestCase):
         errors = list(CHECK["outgoing_findings"](
             self.repo, "origin", [f"refs/tags/example {tag} refs/tags/example {'0' * 40}"]))
         self.assertTrue(any(":tag:" in error for error in errors))
+
+    def test_existing_ref_merge_excludes_published_history_but_checks_new_commits(self):
+        self.git("checkout", "-b", "topic")
+        old = self.commit("topic.txt", "clean topic\n")
+        self.git("update-ref", "refs/remotes/origin/topic", old)
+        self.git("checkout", "main")
+        self.commit("main.txt", "person" + "/unknown-fixture\n")
+        published = self.commit("main.txt", "clean main\n")
+        self.git("update-ref", "refs/remotes/origin/main", published)
+        self.git("checkout", "topic")
+        self.git("merge", "--no-ff", "main", "-m", "Merge public main")
+        head = self.git("rev-parse", "HEAD")
+        line = f"refs/heads/topic {head} refs/heads/topic {old}"
+        self.assertEqual(list(CHECK["outgoing_findings"](self.repo, "origin", [line])), [])
+
+        dirty = self.commit("new.txt", "person" + "/unknown-fixture\n")
+        head = self.commit("new.txt", "clean again\n")
+        line = f"refs/heads/topic {head} refs/heads/topic {old}"
+        errors = list(CHECK["outgoing_findings"](self.repo, "origin", [line]))
+        self.assertTrue(any(error.startswith(dirty + ":new.txt:") for error in errors))
 
     def test_binary_attribute_cannot_hide_content(self):
         self.commit(".gitattributes", "*.txt -diff\n")

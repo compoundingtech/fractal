@@ -1,36 +1,26 @@
-//! Checkpoints under random schedules.
+//! Each member's own trim under random schedules: convergence without any agreement.
 //!
 //! Each run starts three to five nodes from a seed and drives them with a seeded scheduler:
 //! writes of every claim kind the registry lets a store accept, a person's claims, exchanges
 //! between random pairs that deliver a random part of each exchange in a random order, partitions
-//! and heals, nodes offline for days, clock skew of up to three days, checkpoint work (seal,
-//! verify, trim) at random points, crashes at every trim boundary, restarts, excusals by a
-//! person, nodes away for days while the others checkpoint without them, new empty nodes, and
-//! an old-build node that never takes part in checkpoints.
+//! and heals, nodes offline for days, clock skew of up to three days, each node's own trim
+//! (`checkpoint_step` with `[trim] local` on) at random points, crashes at every trim boundary,
+//! restarts, nodes away for days while the others trim, new empty nodes, and an old-build node
+//! that never trims.
 //!
 //! An oracle node receives every envelope the moment it is written and never trims. After the
-//! schedule, the run heals every partition, brings every node back, and exchanges and runs
-//! checkpoint work until nothing moves. Then every node must hold:
+//! schedule, the run heals every partition, brings every node back, and exchanges and trims until
+//! nothing moves. Then:
 //!
-//! 1. the same authority digest, among nodes that take part in checkpoints;
-//! 2. the oracle's complete projection digests on modern nodes; old builds compare their legacy
-//!    hash and shared business tables, since they cannot retain dropped source/operation facts;
-//! 3. the oracle's reader answers, for every subject;
-//! 4. every claim of a kind no rule drops, and every person's claim, with the oracle's body;
-//! 5. the same trimmed checkpoint and the same tombstones, field by field, and tombstones
-//!    that match the drop digest of the certificate it trimmed;
-//! 6. no invalid record, and no record still pending;
-//! 7. for every claim it lacks, a tombstone, and only for claims a rule may drop. When people
-//!    excused each side of a partition and each side certified, with two certificates for one
-//!    cut or certificates with disjoint participants, every node applies the chosen or newest
-//!    one, and its manifest lacks what only the other side dropped. So a node may lack a claim
-//!    without a tombstone, but only a claim some node tombstoned, and modern nodes compare
-//!    sources and operations with each other rather than with the oracle (#1052). An old build keeps no
-//!    tombstones, so it may lack a claim the others dropped while it was excused, but only
-//!    such a claim.
+//! 1. every trimming node holds the same retained claims and the same retired claim IDs;
+//! 2. every node has the oracle's projection digests and reader answers for every subject;
+//! 3. every node holds every claim of a kind no rule drops, and every person's claim, with the
+//!    oracle's body, and no claim the oracle never saw;
+//! 4. a claim a node lacks is in its retired ledger, and only of a kind local trim drops
+//!    (`LOCAL_TRIM_KINDS`); a node that does not trim lacks nothing;
+//! 5. no node holds an invalid or a pending record.
 //!
-//! Also, no cut has two certificates unless people excused each side of a partition, no proof
-//! fails, no trim finds the graph changed, and no node's committed index ever moves back.
+//! Also, no trim finds the graph changed, and no node's committed index ever moves back.
 //!
 //! On a failure the suite prints the seed and the schedule. To explore further:
 //!
@@ -41,8 +31,8 @@
 //! ```
 //!
 //! Stores run in this process, each in its own file, and exchange through the same export and
-//! receipt calls the replication worker makes. An old build here is a node that never runs
-//! checkpoint work and never adopts a manifest; `tests/fleet.rs` covers the pinned old release.
+//! receipt calls the replication worker makes. An old build here is a node with `[trim] local
+//! = false`, which never trims; `tests/fleet.rs` covers the pinned old release.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -50,10 +40,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 use fractal_daemon::model::{ClaimInput, ClaimRecord};
-use fractal_daemon::store::{
-    CheckpointAction, CheckpointContext, CheckpointExcuseRequest, Store, TrimFault, certificates,
-    checkpoint, checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
-};
+use fractal_daemon::store::{CheckpointAction, CheckpointContext, Store, TrimFault, checkpoint};
+use smallclaims::store::LOCAL_TRIM_KINDS;
 use fractal_schema::{FieldSpec, Retention, ValueType};
 
 const FLEET: &str = "7d3f9a2e-5b6c-4e1d-8a0f-2c9b8e7d6f5a";
@@ -79,7 +67,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v35.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v45.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -109,6 +97,24 @@ fn every_registry_kind_has_a_corpus_or_typed_thread_coverage() {
 }
 
 #[test]
+fn the_current_corpus_matches_the_registry() {
+    assert_eq!(
+        include_str!("../../../fixtures/convergence/claims-v45.json"),
+        serde_json::to_string_pretty(&fractal_schema::registry().claims).unwrap(),
+        "regenerate the active corpus with the owning fractal-schema claim_corpus example"
+    );
+}
+
+#[test]
+fn the_corpus_generates_valid_residency_evidence() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in corpus().keys().filter(|kind| kind.starts_with("residency.")) {
+        let input = world.claim_of(&corpus()[kind], 0).expect("residency input");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+    }
+}
+
+#[test]
 fn the_corpus_generates_valid_native_continuity_inputs() {
     let mut world = World::new(1, Sabotage::None);
     for kind in ["mission-run.gate-carried", "step-run.carried", "gate.requested", "work.person-asked"] {
@@ -124,6 +130,26 @@ fn the_corpus_generates_valid_native_continuity_inputs() {
             if field.required {
                 assert!(input.fields.contains_key(name), "{kind} requires {name}");
             }
+        }
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_step_execution_phase_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["step.execution-phase", "runtime.observed"] {
+        assert_eq!(
+            serde_json::to_value(&corpus()[kind]).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current execution evidence fields"
+        );
+    }
+    let spec = &corpus()["step.execution-phase"];
+    let input = world.claim_of(spec, 0).expect("generate step execution phase input");
+    fractal_schema::registry().validate_claim(&input.subject, &input.kind, &input.fields).unwrap();
+    for (name, field) in &spec.fields {
+        if field.required {
+            assert!(input.fields.contains_key(name), "step.execution-phase requires {name}");
         }
     }
 }
@@ -190,6 +216,18 @@ fn the_corpus_generates_valid_deployment_inputs() {
 }
 
 #[test]
+fn the_corpus_generates_valid_native_model_fallback_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(&corpus()["harness.model-fallback.observed"], 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+}
+
+#[test]
 fn the_corpus_generates_valid_read_position_inputs() {
     let mut world = World::new(1, Sabotage::None);
     let spec = &corpus()[fractal_schema::read_positions::KIND];
@@ -229,6 +267,99 @@ fn the_corpus_generates_valid_attention_control_inputs() {
     let expected = world.nodes[0].store.attention_controls(&keys).unwrap();
     assert!(!expected.is_empty());
     assert_eq!(world.oracle.attention_controls(&keys).unwrap(), expected);
+}
+
+#[test]
+fn the_corpus_generates_valid_native_capture_inputs() {
+    use fractal_schema::github_capture::*;
+    let mut world = World::new(1, Sabotage::None);
+    let mut written = BTreeMap::new();
+    for kind in [AUTHORITY_KIND, FACT_KIND, COMMIT_KIND, COMMIT_KIND, FENCED_KIND] {
+        let spec = &corpus()[kind];
+        assert_eq!(
+            serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current capture record"
+        );
+        let input = world.claim_of(spec, 0).expect("generate native capture input");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        let claim = world.nodes[0].store.append_claim(&input).unwrap();
+        assert_eq!(claim.body.pointer("/fields/record"), input.fields.get("record"));
+        if kind == COMMIT_KIND {
+            let commit: CaptureCommit = serde_json::from_value(input.fields["record"].clone()).unwrap();
+            assert_eq!(commit.authority_grant, written[AUTHORITY_KIND]);
+            assert_eq!(commit.facts[0].claim_id, written[FACT_KIND]);
+            assert_eq!(commit.predecessor.as_ref(), written.get(COMMIT_KIND));
+            assert_eq!(commit.sequence, if written.contains_key(COMMIT_KIND) { 2 } else { 1 });
+        } else if kind == FENCED_KIND {
+            let receipt: FenceReceipt = serde_json::from_value(input.fields["record"].clone()).unwrap();
+            assert_eq!(receipt.authority_grant, written[AUTHORITY_KIND]);
+            assert_eq!(receipt.final_commit.as_ref(), written.get(COMMIT_KIND));
+        }
+        written.insert(kind, claim.id);
+        world.tap(0);
+    }
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let replicated = claims(&world.oracle);
+    for id in written.values() {
+        assert!(replicated.contains_key(id), "capture claim {id} must replicate");
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_phone_minute_summaries() {
+    let kind = "custom.client.observation-minute";
+    let spec = &corpus()[kind];
+    assert_eq!(serde_json::to_value(spec).unwrap(),
+        serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+    let mut world = World::new(1, Sabotage::None);
+    let input = world.claim_of(spec, 0).expect("phone minute input");
+    fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+    assert_eq!(input.fields["count"], 1);
+    assert_eq!(input.fields["buckets"], json!([[103, 1]]));
+    assert!(world.nodes[0].store.append_claim(&input).is_err(),
+        "generic append cannot impersonate an authenticated phone producer");
+}
+
+#[test]
+fn the_corpus_generates_valid_native_admission_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let written = ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"].map(|kind| {
+        let spec = &corpus()[kind];
+        assert_eq!(serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+        let input = world.claim_of(spec, 0).expect("generate native admission evidence");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        assert_eq!(input.fields["host"], world.nodes[0].name);
+        let claim = world.nodes[0].store.append_claim(&input).unwrap();
+        world.tap(0);
+        claim.id
+    });
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let replicated = claims(&world.oracle);
+    for id in written {
+        assert!(replicated.contains_key(&id), "native admission evidence {id} must replicate");
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_work_rebound_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let kind = "work.rebound";
+    let spec = &corpus()[kind];
+    assert_eq!(serde_json::to_value(spec).unwrap(),
+        serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap());
+    let input = world.claim_of(spec, 0).expect("generate work rebound evidence");
+    fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+    assert_eq!(input.fields["attempt"], 1);
+    assert!(input.fields["claimant"].as_str().unwrap().starts_with("agent/"));
+    assert_ne!(input.fields["from_incarnation"], input.fields["to_incarnation"]);
+    assert!(!input.fields["session_id"].as_str().unwrap().is_empty());
+    assert_eq!(input.fields["harness"], "codex");
+    let claim = world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    assert!(claims(&world.oracle).contains_key(&claim.id), "work rebound evidence must replicate");
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -360,7 +491,7 @@ struct Node {
     scratch: PathBuf,
     store: Store,
     online: bool,
-    /// Never seals, verifies, trims or adopts: a build from before checkpoints.
+    /// Never trims (`[trim] local = false`), like a build from before checkpoints.
     old_build: bool,
     /// How far this node's clock runs ahead of the simulation's.
     skew_ms: i64,
@@ -371,10 +502,8 @@ struct Node {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sabotage {
     None,
-    /// Delete what a checkpoint drops, then forget its tombstones.
-    ForgetTombstones,
-    /// Adopt a manifest that is missing a tombstone, bypassing verification.
-    PartialAdoption,
+    /// After a trim deleted claims, forget one of them in the retired ledger.
+    ForgetRetired,
 }
 
 struct World {
@@ -394,10 +523,6 @@ struct World {
     serial: u64,
     /// Claims people wrote, by ID.
     person_claims: BTreeSet<String>,
-    /// Whether a person excused a writer while the fleet was partitioned.
-    excused_while_partitioned: bool,
-    /// Every claim any node has tombstoned.
-    tombstoned: BTreeSet<String>,
     /// Whether the deliberate bug happened in this run.
     sabotaged: bool,
     written: BTreeMap<String, usize>,
@@ -416,30 +541,12 @@ fn scratch_dir() -> tempfile::TempDir {
         && !REAL_DISK.with(std::cell::Cell::get)
         && let Some(directory) = tmpfs_scratch()
     {
-        match scratch_headroom(directory.path()) {
-            Ok(()) => return directory,
-            Err(error) => eprintln!("convergence tmpfs refused: {error}; trying ordinary temp"),
-        }
+        return directory;
     }
     // The ordinary temporary directory may itself be tmpfs in a test lane; this is the disk.
-    let directory = fractal_daemon::test_support::disk_tempdir();
-    scratch_headroom(directory.path()).unwrap_or_else(|error| {
-        panic!("no convergence scratch device can admit a checkpoint proof: {error}")
-    });
-    directory
+    fractal_daemon::test_support::disk_tempdir()
 }
 
-fn scratch_headroom(directory: &std::path::Path) -> anyhow::Result<()> {
-    let probe = directory.join("headroom-probe.sqlite3");
-    let connection = rusqlite::Connection::open(&probe)?;
-    connection.execute_batch("CREATE TABLE probe(x);")?;
-    drop(connection);
-    // The gate supplies C, J, F, the live reserve and margin from this real SQLite
-    // source. The extra 2 GiB covers the world's later stores and concurrent seeds.
-    let result = smallclaims::store::checkpoint_test_fixture_headroom(&probe, directory, 2 << 30);
-    std::fs::remove_file(&probe)?;
-    result
-}
 
 /// Where tmpfs scratch directories live, and what names them, so a test killed before it could
 /// remove its stores (they are RAM) is swept by the next run that finds the directory a day old.
@@ -448,8 +555,7 @@ const TMPFS: &str = "/dev/shm";
 #[cfg(target_os = "linux")]
 const TMPFS_PREFIX: &str = "st3-convergence-";
 /// One world's stores peaked at 48 MiB (seed 377) and eight worlds at once at 295 MiB (du of the
-/// scratch directory, polled each second). The gate admission probe adds this 2 GiB fixture room
-/// to its own calculated proof minimum before tmpfs may be used.
+/// scratch directory, polled each second). tmpfs is used only with this much room free.
 #[cfg(target_os = "linux")]
 const TMPFS_ROOM_BYTES: u64 = 2 << 30;
 
@@ -521,8 +627,6 @@ impl World {
             failures: Vec::new(),
             serial: 0,
             person_claims: BTreeSet::new(),
-            excused_while_partitioned: false,
-            tombstoned: BTreeSet::new(),
             sabotaged: false,
             written: BTreeMap::new(),
             sabotage,
@@ -551,6 +655,7 @@ impl World {
         let store = Store::open(&path, name.clone()).unwrap();
         store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         store.bind_fleet(FLEET).unwrap();
+        trim_unless_old(&store, old_build);
         let skew_ms = if self.rng.chance(30) {
             (self.rng.below(6 * 24) as i64 - 3 * 24) * DAY_MS / 24
         } else {
@@ -594,17 +699,9 @@ impl World {
     }
 
     fn context(&self, index: usize) -> CheckpointContext {
-        let node = &self.nodes[index];
         CheckpointContext {
             now_unix_ms: self.clock(index) as u128,
-            configured_peers: self
-                .nodes
-                .iter()
-                .filter(|other| other.name != node.name)
-                .map(|other| other.name.clone())
-                .collect(),
-            scratch: node.scratch.clone(),
-            reviewer: PERSON.into(),
+            scratch: self.nodes[index].scratch.clone(),
         }
     }
 
@@ -632,6 +729,7 @@ impl World {
         self.nodes[index].store = Store::open(&path, name).unwrap();
         self.nodes[index].store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         self.nodes[index].store.bind_fleet(FLEET).unwrap();
+        trim_unless_old(&self.nodes[index].store, self.nodes[index].old_build);
         self.set_clock(index);
         self.check_index(index);
     }
@@ -702,73 +800,22 @@ impl World {
             self.fail(message);
         }
         self.check_index(to);
-        self.adopt(from, to);
         received
     }
 
-    /// What the replication worker does after an exchange: when `from` advertises a checkpoint
-    /// `to` needs, fetch its manifest from `from` and adopt it.
-    fn adopt(&mut self, from: usize, to: usize) -> bool {
-        if self.nodes[to].old_build {
-            return false;
-        }
-        let Some(advertised) = self.nodes[from].store.trimmed_checkpoint().unwrap() else {
-            return false;
-        };
-        let own = self.nodes[to].store.trimmed_checkpoint().unwrap();
-        if own
-            .as_ref()
-            .is_some_and(|own| *own == advertised || own.cut_unix_ms > advertised.cut_unix_ms)
-        {
-            return false;
-        }
-        let Some(need) = self.nodes[to].store.checkpoint_manifest_need().unwrap() else {
-            return false;
-        };
-        if need.checkpoint != advertised.id || need.drop_digest != advertised.drop_digest {
-            return false;
-        }
-        let mut manifest = self.nodes[from]
-            .store
-            .checkpoint_manifest(&need.checkpoint, need.cut_unix_ms)
-            .unwrap();
-        if self.sabotage == Sabotage::PartialAdoption && !manifest.claims.is_empty() {
-            manifest.claims.pop();
-            manifest.envelopes.pop();
-            // A broken adopter that skips verification: record what it was given as is.
-            let actions = self.nodes[to]
-                .store
-                .adopt_checkpoint_unverified_for_tests(&manifest)
-                .unwrap();
-            self.sabotaged = true;
-            self.remember_tombstones(to);
-            self.note(format!(
-                "{} adopted a partial {} from {}",
-                self.nodes[to].name, need.checkpoint, self.nodes[from].name
-            ));
-            self.check_actions(to, &actions);
-            return true;
-        }
-        match self.nodes[to].store.adopt_checkpoint(&manifest) {
-            Ok(actions) => {
-                self.remember_tombstones(to);
-                self.note(format!(
-                    "{} adopts {} from {}",
-                    self.nodes[to].name, need.checkpoint, self.nodes[from].name
-                ));
-                self.check_actions(to, &actions);
+
+    /// `to` walks `from`'s differing claim ranges, as the worker does after an exchange.
+    fn walk(&mut self, from: usize, to: usize) -> bool {
+        let result = smallclaims::sync::walk_claim_ranges_in_process(
+            &self.nodes[to].store, &self.nodes[from].store, FLEET, 64,
+        );
+        match result {
+            Ok(fetched) => {
                 self.check_index(to);
-                !actions.is_empty()
+                fetched
             }
             Err(error) => {
-                let message = format!(
-                    "{} could not adopt {} from {}: {}: {}",
-                    self.nodes[to].name,
-                    need.checkpoint,
-                    self.nodes[from].name,
-                    error.code,
-                    error.message
-                );
+                let message = format!("{} could not walk {}: {error:#}", self.nodes[to].name, self.nodes[from].name);
                 self.fail(message);
                 false
             }
@@ -777,18 +824,14 @@ impl World {
 
     fn check_actions(&mut self, index: usize, actions: &[CheckpointAction]) {
         for action in actions {
-            match action {
-                CheckpointAction::ProofFailed { .. }
-                | CheckpointAction::TrimGraphChanged { .. } => {
-                    let message = format!("{}: {action:?}", self.nodes[index].name);
-                    self.fail(message);
-                }
-                _ => {}
+            if let CheckpointAction::TrimGraphChanged { .. } = action {
+                let message = format!("{}: {action:?}", self.nodes[index].name);
+                self.fail(message);
             }
         }
     }
 
-    /// One pass of checkpoint work, sometimes stopped at a trim boundary as a crash would.
+    /// One pass of this node's own trim, sometimes stopped at a trim boundary as a crash would.
     fn checkpoint_work(&mut self, index: usize, faults: bool) -> Vec<CheckpointAction> {
         if faults && self.rng.chance(25) {
             let fault = match self.rng.below(4) {
@@ -833,14 +876,9 @@ impl World {
             let summary = actions
                 .iter()
                 .map(|action| match action {
-                    CheckpointAction::Sealed {
-                        checkpoint,
-                        sealed_digest,
-                        participants,
-                    } => format!(
-                        "sealed {checkpoint} {} {participants:?}",
-                        &sealed_digest[..8]
-                    ),
+                    CheckpointAction::Trimmed { checkpoint, claims, .. } => {
+                        format!("trimmed {checkpoint} {claims}")
+                    }
                     _ => serde_json::to_value(action).unwrap()["action"]
                         .as_str()
                         .unwrap_or_default()
@@ -848,25 +886,33 @@ impl World {
                 })
                 .collect::<Vec<_>>()
                 .join(",");
-            self.note(format!("{} checkpoint: {summary}", self.nodes[index].name));
-            self.remember_tombstones(index);
+            self.note(format!("{} trim: {summary}", self.nodes[index].name));
         }
-        if self.sabotage == Sabotage::ForgetTombstones
+        if self.sabotage == Sabotage::ForgetRetired
             && actions
                 .iter()
-                .any(|action| matches!(action, CheckpointAction::Trimmed { .. }))
+                .any(|action| matches!(action, CheckpointAction::Trimmed { claims, .. } if *claims > 0))
         {
-            let forgotten = self.nodes[index]
-                .store
-                .forget_tombstones_for_tests()
-                .unwrap();
-            // A trim that dropped nothing leaves nothing to forget.
+            // A broken trim that deletes a claim without retiring it: forget a retired claim
+            // ID that no other node retired.
+            let others = (0..self.nodes.len())
+                .filter(|other| *other != index)
+                .flat_map(|other| retired_claims(&self.nodes[other].store))
+                .collect::<BTreeSet<_>>();
+            let forgotten = retired_claims(&self.nodes[index].store)
+                .into_iter()
+                .find(|id| !others.contains(id))
+                .map_or(0, |id| {
+                    self.nodes[index]
+                        .store
+                        .connection
+                        .write()
+                        .execute("DELETE FROM retired_claim_ids WHERE id=unhex(?1) OR id=?1", [&id])
+                        .unwrap()
+                });
             if forgotten != 0 {
                 self.sabotaged = true;
-                self.note(format!(
-                    "{} forgot {forgotten} tombstones",
-                    self.nodes[index].name
-                ));
+                self.note(format!("{} forgot a retired claim", self.nodes[index].name));
             }
         }
         self.check_actions(index, &actions);
@@ -875,25 +921,6 @@ impl World {
         actions
     }
 
-    fn remember_tombstones(&mut self, index: usize) {
-        let store = &self.nodes[index].store;
-        let Some(trimmed) = store.trimmed_checkpoint().unwrap() else {
-            return;
-        };
-        let manifest = store
-            .checkpoint_manifest(&trimmed.id, trimmed.cut_unix_ms)
-            .unwrap();
-        // Check at the adoption/trim boundary: a later valid checkpoint can repair a
-        // partial adoption before the final convergence check sees the corruption.
-        if let Err(error) = verify_checkpoint_manifest(&manifest, &trimmed.drop_digest) {
-            self.fail(format!(
-                "{}: its tombstones do not match {}: {}",
-                self.nodes[index].name, trimmed.id, error.message
-            ));
-        }
-        self.tombstoned
-            .extend(manifest.claims.into_iter().map(|claim| claim.id));
-    }
 
     fn write(&mut self, index: usize) {
         let input = if self.rng.chance(15) {
@@ -1108,6 +1135,143 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == "harness.model-fallback.observed" {
+            let subject = self.subject_of("agent", index)?;
+            let event = self.fresh("model-fallback");
+            return Some(ClaimInput {
+                actor: Some(subject.clone()), subject, kind: spec.kind.clone(),
+                fields: BTreeMap::from([
+                    ("observation".into(), json!("applied")),
+                    ("cause".into(), json!("transient")),
+                    ("from".into(), json!("openai/gpt-5")),
+                    ("to".into(), json!("anthropic/claude-sonnet-4-5")),
+                    ("native_session".into(), json!("convergence-session")),
+                    ("source_event".into(), json!(event)),
+                    ("episode_id".into(), json!(event)),
+                    ("incarnation_id".into(), json!("convergence-incarnation")),
+                    ("observed_at_unix_ms".into(), json!(self.clock(index))),
+                    ("reason".into(), json!("native-retry-fallback")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(event),
+            });
+        }
+        if spec.kind == "work.rebound" {
+            let id = self.fresh("rebound");
+            return Some(ClaimInput {
+                subject: self.subject_of("step-run", index)?,
+                kind: spec.kind.clone(), actor: None,
+                fields: BTreeMap::from([
+                    ("attempt".into(), json!(1)),
+                    ("claimant".into(), json!(self.subject_of("agent", index)?)),
+                    ("from_incarnation".into(), json!(format!("{id}-before"))),
+                    ("to_incarnation".into(), json!(format!("{id}-after"))),
+                    ("session_id".into(), json!(format!("{id}-native-session"))),
+                    ("harness".into(), json!("codex")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some(id),
+            });
+        }
+        if spec.kind == "custom.client.observation-minute" {
+            let source = "person/operator/device/phone";
+            let start_ms = (self.clock(index).max(60_000) as u64 / 60_000 - 1) * 60_000;
+            let path = Some("direct");
+            let key = smallclaims::hash::canonical_hash(&(source, "ios-connect", "fabric", path, start_ms)).unwrap();
+            return Some(ClaimInput {
+                subject: format!("custom/client/observation-minute-{key}"),
+                kind: spec.kind.clone(), actor: Some(PERSON.into()),
+                fields: serde_json::from_value(json!({
+                    "source": source, "pairing_grant": "custom/client/pairing-phone",
+                    "report_id": "11111111-1111-4111-8111-111111111111",
+                    "report_digest": "a".repeat(64), "target": "ios-connect",
+                    "carrier": "fabric", "path": "direct", "start_ms": start_ms,
+                    "count": 1, "over": 0, "max_ms": 100, "buckets": [[103, 1]]
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            });
+        }
+        if matches!(spec.kind.as_str(), "resource.admission.observed"
+            | "resource.admission.coverage" | "gate.admission.observed") {
+            let id = self.fresh("admission");
+            let host = self.nodes[index].name.as_str();
+            let epoch = format!("convergence-{host}");
+            let now = self.clock(index);
+            let (subject, fields) = match spec.kind.as_str() {
+                "resource.admission.observed" => (format!("resource-admission/{host}/{id}"), BTreeMap::from([
+                    ("id".into(), json!(id)),
+                    ("host".into(), json!(host)),
+                    ("class".into(), json!("check")),
+                    ("coverage".into(), json!("logical")),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("owner".into(), json!({"run":"mission-run/convergence","step":"check","attempt":1,"invocation":null})),
+                    ("queued_at".into(), json!(now)),
+                    ("admitted_at".into(), Value::Null),
+                    ("retired_at".into(), Value::Null),
+                    ("state".into(), json!("queued")),
+                    ("refusal".into(), Value::Null),
+                    ("finite".into(), json!(true)),
+                    ("admission_timeout_ms".into(), Value::Null),
+                    ("clock_uncertain".into(), json!(false)),
+                ])),
+                "resource.admission.coverage" => (format!("resource-admission/{host}"), BTreeMap::from([
+                    ("host".into(), json!(host)),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("complete".into(), json!(true)),
+                ])),
+                _ => (format!("gate-admission/{host}/{id}/accepted"), BTreeMap::from([
+                    ("schema".into(), json!("gate-slot.admission/v1")),
+                    ("id".into(), json!(id)),
+                    ("host".into(), json!(host)),
+                    ("class".into(), json!("heavy")),
+                    ("at_ms".into(), json!(now)),
+                    ("onset_ms".into(), json!(now)),
+                    ("epoch".into(), Value::String(epoch)),
+                    ("coverage".into(), json!("logical")),
+                    ("outcome".into(), json!("accepted")),
+                    ("reason".into(), json!("queued")),
+                ])),
+            };
+            return Some(ClaimInput {
+                subject, kind:spec.kind.clone(), actor:None,
+                fields, evidence:Vec::new(),
+                expected_subject:None, idempotency_key:Some(id),
+            });
+        }
+        if spec.kind.starts_with("residency.") {
+            let host = self.nodes[index].name.clone();
+            let suffix = match spec.kind.as_str() {
+                "residency.wake-demand" | "residency.resumed" | "residency.first-turn" => "wake",
+                "residency.outcome" => "outcome",
+                "residency.sleep-ended" => "sleep",
+                "residency.eligibility-outcome" => "eligibility",
+                "residency.unrouted" => "unrouted",
+                "residency.host-sample" => "host",
+                _ => unreachable!(),
+            };
+            let id = self.fresh("residency");
+            let mut fields = BTreeMap::from([("host".into(), json!(host))]);
+            for (name, field) in &spec.fields {
+                if !field.required || name == "host" { continue; }
+                let value = match name.as_str() {
+                    "resume_failed" | "useless" | "short_sleep" | "refused" => json!(0),
+                    "memory_coverage" => json!("unavailable"),
+                    _ => self.value_of(field, index),
+                };
+                fields.insert(name.clone(), value);
+            }
+            // The host sample is a continuing host stream, not an episode subject.
+            let subject_id = if suffix == "host" { &host } else { &id };
+            return Some(ClaimInput {
+                subject: format!("residency/{host}/{suffix}/{subject_id}"),
+                kind: spec.kind.clone(), actor: None, fields, evidence: Vec::new(),
+                expected_subject: None, idempotency_key: Some(id),
+            });
+        }
+        if matches!(spec.kind.as_str(), fractal_schema::github_capture::FACT_KIND
+            | fractal_schema::github_capture::COMMIT_KIND | fractal_schema::github_capture::AUTHORITY_KIND
+            | fractal_schema::github_capture::FENCED_KIND)
+        {
+            return self.capture_claim(&spec.kind, index);
+        }
         if matches!(spec.kind.as_str(), fractal_schema::effects::KIND_INTENDED
             | fractal_schema::effects::KIND_IN_FLIGHT | fractal_schema::effects::KIND_CONFIRMED
             | fractal_schema::effects::KIND_UNRESOLVED)
@@ -1236,6 +1400,13 @@ impl World {
         } else {
             let mut fields = Map::new();
             for (name, field) in &spec.fields {
+                // Private relations come only from the typed thread producer exercised
+                // above, never from an ordinary randomly generated message writer.
+                if spec.kind == "message.sent"
+                    && fractal_schema::threads::MESSAGE_RELATION_FIELDS.contains(&name.as_str())
+                {
+                    continue;
+                }
                 if field.required || self.rng.chance(40) {
                     fields.insert(name.clone(), self.value_of(field, index));
                 }
@@ -1295,6 +1466,96 @@ impl World {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some(self.fresh("any")),
+        })
+    }
+
+    /// Capture records bind their subjects to encoded content and commits to actual admitted
+    /// authority/fact claims. Dependencies may arrive in any replication order.
+    fn capture_claim(&mut self, kind: &str, index: usize) -> Option<ClaimInput> {
+        use fractal_schema::github_capture::*;
+        let source = Source {
+            host: "github.com".into(),
+            id: format!("convergence-{}", self.nodes[index].name),
+            generation: 1,
+        };
+        let source_subject = format!("{AUTHORITY_FAMILY}/{}", source.id);
+        let held = claims(&self.nodes[index].store);
+        let source_record = json!(source);
+        let records = |wanted: &str| {
+            held.values().filter(|claim| {
+                claim.kind == wanted
+                    && claim.body.pointer("/fields/record").is_some_and(|record| record["source"] == source_record)
+            }).collect::<Vec<_>>()
+        };
+        let grants = records(AUTHORITY_KIND);
+        let commits = records(COMMIT_KIND);
+        let previous = commits.iter().max_by_key(|claim| {
+            claim.body["fields"]["record"]["sequence"].as_u64().expect("generated capture sequence")
+        });
+        let now = u64::try_from(self.now()).expect("positive simulation clock");
+        let (subject, record) = match kind {
+            AUTHORITY_KIND => {
+                let grant = AuthorityGrant {
+                    version: VERSION, source: source.clone(), member: self.nodes[index].name.clone(),
+                    epoch: 1, predecessor_grant: None, final_predecessor_commit: None, fencing_receipt: None,
+                };
+                (source_subject, serde_json::to_value(grant).unwrap())
+            }
+            FACT_KIND => {
+                let fact = ObservedFact {
+                    version: VERSION, source: source.clone(), observed_at_ms: now, supersedes: None,
+                    fact: FactImage::Repository(RepositoryFact {
+                        id: self.fresh("repository"), locator: "acme/convergence".into(), is_private: false,
+                    }),
+                };
+                (fact.subject().unwrap(), serde_json::to_value(fact).unwrap())
+            }
+            COMMIT_KIND => {
+                if !records(FENCED_KIND).is_empty() {
+                    return None;
+                }
+                let grant = grants.first()?;
+                let facts = records(FACT_KIND);
+                let claim = facts.last()?;
+                let fact: ObservedFact = serde_json::from_value(claim.body["fields"]["record"].clone()).unwrap();
+                let (_, repository, _) = fact.fact.identity();
+                let commit = CaptureCommit {
+                    version: VERSION, source: source.clone(), epoch: 1, authority_grant: grant.id.clone(),
+                    sequence: previous.map_or(1, |claim| claim.body["fields"]["record"]["sequence"].as_u64().unwrap() + 1),
+                    predecessor: previous.map(|claim| claim.id.clone()),
+                    facts: vec![FactReference { claim_id: claim.id.clone(), digest: fact.digest().unwrap() }],
+                    checkpoint: Some(ScanCheckpoint {
+                        repository_id: repository.into(), pass_started_at_ms: now, cursor: None,
+                        pass_complete: true, pull_request_id: None, upstream_updated_at_ms: None,
+                    }),
+                    coverage: vec![Coverage {
+                        repository_id: repository.into(), family: FactFamily::Repository, complete: true,
+                        authoritative: true, history_from_ms: now, through_ms: now, error: None,
+                    }],
+                    observed_at_ms: now,
+                };
+                (commit.subject().unwrap(), serde_json::to_value(commit).unwrap())
+            }
+            FENCED_KIND => {
+                let grant = grants.first()?;
+                let receipt = FenceReceipt {
+                    version: VERSION, source: source.clone(), member: self.nodes[index].name.clone(),
+                    epoch: 1, authority_grant: grant.id.clone(),
+                    final_commit: Some(previous?.id.clone()), stopped_at_ms: now,
+                };
+                (source_subject, serde_json::to_value(receipt).unwrap())
+            }
+            _ => unreachable!("capture kind"),
+        };
+        Some(ClaimInput {
+            subject, kind: kind.into(), actor: None,
+            fields: BTreeMap::from([("record".into(), record)]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(if kind == AUTHORITY_KIND {
+                format!("capture-authority:{}", source.id)
+            } else {
+                self.fresh("capture")
+            }),
         })
     }
 
@@ -1406,10 +1667,6 @@ impl World {
             && self.groups[from] == self.groups[to]
     }
 
-    fn partitioned(&self) -> bool {
-        self.groups.iter().any(|group| *group != self.groups[0])
-    }
-
     fn run_schedule(&mut self, steps: usize) {
         for _ in 0..steps {
             let count = self.nodes.len();
@@ -1471,7 +1728,11 @@ impl World {
                     self.note(format!("restart {}", self.nodes[index].name));
                     self.restart(index);
                 }
-                93..=95 => self.excuse(index),
+                93..=95 => {
+                    if self.nodes[index].online && !self.nodes[index].old_build {
+                        self.checkpoint_work(index, true);
+                    }
+                }
                 96 => {
                     if count < 5 {
                         let old =
@@ -1498,8 +1759,8 @@ impl World {
     }
 
     /// The replication worker catching up: the online nodes that `index` can reach exchange
-    /// everything and run checkpoint work, crashes included, until nothing moves. Checkpoints
-    /// seal, verify and trim here while other nodes are offline, partitioned or skewed.
+    /// everything and trim, crashes included, until nothing moves. Each node trims here while
+    /// other nodes are offline, partitioned or skewed.
     fn settle(&mut self, index: usize) {
         if !self.nodes[index].online {
             return;
@@ -1524,13 +1785,7 @@ impl World {
             }
             for &member in &members {
                 if !self.nodes[member].old_build {
-                    moved |= self.checkpoint_work(member, true).iter().any(|action| {
-                        !matches!(
-                            action,
-                            CheckpointAction::ManifestNeeded { .. }
-                                | CheckpointAction::AttentionRequested { .. }
-                        )
-                    });
+                    moved |= !self.checkpoint_work(member, true).is_empty();
                 }
             }
             if !moved {
@@ -1539,59 +1794,9 @@ impl World {
         }
     }
 
-    /// A person on an online node excuses a writer it cannot reach, or an old build.
-    fn excuse(&mut self, index: usize) {
-        if !self.nodes[index].online || self.nodes[index].old_build {
-            return;
-        }
-        let candidates = (0..self.nodes.len())
-            .filter(|other| {
-                *other != index
-                    && (self.nodes[*other].old_build
-                        || !self.nodes[*other].online
-                        || self.groups[*other] != self.groups[index])
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return;
-        }
-        let writer = self.nodes[*self.rng.pick(&candidates)].name.clone();
-        self.excuse_writer(index, writer, "unreachable in the simulation");
-    }
-
-    /// A person on the node at `index` excuses `writer` from checkpoints.
-    fn excuse_writer(&mut self, index: usize, writer: String, reason: &str) {
-        let result = self.nodes[index]
-            .store
-            .excuse_checkpoint_writer(&CheckpointExcuseRequest {
-                writer: writer.clone(),
-                reason: reason.into(),
-                actor: PERSON.into(),
-            });
-        match result {
-            Ok(claim) => {
-                self.person_claims.insert(claim.id);
-                if self.partitioned() {
-                    self.excused_while_partitioned = true;
-                }
-                self.note(format!("{} excuses {writer}", self.nodes[index].name));
-                self.check_index(index);
-                self.tap(index);
-            }
-            Err(error) => {
-                let message = format!(
-                    "excusing {writer} failed: {}: {}",
-                    error.code, error.message
-                );
-                self.fail(message);
-            }
-        }
-    }
 
     /// A node goes away for a few days while the others carry on: they write, exchange and
-    /// run checkpoint work each day, and a person usually excuses the absent node so
-    /// checkpoints go on without it. Half the time it comes back at the end and catches up,
-    /// which adopts any checkpoint it missed.
+    /// trim each day. Half the time it comes back at the end and catches up.
     fn away(&mut self, index: usize) {
         if !self.nodes[index].online {
             return;
@@ -1599,13 +1804,6 @@ impl World {
         self.nodes[index].online = false;
         let name = self.nodes[index].name.clone();
         self.note(format!("{name} away"));
-        let people = (0..self.nodes.len())
-            .filter(|other| self.nodes[*other].online && !self.nodes[*other].old_build)
-            .collect::<Vec<_>>();
-        if !people.is_empty() && !self.nodes[index].old_build && self.rng.chance(70) {
-            let person = *self.rng.pick(&people);
-            self.excuse_writer(person, name.clone(), "away for a few days");
-        }
         for _ in 0..2 + self.rng.below(2) {
             self.days += 1;
             for node in 0..self.nodes.len() {
@@ -1632,29 +1830,18 @@ impl World {
         }
     }
 
-    /// Heal everything and bring every node back, then exchange and run checkpoint work until
-    /// nothing moves.
+    /// Heal everything and bring every node back, then exchange and trim until nothing moves.
     fn quiesce(&mut self) -> bool {
         let count = self.nodes.len();
         self.groups = vec![0; count];
-        // Every machine comes back with a corrected clock. Checkpoints need participants to
-        // agree on the newest due cut, so skewed clocks only delay them.
+        // Every machine comes back with a corrected clock, so every trimming node's newest due
+        // cut is the same.
         for index in 0..count {
             self.nodes[index].online = true;
             self.nodes[index].skew_ms = 0;
             self.set_clock(index);
         }
         self.note("quiesce".into());
-        // An old build holds every checkpoint up until a person excuses it, as the attention
-        // request asks. Half the runs leave it waiting.
-        if let Some(old) = self.nodes.iter().position(|node| node.old_build)
-            && let Some(person) = self.nodes.iter().position(|node| !node.old_build)
-            && self.rng.chance(50)
-        {
-            self.groups = vec![0; count];
-            let writer = self.nodes[old].name.clone();
-            self.excuse_writer(person, writer, "an old build");
-        }
         for _ in 0..80 {
             let mut moved = false;
             for from in 0..count {
@@ -1670,14 +1857,23 @@ impl World {
                     }
                 }
             }
+            // The claim-range walk the worker runs after a summary exchange, which carries each
+            // peer's retired claim IDs to the trimming nodes that lack them, and fetches a claim
+            // one retired that this node never held from any peer that still has it.
+            for from in 0..count {
+                for to in 0..count {
+                    if from != to && !self.nodes[to].old_build {
+                        let before = retired_claims(&self.nodes[to].store);
+                        moved |= self.walk(from, to);
+                        moved |= retired_claims(&self.nodes[to].store) != before;
+                    }
+                }
+            }
             for index in 0..count {
                 if self.nodes[index].old_build {
                     continue;
                 }
-                let actions = self.checkpoint_work(index, false);
-                moved |= actions
-                    .iter()
-                    .any(|action| !matches!(action, CheckpointAction::ManifestNeeded { .. }));
+                moved |= !self.checkpoint_work(index, false).is_empty();
             }
             if !moved {
                 return true;
@@ -1686,31 +1882,6 @@ impl World {
         false
     }
 
-    /// What a quiesced fleet that never trimmed does next: a person excuses the old build, if
-    /// there is one, and a day passes so a new cut falls due; then exchange and checkpoint work
-    /// run until nothing moves. Whether every modern node then trims.
-    fn trims_after_excuse_and_cut(&mut self) -> bool {
-        let count = self.nodes.len();
-        if let Some(old) = self.nodes.iter().position(|node| node.old_build)
-            && let Some(person) = self.nodes.iter().position(|node| !node.old_build)
-        {
-            let writer = self.nodes[old].name.clone();
-            self.excuse_writer(person, writer, "an old build");
-        }
-        self.days += 1;
-        for node in 0..count {
-            self.set_clock(node);
-        }
-        self.note(format!("day {}", self.days));
-        if !self.quiesce() {
-            self.fail("the nodes did not stop moving after the next cut".into());
-        }
-        self.check();
-        self.nodes
-            .iter()
-            .filter(|node| !node.old_build)
-            .all(|node| node.store.trimmed_checkpoint().unwrap().is_some())
-    }
 
     fn check(&mut self) {
         let status = |store: &Store| store.replication_status(true, Some(FLEET), &[]).unwrap();
@@ -1722,46 +1893,7 @@ impl World {
             .collect::<BTreeSet<_>>();
         // A fixed time, far enough ahead that every reader looks at every claim.
         let now = (self.now() + 10 * DAY_MS) as u128;
-        let oracle_answers = self
-            .oracle
-            .checkpoint_reader_answers(&subjects, now)
-            .unwrap();
-        let first_new = self.nodes.iter().position(|node| !node.old_build);
-        let reference = first_new.map(|index| {
-            let store = &self.nodes[index].store;
-            (
-                status(store).authority_digest,
-                store.trimmed_checkpoint().unwrap(),
-            )
-        });
-        let reference_manifest = reference.as_ref().and_then(|(_, trimmed)| {
-            trimmed.as_ref().map(|trimmed| {
-                self.nodes[first_new.unwrap()]
-                    .store
-                    .checkpoint_manifest(&trimmed.id, trimmed.cut_unix_ms)
-                    .unwrap()
-            })
-        });
-        // Only people excusing each side of a partition let a node lack a claim without its own
-        // tombstone: a cut with two certificates, or certificates with disjoint participants,
-        // one per side. Every node applies the chosen or newest one, and adopting its manifest
-        // forgets the other side's tombstones of claims this side never saw (#1052).
-        let split = first_new.is_some_and(|index| {
-            let claims = self.nodes[index].store.checkpoint_claims().unwrap();
-            let stable = stable_checkpoints(&claims);
-            let certificates = stable.values().flatten().collect::<Vec<_>>();
-            stable.values().any(|certified| certified.len() > 1)
-                || certificates.iter().enumerate().any(|(index, left)| {
-                    certificates[index + 1..].iter().any(|right| {
-                        left.terms
-                            .participants
-                            .is_disjoint(&right.terms.participants)
-                    })
-                })
-        });
-        // Then the claims some side forgot are missing from every node's sources and operations,
-        // so modern nodes compare those with each other instead of with the oracle.
-        let reference_graph = first_new.map(|index| status(&self.nodes[index].store));
+        let oracle_answers = reader_answers(&self.oracle, &subjects, now);
         let mut failures = Vec::new();
         if oracle.invalid_records != 0 {
             failures.push(format!(
@@ -1769,125 +1901,73 @@ impl World {
                 oracle.invalid_records
             ));
         }
-        for node in &self.nodes {
+        let retired = self
+            .nodes
+            .iter()
+            .map(|node| retired_claims(&node.store))
+            .collect::<Vec<_>>();
+        // Every claim some node retired.
+        let retired_anywhere = retired.iter().flatten().cloned().collect::<BTreeSet<_>>();
+        // The first trimming node's retained claims, which every other trimming node must hold.
+        let mut reference: Option<(String, BTreeSet<String>, BTreeSet<String>)> = None;
+        for (node, retired) in self.nodes.iter().zip(&retired) {
             let name = &node.name;
             let store = &node.store;
             let own = status(store);
+            // 5. No invalid or pending record.
             if own.invalid_records != 0 || own.pending_records != 0 {
                 failures.push(format!(
                     "{name}: {} invalid and {} pending records",
                     own.invalid_records, own.pending_records
                 ));
             }
-            if node.old_build {
-                let legacy = store
-                    .export_replication_summary(FLEET)
-                    .unwrap()
-                    .graph_digest;
-                let oracle_legacy = self
-                    .oracle
-                    .export_replication_summary(FLEET)
-                    .unwrap()
-                    .graph_digest;
-                if legacy != oracle_legacy {
-                    failures.push(format!(
-                        "{name}: legacy graph digest differs from the oracle's"
-                    ));
-                }
-            } else if split {
-                let reference = reference_graph.as_ref().unwrap();
-                if own.graph_digest != reference.graph_digest {
-                    failures.push(format!(
-                        "{name}: complete graph digest differs from {}'s",
-                        self.nodes[first_new.unwrap()].name
-                    ));
-                }
-            } else if own.graph_digest != oracle.graph_digest {
-                failures.push(format!(
-                    "{name}: complete graph digest differs from the oracle's"
-                ));
-            }
-            for (table, digest) in &oracle.projection_digests {
-                // An old build may lack facts dropped while it was excused, and cannot adopt
-                // their tombstones. Modern nodes compare every table, including those facts,
-                // with the oracle, or with each other after a split.
-                let facts = matches!(table.as_str(), "claim_sources" | "operations");
-                if node.old_build && facts {
-                    continue;
-                }
-                if split && facts {
-                    let reference = reference_graph.as_ref().unwrap();
-                    if own.projection_digests.get(table) != reference.projection_digests.get(table)
-                    {
-                        failures.push(format!(
-                            "{name}: shared table {table} differs from {}'s",
-                            self.nodes[first_new.unwrap()].name
-                        ));
-                    }
-                    continue;
-                }
-                if own.projection_digests.get(table) != Some(digest) {
-                    failures.push(format!(
-                        "{name}: shared table {table} differs from the oracle's"
-                    ));
-                }
-            }
-            let answers = store.checkpoint_reader_answers(&subjects, now).unwrap();
-            for (subject, answer) in &oracle_answers {
-                if answers.get(subject) != Some(answer) {
-                    failures.push(format!(
-                        "{name}: readers answer differently for {subject}: {} vs oracle {answer}",
-                        answers.get(subject).map_or("nothing", String::as_str)
-                    ));
-                }
-            }
             let held = claims(store);
-            let trimmed = store.trimmed_checkpoint().unwrap();
-            let manifest = trimmed.as_ref().map(|trimmed| {
-                store
-                    .checkpoint_manifest(&trimmed.id, trimmed.cut_unix_ms)
-                    .unwrap()
-            });
-            let tombstones = manifest
-                .as_ref()
-                .map(|manifest| {
-                    manifest
-                        .claims
-                        .iter()
-                        .map(|claim| claim.id.clone())
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
+            // 3 and 4. A node lacks only claims of a kind local trim drops, never a person's,
+            // and only claims it retired. A node may lack one some node retired before it ever
+            // received it: an old build, which learns no retired ID, or a trimming node that
+            // learned the ID and found no peer still holding the claim to supply it
+            // (`peer_retired_unheld`). Neither holds the dropped claim's facts (its tombstone),
+            // so the tables that keep them (`claim_sources`, `operations`, and so the graph
+            // digest) are not compared for it. A trimming node that lacks such facts for any
+            // other reason fails.
+            let mut learned_late = 0;
             for (id, claim) in &oracle_claims {
-                let droppable = RULE_KINDS.contains(&claim.kind.as_str())
-                    && !claim
-                        .actor
-                        .as_deref()
-                        .is_some_and(|actor| actor.starts_with("person/"));
+                let droppable = LOCAL_TRIM_KINDS.contains(&claim.kind.as_str())
+                    && !self.person_claims.contains(id);
                 match held.get(id) {
                     Some(own) if own.body != claim.body || own.kind != claim.kind => {
                         failures.push(format!("{name}: {id} has another body"));
                     }
                     Some(_) => {
-                        if tombstones.contains(id) {
-                            failures.push(format!("{name}: holds {id}, which it tombstoned"));
+                        if retired.contains(id) {
+                            failures.push(format!("{name}: holds {id}, which it retired"));
                         }
                     }
-                    None if !droppable || self.person_claims.contains(id) => {
+                    None if !droppable => {
                         failures.push(format!(
-                            "{name}: lacks {id} ({} on {}), which no rule drops",
+                            "{name}: lacks {id} ({} on {}), which no rule lets it drop",
                             claim.kind, claim.subject
                         ));
                     }
-                    None if !tombstones.contains(id)
-                        && !((split || node.old_build) && self.tombstoned.contains(id)) =>
-                    {
+                    // A node that learned the retired ID without ever holding the claim has no
+                    // tombstone of it, and so not the facts the oracle keeps of it.
+                    None if retired.contains(id) && !node.old_build => {
+                        if !tombstoned(store, id) {
+                            if own.peer_retired_unheld == 0 {
+                                failures.push(format!(
+                                    "{name}: lacks {id} and its tombstone, yet counts no unheld retirement"
+                                ));
+                            }
+                            learned_late += 1;
+                        }
+                    }
+                    None if retired_anywhere.contains(id) && node.old_build => learned_late += 1,
+                    None => {
                         failures.push(format!(
-                            "{name}: lacks {id} ({} on {}) without a tombstone",
+                            "{name}: lacks {id} ({} on {}), which it did not retire",
                             claim.kind, claim.subject
                         ));
                     }
-                    None => {}
                 }
             }
             for (id, claim) in &held {
@@ -1898,46 +1978,65 @@ impl World {
                     ));
                 }
             }
+            for id in retired {
+                if oracle_claims
+                    .get(id)
+                    .is_some_and(|claim| !LOCAL_TRIM_KINDS.contains(&claim.kind.as_str()))
+                {
+                    failures.push(format!("{name}: retired {id}, of a kind local trim keeps"));
+                }
+            }
+            // 2. The oracle's projections and reader answers.
+            for (table, digest) in &oracle.projection_digests {
+                let facts = matches!(table.as_str(), "claim_sources" | "operations");
+                if facts && learned_late > 0 {
+                    continue;
+                }
+                if own.projection_digests.get(table) != Some(digest) {
+                    failures.push(format!(
+                        "{name}: shared table {table} differs from the oracle's"
+                    ));
+                }
+            }
+            if learned_late == 0 && own.graph_digest != oracle.graph_digest {
+                failures.push(format!(
+                    "{name}: complete graph digest differs from the oracle's"
+                ));
+            }
+            let answers = reader_answers(store, &subjects, now);
+            for (subject, answer) in &oracle_answers {
+                if answers.get(subject) != Some(answer) {
+                    failures.push(format!(
+                        "{name}: readers answer differently for {subject}: {} vs oracle {answer}",
+                        answers.get(subject).map_or("nothing", String::as_str)
+                    ));
+                }
+            }
             if node.old_build {
                 continue;
             }
-            if let (Some(trimmed), Some(manifest)) = (&trimmed, &manifest)
-                && let Err(error) = verify_checkpoint_manifest(manifest, &trimmed.drop_digest)
-            {
-                failures.push(format!(
-                    "{name}: its tombstones do not match {}: {}",
-                    trimmed.id, error.message
-                ));
-            }
-            if let Some((authority, reference_trimmed)) = &reference {
-                if &own.authority_digest != authority {
-                    failures.push(format!("{name}: authority digest differs"));
+            // 1. Trimming nodes retain exactly the same claims and hold the same retired claim
+            // IDs: retired IDs travel in the claim-range walk, and a peer's retirement deletes a
+            // held copy (`retirement_wins`).
+            let retained = held.keys().cloned().collect::<BTreeSet<_>>();
+            match &reference {
+                None => reference = Some((name.clone(), retained, retired.clone())),
+                Some((first, first_retained, first_retired)) => {
+                    if &retained != first_retained {
+                        failures.push(format!(
+                            "{name}: retains {} claims that {first} lacks, and lacks {} that {first} retains",
+                            retained.difference(first_retained).count(),
+                            first_retained.difference(&retained).count()
+                        ));
+                    }
+                    if retired != first_retired {
+                        failures.push(format!(
+                            "{name}: retired {} claim IDs that {first} did not, and not {} that {first} did",
+                            retired.difference(first_retired).count(),
+                            first_retired.difference(retired).count()
+                        ));
+                    }
                 }
-                if &trimmed != reference_trimmed {
-                    failures.push(format!(
-                        "{name}: trimmed {trimmed:?}, not {reference_trimmed:?}"
-                    ));
-                }
-                if manifest != reference_manifest {
-                    failures.push(format!("{name}: tombstones differ"));
-                }
-            }
-            if store.checkpoint_manifest_need().unwrap().is_some() {
-                failures.push(format!("{name}: still needs a manifest after quiescence"));
-            }
-            let checkpoint_claims = store.checkpoint_claims().unwrap();
-            for (cut, certified) in stable_checkpoints(&checkpoint_claims) {
-                if certified.len() > 1 && !self.excused_while_partitioned {
-                    failures.push(format!(
-                        "{name}: {} has {} certificates without an excused partition",
-                        checkpoint_name(cut),
-                        certified.len()
-                    ));
-                }
-                assert_eq!(
-                    certificates(&checkpoint_claims, &checkpoint_name(cut)).len(),
-                    certified.len()
-                );
             }
         }
         self.failures.extend(failures);
@@ -1953,6 +2052,50 @@ impl World {
             self.schedule.join("\n  ")
         )
     }
+}
+
+/// Make a modern node trim on its own, as `[trim] local` does by default; an old build never
+/// trims. The retired ledger is its authority once its import of older rows has finished.
+fn trim_unless_old(store: &Store, old_build: bool) {
+    if !old_build {
+        store.import_retired_identities_paced(|_| {}).unwrap();
+        store.trim_locally(true).unwrap();
+        // What a peer retired deletes the copy this node holds (`retirement_wins`).
+        store.set_retirement_wins(true);
+    }
+}
+
+/// What the readers a trim must leave unchanged answer for each of `subjects`, as JSON text.
+fn reader_answers(store: &Store, subjects: &BTreeSet<String>, now: u128) -> BTreeMap<String, String> {
+    let connection = store.readers.get();
+    let connection = connection.unchecked_transaction().unwrap();
+    smallclaims::store::checkpoint::reader_answers(&*store.runtime, &connection, subjects, now)
+        .unwrap()
+        .into_iter()
+        .map(|(subject, answer)| (subject, smallclaims::hash::canonical_json_text(&answer).unwrap()))
+        .collect()
+}
+
+/// Whether `store` holds a tombstone of claim `id`: it held the claim and a trim dropped it.
+fn tombstoned(store: &Store, id: &str) -> bool {
+    store
+        .readers
+        .get()
+        .query_row("SELECT EXISTS(SELECT 1 FROM checkpoint_claims WHERE id=?1)", [id], |row| row.get(0))
+        .unwrap()
+}
+
+/// The claim IDs a node retired, as their text.
+fn retired_claims(store: &Store) -> BTreeSet<String> {
+    let connection = store.readers.get();
+    let mut statement = connection
+        .prepare("SELECT CASE WHEN typeof(id)='blob' THEN lower(hex(id)) ELSE id END FROM retired_claim_ids")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
 }
 
 /// What the daemon does after a receipt: admit, repair and project.
@@ -2400,10 +2543,8 @@ fn claims(store: &Store) -> BTreeMap<String, ClaimRecord> {
 struct Outcome {
     failure: Option<String>,
     written: BTreeMap<String, usize>,
+    /// Whether some node retired a claim it trimmed.
     trimmed: bool,
-    /// For a run carried on past a quiesce that left it untrimmed: whether every modern node
-    /// trimmed once the old build was excused and the next cut fell due.
-    trims_after_excuse_and_cut: Option<bool>,
     sabotaged: bool,
     /// The schedule and every store's authority digest, to show that a seed runs the same
     /// every time.
@@ -2411,12 +2552,6 @@ struct Outcome {
 }
 
 fn run(seed: u64, sabotage: Sabotage) -> Outcome {
-    run_with(seed, sabotage, false)
-}
-
-/// `run`, and with `carry_on` a run left untrimmed goes on to the old build's excusal and the
-/// next cut (`World::trims_after_excuse_and_cut`).
-fn run_with(seed: u64, sabotage: Sabotage, carry_on: bool) -> Outcome {
     let _identity = smallclaims::store::checkpoint_test_identity(
         "seeded-convergence-v1",
         "seeded-convergence-executable-v1",
@@ -2431,8 +2566,7 @@ fn run_with(seed: u64, sabotage: Sabotage, carry_on: bool) -> Outcome {
     let trimmed = world
         .nodes
         .iter()
-        .any(|node| node.store.trimmed_checkpoint().unwrap().is_some());
-    let trims_after_excuse_and_cut = (carry_on && !trimmed).then(|| world.trims_after_excuse_and_cut());
+        .any(|node| !retired_claims(&node.store).is_empty());
     let mut fingerprint = world.schedule.clone();
     for store in std::iter::once(&world.oracle).chain(world.nodes.iter().map(|node| &node.store)) {
         let status = store.replication_status(true, Some(FLEET), &[]).unwrap();
@@ -2458,7 +2592,6 @@ fn run_with(seed: u64, sabotage: Sabotage, carry_on: bool) -> Outcome {
         failure,
         written: world.written,
         trimmed,
-        trims_after_excuse_and_cut,
         sabotaged: world.sabotaged,
         fingerprint,
     }
@@ -2486,43 +2619,17 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
         written.len()
     );
     assert!(failures.is_empty(), "failing seeds: {failures:?}");
-    // The suite is worth something only if checkpoints trimmed in most runs.
-    assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
+    // The suite is worth something only if some node retired claims in most runs.
+    assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs retired a claim");
 }
 
-/// Corpus v35 resource execution receipts shift the seeded schedule (see the
-/// fixed-seed characterization in fixtures/convergence/README.md).
-/// Non-trimming seeds must still trim on every modern node after excusing the old build
-/// and advancing to the next cut.
-const NEVER_TRIMS: &[u64] = &[179];
-// Growth beyond three non-trimming seeds needs review.
-const _: () = assert!(NEVER_TRIMS.len() <= 3);
-
-/// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does;
-/// such a seed trims on every modern node once its old build is excused and the next cut is due.
+/// One fixed seed converges under member-local trim. Prior corpus characterizations
+/// are historical and recorded in fixtures/convergence/README.md.
 fn seed_converges(seed: u64) {
-    let never = NEVER_TRIMS.contains(&seed);
-    let outcome = run_with(seed, Sabotage::None, true);
-    eprintln!(
-        "convergence corpus v35 seed {seed}: trimmed={} after excuse and cut={:?}",
-        outcome.trimmed, outcome.trims_after_excuse_and_cut
-    );
+    let outcome = run(seed, Sabotage::None);
+    eprintln!("convergence corpus v44 seed {seed}: retired={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
-    }
-    assert_eq!(
-        outcome.trimmed,
-        !never,
-        "corpus v35 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
-        if outcome.trimmed { "trimmed" } else { "did not trim" },
-        if never { "one of" } else { "not one of" }
-    );
-    if never {
-        assert_eq!(
-            outcome.trims_after_excuse_and_cut,
-            Some(true),
-            "corpus v35 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
-        );
     }
 }
 
@@ -2627,14 +2734,8 @@ fn the_checks_catch(sabotage: Sabotage, first: &[u64]) {
 }
 
 #[test]
-fn the_checks_catch_a_trim_that_forgets_its_tombstones() {
-    the_checks_catch(Sabotage::ForgetTombstones, &[]);
-}
-
-#[test]
-fn the_checks_catch_a_partial_adoption() {
-    // Seeds 1 and 13 run into it, so both fit in the first four instead of two rounds of four.
-    the_checks_catch(Sabotage::PartialAdoption, &[1, 13]);
+fn the_checks_catch_a_trim_that_forgets_what_it_retired() {
+    the_checks_catch(Sabotage::ForgetRetired, &[]);
 }
 
 /// A seed runs the same however fast it runs, so the seed a failure prints reproduces it.
@@ -2734,7 +2835,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v35.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v45.json"
         }))
         .unwrap(),
     )

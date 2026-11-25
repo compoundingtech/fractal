@@ -84,8 +84,10 @@ const deferredStory = (boundary: Boundary, source: string): Story => ({
     const fixtureUrl = new URL(attachment, window.location.href).href
     const fixtureRequestsBefore = performance.getEntriesByType('resource').filter(entry => entry.name === fixtureUrl).length
     const placeholders = await canvas.findAllByTestId('deferred-image')
-    await expect(placeholders).toHaveLength(2)
+    // Raw HTML images use the same consent boundary as Markdown images; srcset must never survive.
+    await expect(placeholders).toHaveLength(3)
     await expect(placeholders[0]).toHaveAttribute('data-image-src', source)
+    await expect(placeholders[2]).toHaveAttribute('data-image-src', 'https://example.invalid/raw.png')
     await expect(canvasElement.querySelector('img, iframe, style, [srcset]')).toBeNull()
     const links = canvasElement.querySelectorAll('a')
     for (const link of links) {
@@ -105,7 +107,7 @@ const deferredStory = (boundary: Boundary, source: string): Story => ({
     await waitFor(() => expect(canvasElement.querySelectorAll('img')).toHaveLength(1))
     await expect(canvasElement.querySelector('img')).toHaveAttribute('src', resolvedSource)
     await expect(canvasElement.querySelector('img')).toHaveAttribute('referrerpolicy', 'no-referrer')
-    await expect(canvas.getAllByTestId('deferred-image')).toHaveLength(1)
+    await expect(canvas.getAllByTestId('deferred-image')).toHaveLength(2)
     const image = canvasElement.querySelector('img')!
     await waitFor(async () => { await expect(image.complete).toBe(true); await expect(image.naturalWidth).toBeGreaterThan(0) }, { timeout: imageReadyTimeout })
     await expect(performance.getEntriesByType('resource').filter(entry => contentUrl.test(entry.name))).toHaveLength(0)
@@ -136,7 +138,10 @@ const allowedStory = (boundary: Boundary): Story => ({ args: { boundary, source:
   await expect(image).toHaveAttribute('src', attachment)
   await expect(image).toHaveAttribute('referrerpolicy', 'no-referrer')
   await waitFor(async () => { await expect(image.complete).toBe(true); await expect(image.naturalWidth).toBeGreaterThan(0) }, { timeout: imageReadyTimeout })
-  await expect(within(canvasElement).getAllByTestId('deferred-image')).toHaveLength(1)
+  const placeholders = within(canvasElement).getAllByTestId('deferred-image')
+  await expect(placeholders).toHaveLength(2)
+  await expect(placeholders[1]).toHaveAttribute('data-image-src', 'https://example.invalid/raw.png')
+  await expect(canvasElement.querySelector('[srcset]')).toBeNull()
   const contentUrl = /^(?:https:\/\/example\.invalid\/|http:\/\/127\.0\.0\.1\/|http:\/\/169\.254\.169\.254\/)/
   await expect(performance.getEntriesByType('resource').filter(entry => contentUrl.test(entry.name))).toHaveLength(0)
 } })
@@ -148,7 +153,9 @@ const hostOpensStory = (boundary: Boundary, source: string): Story => ({ args: {
   openImage.mockClear()
   const canvas = within(canvasElement)
   const placeholders = await canvas.findAllByTestId('deferred-image')
-  await expect(placeholders).toHaveLength(2)
+  await expect(placeholders).toHaveLength(3)
+  await expect(placeholders[2]).toHaveAttribute('data-image-src', 'https://example.invalid/raw.png')
+  await expect(canvasElement.querySelector('img, iframe, style, [srcset]')).toBeNull()
   const contentUrl = /^(?:https:\/\/example\.invalid\/|http:\/\/127\.0\.0\.1\/|http:\/\/169\.254\.169\.254\/)/
   await expect(performance.getEntriesByType('resource').filter(entry => contentUrl.test(entry.name))).toHaveLength(0)
   const host = new URL(source).host
@@ -159,7 +166,7 @@ const hostOpensStory = (boundary: Boundary, source: string): Story => ({ args: {
   // The package lib is ES2022 (no Promise.withResolvers): give any stray image request time to appear.
   await new Promise(resolve => setTimeout(resolve, 500))
   await expect(canvasElement.querySelector('img, iframe, style, [srcset]')).toBeNull()
-  await expect(canvas.getAllByTestId('deferred-image')).toHaveLength(2)
+  await expect(canvas.getAllByTestId('deferred-image')).toHaveLength(3)
   await expect(performance.getEntriesByType('resource').filter(entry => contentUrl.test(entry.name))).toHaveLength(0)
 } })
 export const TranscriptHostOpensRemote: Story = { ...hostOpensStory('Transcript', sources.Remote), tags: ['critical'] }

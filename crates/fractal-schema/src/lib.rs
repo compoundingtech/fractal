@@ -9,6 +9,7 @@ pub mod directive_notes;
 pub mod deploy;
 pub mod deploy_policy;
 pub mod full_value;
+pub mod github_capture;
 pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
@@ -25,6 +26,7 @@ pub mod source_map;
 pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
+pub mod residency;
 pub mod review;
 pub mod task_grants;
 pub mod usage_limits;
@@ -86,8 +88,8 @@ mod canonical_agent_actor_tests {
 }
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
-pub use fractal_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h436c7affad49 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub use fractal_storage_version::THREAD_PRIVACY_STORAGE_VERSION as STORAGE_VERSION;
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h527a97571066 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite compatibility uses the shared storage version reported above. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -131,7 +133,7 @@ Storage version 19 adds the owner-local `local_runtime_starts` ledger and its ad
 
 In the same installation transaction, `meta` captures `publication-operation-format-shared-cut` from `MAX(claims.store_index)` and `publication-operation-format-local-cut` from `MAX(local_observations.id)`, using zero for an empty table and `INSERT OR IGNORE`. These are two indexed maxima before the first operation-bound request, not history scans. Reopen, graph replay and view forgetting preserve both immutable cuts. A store with existing operation rows but a missing cut is refused rather than capturing a later boundary; preserve that store and its original boundary evidence for forward recovery. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary.
 
-Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. A per-subject `local_runtime_start_observation_subjects` bookmark records that subject's latest ledger mutation serial in the same transaction. The observation writer rejects a subject bookmark newer than its pre-physical capture serial when publishing a differing or absent incarnation; unrelated subjects cannot starve recording of exits or absence. This is a ledger-mutation witness, not general runtime identity or a selected-declaration token. The bookmark table survives replay/forget and adds one row per ledger subject, without a history backfill. The observation writer reports repeated refusals through telemetry and a visible fault; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
+Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. A per-subject `local_runtime_start_observation_subjects` bookmark records that subject's latest ledger mutation serial in the same transaction. The observation writer rejects a subject bookmark newer than its pre-physical capture serial even when publishing the same incarnation: an earlier running snapshot cannot overwrite terminal evidence published by completion. Only runtime-start ledger mutations advance this witness, so heartbeat, work, usage claims and unrelated subjects cannot starve recording of exits or absence. This is a ledger-mutation witness, not general runtime identity or a selected-declaration token. The in-memory physical capture also retains the indexed `MAX(claims.store_index)` in the same SQLite snapshot. The completion writer preserves an owning-origin observation of the exact runtime/incarnation whose store index is newer than this frontier, retaining its receipt and terminal evidence while still recording launch success. This covers observations appended by the broad pass, which do not advance the ledger generation. The bookmark table survives replay/forget and adds one row per ledger subject, without a history backfill. The observation writer reports repeated refusals through telemetry and a visible fault; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
 
 Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
 
@@ -154,16 +156,18 @@ since keeps the legacy value, which equals what would be stored.
 ## Retired identity ledger
 
 `retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
-checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
-`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
-background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
-per background writer loan with its cursor in `meta`, resting outside the loan for
-max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
-identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
-stays retired and is also labeled in `retired_claim_withdrawals` or
-`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
-the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
-would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+checkpoint tables that record a trim's tombstones. Until a member trims (`[trim] local`, the
+default), triggers union every identity a row of `checkpoint_claims` or `checkpoint_envelopes`
+gains, through INSERT, UPDATE or before DELETE. A background job
+(`maintenance.retired_identities`) unions rows that predate the triggers, 4,096 per background
+writer loan with its cursor in `meta`, resting outside the loan for max(100 ms, 4 x the loan's
+hold), capped at 5 s. Once that import has finished, a member that trims makes the ledger its
+authority, judging it once: an identity that only an uncommitted checkpoint recorded, or that an
+older build's adoption withdrew (labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals`), was no deletion and leaves it, and the labels are spent. From then
+on an identity enters only as a trim deletes it, in the deleting transaction, and admission refuses
+a retired envelope or claim. Retired claim IDs a peer reports are added too. The ledger has no cap
+and no reclamation. Evidence still reads the checkpoint tables. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
 
@@ -173,9 +177,8 @@ equates with a BLOB.
 batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
 newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
 maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
-and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
-this table existed), and the writer floor; the chain's previous hash is the higher of the newest
-batch and the stored head.
+and in `retired_envelopes` (heads trimmed before this table existed), and the writer floor; the
+chain's previous hash is the higher of the newest batch and the stored head.
 
 ## Repaired claim replacements
 
@@ -191,9 +194,9 @@ Readers still use the records and `projection_digest_repaired_claims`.
 (claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
 read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
 cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
-them, including rows adoption later withdraws, so they only grow. Claim identities use the
-ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
-activation stops those withdrawals.
+them, including rows an older build's adoption withdrew, so they only grow. Claim identities use
+the ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until a member that
+trims makes the ledger its authority.
 
 ## Claim range digests
 
@@ -208,6 +211,39 @@ event, and once folds the claims that predate the triggers, tracked by `claim_ra
 takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
 loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
 import are both empty. Nothing reads them yet.
+
+## Verdict dependency readers
+
+The default writer storage version remains 20; readers accept through version 22 without
+lowering an existing marker. Version-21 signature-reference behavior is unchanged.
+Initialization installs the following empty local derived index and read-only union view:
+
+```sql
+CREATE TABLE IF NOT EXISTS claim_verdict_dependency_keys (
+    id INTEGER PRIMARY KEY,
+    link TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS claim_verdict_dependency_edges (
+    dependency_id INTEGER NOT NULL REFERENCES claim_verdict_dependency_keys(id)
+        DEFERRABLE INITIALLY DEFERRED,
+    claim_id TEXT NOT NULL,
+    PRIMARY KEY(dependency_id,claim_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_verdict_dependency_edges_claim
+    ON claim_verdict_dependency_edges(claim_id,dependency_id);
+CREATE VIEW IF NOT EXISTS claim_verdict_dependency_links AS
+    SELECT link,claim_id FROM claim_verdict_links
+    UNION ALL
+    SELECT k.link,e.claim_id FROM claim_verdict_dependency_keys k
+    JOIN claim_verdict_dependency_edges e ON e.dependency_id=k.id;
+```
+
+Readers conservatively include both dependency representations. Paged invalidation deduplicates
+claim IDs before applying canonical claim-ID order and the 1,024-row limit. Newly recorded
+dependencies still use `claim_verdict_links`, including in version-22 stores; this reader release
+does not populate integer edges, convert existing links, or activate a production writer cutover.
+These tables and their view are local caches outside shared digests, replicated claim vocabulary
+and historical reconstruction. Installation requires neither claim replay nor a history scan.
 "#;
 
 pub fn storage_digest() -> String {
@@ -434,7 +470,7 @@ impl std::error::Error for ValidationError {}
 
 /// Local SQLite projection notes. They are documentation only: the projection is
 /// not part of the serialized registry, so it cannot change the registry digest.
-const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-hbfa81626a10c owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
+const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-h631c4f058759 owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
 ## Local message selectors
 
 The client message list pages through `local_client_message_selectors_v1`, a SQLite projection kept only on the local node. It is derived from message claims and from the `desired` projection, so it is not part of this registry. It adds no subject family, resource kind, claim kind or claim field. The registry digest and the replication compatibility digest therefore stay unchanged. Nodes with and without this table exchange claims as before. The `_v1` suffix is the projection version: a layout change uses a new table name, never an edit to this one in place.
@@ -493,7 +529,11 @@ The fourteen page indexes are partial on `born_index >= 0` and order by `sent_ke
 
 Triggers on `claims` (insert, update, delete) for `message/` subjects and on `desired` (insert, update, delete) add a pending row with the reason. Insert triggers mark only claims that can change a selector field: `message.sent`, `message.closed`, `intent.desired`, or a claim that sets `from`, `to`, `tags` or `status`. A body-only edit adds no new header version. Deleting a `desired` row immediately clears the fields it supplied (`desired_mask`) and recomputes eligibility only for that subject and the old/new global and affected-recipient reminder winners. Each candidate or previous-winner lookup is an indexed seek with `LIMIT 1`, in canonical `version DESC, subject DESC` order for candidates; it never enumerates or updates the superseded open members of a reminder group. At most seven live headers and one subject-keyed pending row are touched per desired deletion, independent of group size. The pending row retains the old reminder and recipient for bounded durable reconciliation. A fresh page therefore never shows a removed declaration, even before the transaction's flush.
 
-A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). A read that hears a host's close queues it without waiting for the writer; a background writer records at most 64 per transaction, and its insert trigger adds a pending row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
+A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). Daemon-owned maintenance discovers remote closes independently of GETs. Relevant selector, recipient ownership and daemon-feature changes enqueue durable host/recipient/message keys in `local_relayed_close_work`; bounded indexed seeks update only the affected candidates. An unchanged open answer consumes its key and is not periodically rediscovered. Settlement reads host-owned seats through the declared-member host index, not the full desired population. A background writer records at most 64 closes per transaction; discovery waits for each bounded page to settle before admitting more, and its insert trigger adds a pending selector row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
+
+Hosts advertising `message_mark_events: 1` expose authenticated long-poll event pages through the seat-freshness relay. Indexed graph-mark, held-message, recipient-ownership and shard-lifecycle changes return message or consumer keys. Empty transport keepalives do not rebuild message answers or rerun discovery. An initial cursor, daemon restart or retained-event gap resets only that host's local candidate set. Disconnected subscriptions reconnect with network backoff, not a discovery interval. During mixed-version operation, only hosts lacking this capability retain a 30-second compatibility schedule: it seeks their already indexed pending message candidates, never rebuilds the relay-host mapping or scans other hosts. Upgrading a host replaces this compatibility arm with its event subscription. Remove the arm once every active relay host advertises the feature and `legacy_peer_discovery_passes` stays zero. `/v1/performance` exports `relayed_close_work.discovery_passes`, `candidate_messages`, `remote_event_pages`, `remote_changed_messages` and `legacy_peer_discovery_passes`; unchanged inputs with capable peers must add zero discovery passes and candidate messages.
+
+Discovery retains a durable read job until a successful marks answer. A failed remote read schedules an explicit exponential network retry deadline (one to sixty seconds), independent of the event subscription. Successful terminal answers commit to `local_relayed_message_closes_pending` before their read jobs are acknowledged; final recording and pending-evidence deletion share a transaction. A local writer failure retains that evidence across restart, surfaces an error, and suspends maintenance until actual committed writer recovery; it never starts a local-failure retry timer. Event cursors advance only after their local changed-key admission succeeds.
 
 The seventh source-change trigger, `client_selector_repair`, watches `replica_records` updates of `state` and `replacement_claim_id`. A message claim newly marked `repaired`, or already repaired with a changed replacement claim, queues a full selector fold and a destructive quarantine marker. The paired epoch trigger invalidates previously issued cuts for both initial repair and replacement reselection.
 
@@ -799,9 +839,11 @@ impl Registry {
                 "replicated thread messages require the current signed reader marker",
             ));
         }
+        github_capture::validate(subject, kind, fields)?;
         private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
+        residency::validate(subject, kind, fields)?;
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
@@ -821,6 +863,17 @@ impl Registry {
         effects::validate(kind, subject, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
+        }
+        if kind == "harness.model-fallback.observed" {
+            let bounded = |name: &str| fields.get(name).and_then(Value::as_str).is_some_and(|text|
+                !text.is_empty() && text.len() <= 256 && text.bytes().all(|byte|
+                    byte.is_ascii_alphanumeric() || b"-_./:@+".contains(&byte)));
+            if !["incarnation_id", "native_session", "source_event", "episode_id", "to"].into_iter().all(bounded)
+                || (fields.get("observation").and_then(Value::as_str) == Some("applied")
+                    && (!bounded("from") || !fields.contains_key("cause")))
+            {
+                return Err(error("invalid-model-fallback", "model fallback requires bounded native provenance and sanitized cause"));
+            }
         }
         usage_limits::validate(subject, kind, fields)?;
         if kind == "terminal.launch-geometry" {
@@ -955,6 +1008,15 @@ impl Registry {
         fields: &BTreeMap<String, Value>,
         actor: Option<&str>,
     ) -> Result<&ClaimSpec, ValidationError> {
+        if subject == "resource/fleet/roll-completion"
+            || subject.starts_with("resource/fleet/roll-completion/") {
+            let receipt = fields.get("facts").and_then(|facts| facts.get("kind")).and_then(Value::as_str);
+            if kind != "resource.observed" || actor.is_none()
+                || !matches!(receipt, Some("roll-declared" | "host-target-resolved" | "source-enabled")) {
+                return Err(error("claim-write-forbidden",
+                    "fleet roll observations require the own-daemon collector; declarations require bound authority"));
+            }
+        }
         if kind.starts_with("custom.client.assistant.")
             || subject.starts_with("custom/client/assistant-v1-")
             || kind.starts_with("custom.client.pairing")
@@ -1159,6 +1221,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "gate-admission",
+            "gate-admission/HOST/ID/OUTCOME",
+            "One immutable transitional gate admission lifecycle receipt.",
+            false,
+        ),
+        (
             "fleet-invite",
             "fleet-invite/ID",
             "A single-use fleet join invite.",
@@ -1271,6 +1339,30 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            github_capture::FACT_FAMILY,
+            "github-fact/REVISION_DIGEST",
+            "One bounded normalized GitHub entity revision, visible only through a committed capture.",
+            false,
+        ),
+        (
+            github_capture::COMMIT_FAMILY,
+            "github-capture/COMMIT_DIGEST",
+            "A bounded source capture visibility marker and coverage frontier.",
+            false,
+        ),
+        (
+            github_capture::AUTHORITY_FAMILY,
+            "github-source/NAME",
+            "An explicitly configured GitHub source and its fenced acquisition authority.",
+            true,
+        ),
+        (
+            "github-scope",
+            "github-scope/NAME",
+            "An effective-dated versioned repository roster for native GitHub objectives.",
+            true,
+        ),
+        (
             github_plugin::EVENT_FAMILY,
             "github-event/RESOURCE/ITEM/NUMBER/KEY",
             "One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller.",
@@ -1283,10 +1375,22 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "residency",
+            "residency/HOST/EPISODE/ID",
+            "Durable residency evidence, scoped to an owner host and logical episode.",
+            false,
+        ),
+        (
             "resource",
             "resource/NAME",
             "An observed external or durable fact bag.",
             true,
+        ),
+        (
+            "resource-admission",
+            "resource-admission/HOST or resource-admission/HOST/ID",
+            "A host authority's durable admission source cut or membership lifecycle evidence.",
+            false,
         ),
         (
             "repair",
@@ -1393,6 +1497,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("head", reference()),
                 ("state", string()),
                 ("pull_requests", array()),
+                ("await_prs_not_found", array()),
                 ("issues", array()),
                 ("repository_id", integer()),
                 ("main_performance_failures", array()),
@@ -1450,6 +1555,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("author", string()),
                 ("head", reference()),
                 ("head_sha", string()),
+                ("await_pr_observation", object()),
                 ("branch", string()),
                 ("opened_by", reference()),
                 ("opened_by_run", reference()),
@@ -1605,6 +1711,33 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
         (
+            "resource.admission.observed",
+            &["resource-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "resource.admission.coverage",
+            &["resource-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "gate.admission.observed",
+            &["gate-admission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
             "resource.exec-receipt",
             &["resource"],
             WritePolicy::SystemOnly,
@@ -1687,6 +1820,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "harness.todo.observed",
+            &["agent"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "harness.model-fallback.observed",
             &["agent"],
             WritePolicy::SameSubjectActor,
             Cardinality::Append,
@@ -2010,6 +2152,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["revision"],
         ),
         (
+            "step.execution-phase",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &["step"],
+        ),
+        (
             "step-run.state",
             &["step-run"],
             WritePolicy::SystemOnly,
@@ -2062,6 +2213,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             None,
             false,
             &["step", "program"],
+        ),
+        (
+            "program.turn.report",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            true,
+            &[],
         ),
         (
             "work.person-asked",
@@ -2174,6 +2334,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.rebound",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("step-runs"),
+            true,
+            &[],
+        ),
+        (
             "work.nudged",
             &["step-run"],
             WritePolicy::SystemOnly,
@@ -2263,6 +2432,42 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("resources"),
             true,
             &["resource"],
+        ),
+        (
+            github_capture::FACT_KIND,
+            &[github_capture::FACT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::COMMIT_KIND,
+            &[github_capture::COMMIT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::FENCED_KIND,
+            &[github_capture::AUTHORITY_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::AUTHORITY_KIND,
+            &[github_capture::AUTHORITY_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
         ),
         (
             github_plugin::ITEM_STATE,
@@ -2459,6 +2664,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         (
             "custom.client.action-result", &["custom"], WritePolicy::SystemOnly,
             Cardinality::Append, None, true, &[],
+        ),
+        (
+            "custom.client.observation-minute", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Once, None, false, &[],
         ),
         (
             "client.action-result", &["custom"], WritePolicy::SystemOnly,
@@ -3415,6 +3624,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             },
         );
     }
+    residency::register(&mut claims);
     claims
 }
 
@@ -3426,10 +3636,60 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "resource.admission.observed" => &[
+            ("id", required_string()),
+            ("host", required_string()),
+            // Evidence retains newer class names; membership admission owns the authority fence.
+            ("class", required_string()),
+            ("coverage", required_enum(&["logical", "enforced"])),
+            ("epoch", required_string()),
+            ("owner", required_object()),
+            ("queued_at", required_integer()),
+            ("admitted_at", integer()),
+            ("retired_at", integer()),
+            ("state", required_enum(&["queued", "admitted", "launched", "refused", "retiring", "retired", "uncertain"])),
+            ("refusal", enumeration(&["admission-expired", "missing-profile", "unsupported-coverage", "impossible",
+                "clock-uncertain", "cancelled", "retired", "retiring", "uncertain", "invalid-state", "recovery-not-allowed"])),
+            ("finite", required_boolean()),
+            ("admission_timeout_ms", integer()),
+            ("clock_uncertain", required_boolean()),
+        ],
+        "resource.admission.coverage" => &[
+            ("host", required_string()),
+            ("epoch", required_string()),
+            ("complete", required_boolean()),
+        ],
+        "gate.admission.observed" => &[
+            ("schema", required_enum(&["gate-slot.admission/v1"])),
+            ("id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["gate", "heavy", "eval"])),
+            ("at_ms", required_integer()),
+            ("onset_ms", required_integer()),
+            ("epoch", required_string()),
+            ("coverage", required_enum(&["logical"])),
+            ("outcome", required_enum(&["accepted", "granted", "failed", "excluded"])),
+            ("reason", required_string()),
+        ],
         "resource.exec-receipt" => &[
             ("exec_id", required_string()),
+            ("argv", array()),
+            ("argv_sha256", string()),
+            ("launched", boolean()),
+            ("timed_out", boolean()),
+            ("refusal_code", string()),
+            ("request_id", string()),
+            ("profile_key", string()),
+            ("profile_estimate", object()),
+            ("disk_path", string()),
+            ("admissionDecision", object()),
+            ("learningDecision", object()),
+            ("preRetirementPopulated", boolean()),
+            ("learningCoverage", enumeration(&["full", "client-only", "unknown"])),
+            ("memoryEvents", object()),
+            ("ioStat", array()),
             ("host", required_string()),
-            ("class", required_enum(&["landing", "check", "agent"])),
+            ("class", required_enum(&["recovery", "landing", "check", "agent"])),
             ("owner", required_object()),
             ("coverage", required_enum(&["logical", "enforced"])),
             ("state", required_enum(&["completed", "refused", "cancelled"])),
@@ -3483,6 +3743,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("oldCommit", required_string()), ("newCommit", required_string()),
         ],
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
+        github_capture::FACT_KIND | github_capture::COMMIT_KIND | github_capture::AUTHORITY_KIND | github_capture::FENCED_KIND =>
+            &[("record", FieldSpec { required: true, ..object() })],
         github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
         github_plugin::EVENT => github_plugin::event_fields(),
         github_plugin::WORKFLOW_RUN => github_plugin::workflow_run_fields(),
@@ -3640,6 +3902,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("revision", string()),
             ("state", string()),
             ("body", object()),
+            ("per_run_missions", integer()),
         ],
         "mission.provenance" => &[
             ("mission", required_reference_to(&["mission"])),
@@ -3669,6 +3932,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "mission-run.created" => &[
             ("mission_spec", object()),
             ("ad_hoc_title", string()),
+            ("native_turn", object()),
+            ("native_turn_key", string()),
+            ("parent_attempt", integer()),
             ("status", string()),
             ("phase", string()),
             ("admission_publication", string()),
@@ -3783,6 +4049,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("successor", reference()),
         ],
+        "step.execution-phase" => &[
+            ("attempt", required_integer()),
+            ("phase", required_enum(&[
+                "dispatched", "received", "admitted", "exec-started", "exec-exited",
+                "result-replicated", "dispatch-stalled", "execution-timeout",
+            ])),
+            ("exec", required_string()),
+            ("at_unix_ms", required_integer()),
+            ("host", required_string()),
+            ("reason", string()),
+            ("incarnation_id", string()),
+            ("start_operation", string()),
+            ("timeout_extension_ms", integer()),
+        ],
         "step-run.state" => &[
             ("status", string()),
             ("reason", string()),
@@ -3813,6 +4093,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "mission.run.trace" => &[("trace", any())],
         "program.attempt.trace" => &[("attempt", required_integer()), ("trace", any())],
+        "program.turn.report" => &[("report", required_object())],
         "program.step" => &[
             ("key", required_string()),
             ("status", required_enum(&["started", "completed", "failed"])),
@@ -3901,6 +4182,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("handoff_to", reference()),
             ("handoff_message", reference()),
             ("handoff_acknowledged", reference()),
+        ],
+        "work.rebound" => &[
+            ("attempt", integer()),
+            ("claimant", reference()),
+            ("from_incarnation", string()),
+            ("to_incarnation", string()),
+            ("session_id", string()),
+            ("harness", string()),
         ],
         "work.nudged" => &[
             ("attempt", integer()),
@@ -4104,6 +4393,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("authority_actor", string()),
             ("request_digest", required_string()),
             ("result", FieldSpec { required: true, ..object() }),
+        ],
+        "custom.client.observation-minute" => &[
+            ("source", required_string()),
+            ("pairing_grant", required_string()),
+            ("report_id", required_string()),
+            ("report_digest", required_string()),
+            ("target", required_string()),
+            ("carrier", required_enum(&["fabric", "tailscale", "lan"])),
+            ("path", string()),
+            ("start_ms", required_integer()),
+            ("count", required_integer()),
+            ("over", required_integer()),
+            ("max_ms", required_integer()),
+            ("buckets", required_array()),
         ],
         "agent.helper-launched" => &[
             ("launcher", required_reference_to(&["agent"])),
@@ -4314,10 +4617,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "runtime.action.requested" => &[
             ("action", string()),
+            ("cause", string()),
+            ("idle_declaration", string()),
+            ("idle_after_ms", integer()),
+            ("idle_enabled_at_unix_ms", integer()),
+            ("idle_eligible_since_unix_ms", integer()),
+            ("idle_frontier", object()),
+            ("suspend_operation_id", string()),
+            ("idle_wake_lineage", string()),
+            ("idle_wake_attempt", integer()),
             ("host", string()),
             ("source_host", string()),
             ("rollout", object()),
             ("operation", string()),
+            ("model_return_attempt", integer()),
             ("runtime_id", string()),
             ("terminal", boolean()),
             ("incarnation_id", string()),
@@ -4332,6 +4645,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         | "runtime.action.failed"
         | "runtime.action.deadline-reached" => &[
             ("action", string()),
+            ("cause", string()),
+            ("mode", string()),
+            ("request_key", string()),
+            ("operation_id", string()),
             ("source_host", string()),
             ("rollout", object()),
             ("operation", string()),
@@ -4362,7 +4679,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("exit_code", integer()),
             ("exit_signal", integer()),
             ("exit_evidence", object()),
+            ("exec_exited_at_unix_ms", integer()),
             ("incarnation_id", string()),
+            ("start_operation", string()),
+            ("workspace", FieldSpec { nullable: true, ..string() }),
             ("restarting_from", string()),
             ("adopted", boolean()),
             ("driver", string()),
@@ -4477,6 +4797,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("code", string()),
             ("reason", string()),
             ("incarnation_id", string()),
+            ("message_id", string()),
             ("session_id", string()),
             ("selector_scope", string()),
             ("ownership_sequence", integer()),
@@ -4552,6 +4873,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "usage.limits.observed" => &[
             ("readings", FieldSpec { required: true, ..array() }),
             ("credit_readings", FieldSpec { required: true, ..array() }),
+            ("source_frontier", object()),
+            ("period_readings", array()),
+            ("gaps", array()),
         ],
         // The harness's own subagent ID names the subagent within its parent seat. The prompt and
         // transcript stay on the host.
@@ -4678,6 +5002,18 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("result_digest", string()),
             ("error", string()),
             ("evidence", array()),
+        ],
+        "harness.model-fallback.observed" => &[
+            ("observation", required_enum(&["applied", "selected"])),
+            ("cause", enumeration(&["transient", "quota", "auth", "unknown"])),
+            ("from", string()),
+            ("to", required_string()),
+            ("native_session", required_string()),
+            ("source_event", required_string()),
+            ("episode_id", required_string()),
+            ("incarnation_id", required_string()),
+            ("observed_at_unix_ms", required_integer()),
+            ("reason", required_enum(&["native-retry-fallback", "native-model-selection"])),
         ],
         "harness.timeline" => &[
             (
@@ -5337,6 +5673,55 @@ mod tests {
     }
 
     #[test]
+    fn native_turn_creation_and_verified_report_are_registered_durable_system_claims() {
+        let subject = "mission-run/native-turn/episode";
+        let mut creation: BTreeMap<String, Value> = serde_json::from_value(serde_json::json!({
+            "native_turn": {
+                "agent": "agent/node.publisher", "instructions": "Produce an answer.",
+                "context": "Literal context.", "fresh_context": false,
+                "products": [{"path": "answer", "kind": "custom.test", "fields": {"head": "h1"}}]
+            },
+            "native_turn_key": "program:step-run/parent/program:1:turn", "parent_attempt": 1,
+            "status": "running", "mission": "mission/native-turn", "revision": "hash",
+            "current_generation": "run-generation/native-turn-hash",
+            "root_revision": "parent-hash", "root_mission_run": "mission-run/parent",
+            "parent_step_run": "step-run/parent/program", "workspace": ".",
+            "requester": "person/owner", "inputs": {}, "mode": "run"
+        })).unwrap();
+        registry().validate_claim(subject, "mission-run.created", &creation).unwrap();
+        for (name, value) in [
+            ("native_turn", serde_json::json!("not an object")),
+            ("native_turn_key", serde_json::json!(1)),
+            ("parent_attempt", serde_json::json!("1")),
+        ] {
+            let mut invalid = creation.clone();
+            invalid.insert(name.into(), value);
+            assert_eq!(registry().validate_claim(subject, "mission-run.created", &invalid)
+                .unwrap_err().code, "invalid-claim-field");
+        }
+        // Additive native metadata must not invalidate pre-existing graph creations.
+        for name in ["native_turn", "native_turn_key", "parent_attempt"] {
+            creation.remove(name);
+        }
+        registry().validate_claim("mission-run/graph", "mission-run.created", &creation).unwrap();
+        let report = BTreeMap::from([("report".into(), serde_json::json!({
+            "run": subject, "step": "step-run/native-turn-hash/turn",
+            "summary": "Actual worker summary", "evidence": [], "executions": [],
+            "products": {"answer": {"fields": {"kind": "custom.test", "head": "h1"}}}
+        }))]);
+        let spec = registry().validate_claim(subject, "program.turn.report", &report).unwrap();
+        assert_eq!(spec.write_policy, WritePolicy::SystemOnly);
+        assert_eq!(spec.cardinality, Cardinality::Once);
+        assert_eq!(spec.retention, Retention::Durable);
+        assert!(registry().validate_claim(subject, "program.turn.report", &BTreeMap::new()).is_err());
+        let invalid = BTreeMap::from([("report".into(), serde_json::json!("not an object"))]);
+        assert_eq!(registry().validate_claim(subject, "program.turn.report", &invalid)
+            .unwrap_err().code, "invalid-claim-field");
+        assert_eq!(registry().validate_public_claim(subject, "program.turn.report", &report, Some("agent/node.publisher"))
+            .unwrap_err().code, "claim-write-forbidden");
+    }
+
+    #[test]
     fn run_report_stall_policy_is_an_optional_boolean() {
         for kind in ["mission-run.created", "mission-run.report-to"] {
             let mut fields =
@@ -5515,11 +5900,32 @@ mod tests {
         for field in threads::MESSAGE_RELATION_FIELDS {
             current.claims.get_mut("message.sent").unwrap().fields.remove(*field).unwrap();
         }
+        current.claims.remove("work.rebound").unwrap();
+        for kind in ["resource.admission.observed", "resource.admission.coverage", "gate.admission.observed"] {
+            current.claims.remove(kind).unwrap();
+        }
+        for family in ["resource-admission", "gate-admission"] {
+            current.subjects.remove(family).unwrap();
+        }
+        for kind in residency::KINDS {
+            current.claims.remove(*kind).unwrap();
+        }
+        current.subjects.remove("residency").unwrap();
+        for kind in [github_capture::FACT_KIND, github_capture::COMMIT_KIND,
+            github_capture::AUTHORITY_KIND, github_capture::FENCED_KIND] {
+            current.claims.remove(kind).unwrap();
+        }
+        for family in [github_capture::FACT_FAMILY, github_capture::COMMIT_FAMILY,
+            github_capture::AUTHORITY_FAMILY, "github-scope"] {
+            current.subjects.remove(family).unwrap();
+        }
         current.claims.get_mut("operational.failure").unwrap().fields.remove("objective").unwrap();
+        current.claims.get_mut("mission.published").unwrap().fields.remove("per_run_missions").unwrap();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove("custom.client.observation-minute").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
         for kind in attention_controls::KINDS {
@@ -5531,21 +5937,25 @@ mod tests {
         current.subjects.remove("notice-owner").unwrap();
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        current.claims.remove("step.execution-phase").unwrap();
+        current.claims.remove("program.turn.report").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
         current.claims.remove("harness.invocation-artifact").unwrap();
+        current.claims.remove("harness.model-fallback.observed").unwrap();
         for kind in [effects::KIND_INTENDED, effects::KIND_IN_FLIGHT, effects::KIND_CONFIRMED, effects::KIND_UNRESOLVED] {
             current.claims.remove(kind).unwrap();
         }
         current.subjects.remove("effect").unwrap();
-        for field in ["producer_version", "invocation_id"] {
+        for field in ["producer_version", "invocation_id", "message_id"] {
             current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
         }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
         current.claims.remove("mission-run.gate-carried").unwrap();
-        for field in ["phase", "admission_publication", "workspace_declaration"] {
+        for field in ["phase", "admission_publication", "workspace_declaration",
+            "native_turn", "native_turn_key", "parent_attempt"] {
             current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
         }
         for kind in ["work.person-asked", "work.person-done", "work.person-cancelled", "gate.requested"] {
@@ -5567,8 +5977,21 @@ mod tests {
         current.subjects.remove(github_plugin::WORKFLOW_RUN_FAMILY).unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
-        current.claims.get_mut("runtime.observed").unwrap()
-            .fields.remove("exit_evidence").unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("model_return_attempt").unwrap();
+        for field in ["idle_declaration", "idle_after_ms", "idle_enabled_at_unix_ms",
+            "idle_eligible_since_unix_ms", "idle_frontier", "suspend_operation_id",
+            "idle_wake_lineage", "idle_wake_attempt"] {
+            current.claims.get_mut("runtime.action.requested").unwrap().fields.remove(field).unwrap();
+        }
+        for kind in ["runtime.action.succeeded", "runtime.action.failed", "runtime.action.deadline-reached"] {
+            for field in ["cause", "mode", "request_key", "operation_id"] {
+                current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
+            }
+        }
+        for field in ["exit_evidence", "exec_exited_at_unix_ms", "start_operation", "workspace"] {
+            current.claims.get_mut("runtime.observed").unwrap().fields.remove(field).unwrap();
+        }
         for field in ["host", "dispatch"] {
             current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
         }
@@ -5581,6 +6004,8 @@ mod tests {
         for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
             current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
+        current.resources.get_mut("vcs.repository").unwrap().fields.remove("await_prs_not_found").unwrap();
+        current.resources.get_mut("vcs.pull-request").unwrap().fields.remove("await_pr_observation").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
@@ -6041,6 +6466,32 @@ mod tests {
     }
 
     #[test]
+    fn native_pr_wait_observation_proofs_are_registered_resource_facts() {
+        for (kind, name, value) in [
+            ("vcs.repository", "await_prs_not_found", serde_json::json!([])),
+            (
+                "vcs.repository",
+                "await_prs_not_found",
+                serde_json::json!([{"pr": 42, "registrations": ["registration"]}]),
+            ),
+            (
+                "vcs.pull-request",
+                "await_pr_observation",
+                serde_json::json!({
+                    "registrations": ["registration"],
+                    "head": "exact-head",
+                    "merged": true,
+                    "merge_commit_sha": "merge-commit",
+                }),
+            ),
+        ] {
+            registry()
+                .validate_resource_facts(kind, &BTreeMap::from([(name.into(), value)]))
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn vcs_identity_and_resolution_fields_are_additive_and_typed() {
         for kind in ["vcs.repository", "vcs.issue", "vcs.pull-request"] {
             registry()
@@ -6172,6 +6623,28 @@ mod tests {
     }
 
     #[test]
+    fn phone_minute_summaries_are_durable_once_and_not_publicly_writable() {
+        let kind = "custom.client.observation-minute";
+        let fields = serde_json::from_value(serde_json::json!({
+            "source": "person/avery/device/example",
+            "pairing_grant": "custom/client/pairing-example",
+            "report_id": "11111111-1111-4111-8111-111111111111",
+            "report_digest": "a".repeat(64),
+            "target": "ios-connect", "carrier": "fabric", "path": "direct",
+            "start_ms": 0, "count": 1, "over": 0, "max_ms": 100, "buckets": [[103, 1]]
+        })).unwrap();
+        let subject = "custom/client/observation-minute-example";
+        let spec = registry().validate_claim(subject, kind, &fields).unwrap();
+        assert_eq!(spec.retention, Retention::Durable);
+        assert_eq!(spec.cardinality, Cardinality::Once);
+        assert!(!spec.wakes_reconciler);
+        for actor in [None, Some("person/avery"), Some("agent/example")] {
+            assert_eq!(registry().validate_public_claim(subject, kind, &fields, actor)
+                .unwrap_err().code, "claim-write-forbidden");
+        }
+    }
+
+    #[test]
     fn public_claim_admission_uses_the_registry_write_policy() {
         assert!(
             registry()
@@ -6216,5 +6689,43 @@ mod tests {
                 .code,
             "claim-write-forbidden"
         );
+    }
+
+    #[test]
+    fn admission_sources_accept_producer_fields_but_not_public_writes() {
+        let cases = [
+            ("resource-admission/example-host/request", "resource.admission.observed", serde_json::json!({
+                "id": "request", "host": "example-host", "class": "check", "coverage": "logical",
+                "epoch": "epoch-one", "owner": {"run": "mission-run/example", "step": "check", "attempt": 1, "invocation": null},
+                "queued_at": 100, "admitted_at": null, "retired_at": null, "state": "queued",
+                "refusal": null, "finite": true, "admission_timeout_ms": null, "clock_uncertain": false
+            })),
+            ("resource-admission/example-host/newer-request", "resource.admission.observed", serde_json::json!({
+                "id": "newer-request", "host": "example-host", "class": "future-class", "coverage": "logical",
+                "epoch": "epoch-one", "owner": {"run": "mission-run/example", "step": "check", "attempt": 1, "invocation": null},
+                "queued_at": 100, "admitted_at": null, "retired_at": null, "state": "refused",
+                "refusal": "recovery-not-allowed", "finite": true, "admission_timeout_ms": null, "clock_uncertain": false
+            })),
+            ("resource-admission/example-host", "resource.admission.coverage", serde_json::json!({
+                "host": "example-host", "epoch": "epoch-one", "complete": true
+            })),
+            ("gate-admission/example-host/request/accepted", "gate.admission.observed", serde_json::json!({
+                "schema": "gate-slot.admission/v1", "id": "request", "host": "example-host",
+                "class": "heavy", "at_ms": 200, "onset_ms": 100, "epoch": "epoch-one",
+                "coverage": "logical", "outcome": "accepted", "reason": "test"
+            })),
+        ];
+        for (subject, kind, fields) in cases {
+            let fields: BTreeMap<String, Value> = serde_json::from_value(fields).unwrap();
+            let spec = registry().validate_claim(subject, kind, &fields).unwrap();
+            assert_eq!(spec.retention, Retention::Durable);
+            assert_eq!(spec.write_policy, WritePolicy::SystemOnly);
+            assert_eq!(registry().validate_public_claim(subject, kind, &fields, Some("agent/example/check"))
+                .unwrap_err().code, "claim-write-forbidden");
+            let mut unknown = fields.clone();
+            unknown.insert("grant".into(), serde_json::json!({"generation": "not-evidence"}));
+            assert_eq!(registry().validate_claim(subject, kind, &unknown).unwrap_err().code, "unknown-claim-field");
+            assert_eq!(registry().validate_claim("host/example-host", kind, &fields).unwrap_err().code, "invalid-claim-subject");
+        }
     }
 }

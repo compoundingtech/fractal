@@ -19,13 +19,12 @@ use axum::routing::{get, post};
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
-use notify::Watcher as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 
 pub use smallclaims::sync::{
-    Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, MAX_MANIFEST_BYTES, WorkerConfig,
+    Backend, FleetAuth, Local, MAX_EXCHANGE_BYTES, WorkerConfig,
 };
 use smallclaims::sync::{dial_targets, signed_error_response_for, signed_response_for};
 
@@ -39,10 +38,6 @@ use crate::model::{
 };
 use crate::store::Store;
 use crate::relay_trace::{self, Outcome, Phase};
-use crate::store::{
-    CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage,
-    CheckpointManifestRequest,
-};
 mod raw_lease;
 mod seat_freshness;
 pub use seat_freshness::*;
@@ -828,39 +823,8 @@ impl ClientRelay {
         peer: &PeerConfig,
         request: &ClientReadRequest,
     ) -> Result<serde_json::Value> {
-        let required = match &request.request {
-            ClientReadOperation::SessionDetail { .. } => Some(("session-detail-child-id", 1)),
-            ClientReadOperation::Timeline { session_id, .. }
-            | ClientReadOperation::ConversationContent { session_id, .. }
-            | ClientReadOperation::ConversationChanges { session_id, .. }
-                if session_id.starts_with("session/external-child-") =>
-            {
-                Some(("session-detail-child-id", 1))
-            }
-            ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
-            ClientReadOperation::GithubPlugin { .. } => Some(("github-plugin", 1)),
-            ClientReadOperation::GithubPluginRead { .. } => Some(("github-plugin", 2)),
-            _ => None,
-        };
-        if let Some((id, version)) = required {
-            let capabilities = self.send_http(peer, request, true).await?;
-            if !capabilities["capabilities"].as_array().is_some_and(|items| {
-                items.iter().any(|item| item["id"] == id
-                    && item["version"] == version && item["state"] == "granted")
-            }) {
-                return Err(client_read_unsupported(&request.request).into());
-            }
-        }
-        self.send_http(peer, request, false).await
-    }
-
-    async fn send_http(
-        &self,
-        peer: &PeerConfig,
-        request: &ClientReadRequest,
-        inspect_capabilities: bool,
-    ) -> Result<serde_json::Value> {
-        let name = peer.name.as_str();
+        // Resolve the transport once for this attempt. Capability inspection and the
+        // operation use the same tunnel, but each still has its own signed exchange.
         let url = match parse_route(&peer.url).context("invalid peer client route")? {
             Route::Http(url) => url,
             Route::Fabric { node, protocol } => {
@@ -881,6 +845,40 @@ impl ClientRelay {
                 format!("http://{address}")
             }
         };
+        let required = match &request.request {
+            ClientReadOperation::SessionDetail { .. } => Some(("session-detail-child-id", 1)),
+            ClientReadOperation::Timeline { session_id, .. }
+            | ClientReadOperation::ConversationContent { session_id, .. }
+            | ClientReadOperation::ConversationChanges { session_id, .. }
+                if session_id.starts_with("session/external-child-") =>
+            {
+                Some(("session-detail-child-id", 1))
+            }
+            ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
+            ClientReadOperation::GithubPlugin { .. } => Some(("github-plugin", 1)),
+            ClientReadOperation::GithubPluginRead { .. } => Some(("github-plugin", 2)),
+            _ => None,
+        };
+        if let Some((id, version)) = required {
+            let capabilities = self.send_http(peer, &url, request, true).await?;
+            if !capabilities["capabilities"].as_array().is_some_and(|items| {
+                items.iter().any(|item| item["id"] == id
+                    && item["version"] == version && item["state"] == "granted")
+            }) {
+                return Err(client_read_unsupported(&request.request).into());
+            }
+        }
+        self.send_http(peer, &url, request, false).await
+    }
+
+    async fn send_http(
+        &self,
+        peer: &PeerConfig,
+        url: &str,
+        request: &ClientReadRequest,
+        inspect_capabilities: bool,
+    ) -> Result<serde_json::Value> {
+        let name = peer.name.as_str();
         // A relayed read may pass through more nodes, each waiting a little less than the last.
         let timeout = CLIENT_READ_TIMEOUT
             + request.request.wait()
@@ -1763,8 +1761,8 @@ fn signed_client_read_failure(
 pub struct MainBackend {
     socket: PathBuf,
     client: Client,
-    /// A named shard this backend reaches instead of the graph. A shard has no checkpoints,
-    /// answers or worker status of its own; it shares the graph's fleet and endpoints.
+    /// A named shard this backend reaches instead of the graph. A shard has no answers or worker
+    /// status of its own; it shares the graph's fleet and endpoints.
     shard: Option<String>,
 }
 
@@ -1810,6 +1808,11 @@ impl MainBackend {
             failure.code = code.to_owned();
             failure.http_status = Some(status);
         }
+        if phase == smallclaims::replication::ReplicationFailurePhase::LocalReceive
+            && crate::client::daemon_deadline_exceeded(&error)
+        {
+            failure.code = "replication-overloaded".to_owned();
+        }
         let display = error.to_string();
         error.context(failure).context(display)
     }
@@ -1853,6 +1856,13 @@ fn started_at_unix_ms() -> u64 {
 }
 
 impl Backend for MainBackend {
+    async fn wait_revision(
+        &self,
+        request: smallclaims::sync::revision::RevisionRequest,
+    ) -> Result<smallclaims::sync::revision::StoreRevision> {
+        self.client.post(&self.replication_path("revision"), &request).await
+    }
+
     async fn ready(&self) {
         loop {
             if let Ok(health) = self.client.get::<serde_json::Value>("/v1/health").await {
@@ -1892,55 +1902,23 @@ impl Backend for MainBackend {
             ))
     }
 
-    async fn guard_summary(&self, fleet_id: &str) -> Result<ReplicationExportResponse> {
-        // This marker goes only to our local daemon, never into a signed peer exchange.
-        // Old daemons ignore it and return the same complete summary.
-        self.client
-            .post(
-                &self.replication_path("export"),
-                &ReplicationExportRequest {
-                    fleet_id: fleet_id.to_owned(),
-                    inventory: ReplicationInventory::default(),
-                    summary_only: true,
-                    authority_guard: true,
-                    authority_digest_only: false,
-                    signature_requests: Vec::new(),
-                },
-            )
-            .await
-    }
-
-    async fn authority_digest(&self, fleet_id: &str) -> Result<String> {
-        // New daemons omit only the unused buckets. An old daemon ignores the additive
-        // option and returns its full response; consume its digest from this same call.
-        let response: ReplicationExportResponse = self
-            .client
-            .post(
-                &self.replication_path("export"),
-                &ReplicationExportRequest {
-                    fleet_id: fleet_id.to_owned(),
-                    inventory: ReplicationInventory::default(),
-                    summary_only: true,
-                    authority_guard: true,
-                    authority_digest_only: true,
-                    signature_requests: Vec::new(),
-                },
-            )
-            .await?;
-        Ok(response.exchange.authority_digest)
-    }
 
     async fn receive(
         &self,
         peer: &str,
         fleet_id: &str,
         exchange: &ReplicationExchange,
-        round_trip: Option<Duration>,
-        carrier: smallclaims::replication::ReplicationCarrier,
+        options: smallclaims::replication::ReceiveOptions<'_>,
     ) -> Result<ReplicationReceiveResponse> {
+        let smallclaims::replication::ReceiveOptions {
+            round_trip,
+            carrier,
+            authenticated_member_key,
+            deadline_unix_ms,
+        } = options;
         let started = std::time::Instant::now();
         self.client
-            .post(
+            .post_receive_before(
                 &self.replication_path("receive"),
                 &ReplicationReceiveRequest {
                     peer: peer.to_owned(),
@@ -1948,21 +1926,13 @@ impl Backend for MainBackend {
                     exchange: exchange.clone(),
                     round_trip_ms: round_trip.map(|duration| duration.as_millis() as u64),
                     carrier,
+                    authenticated_member_key: authenticated_member_key.map(str::to_owned),
                 },
+                deadline_unix_ms,
             )
             .await.map_err(|error| Self::exchange_error(
                 error, smallclaims::replication::ReplicationFailurePhase::LocalReceive, started,
             ))
-    }
-
-    async fn checkpoint_manifest(
-        &self,
-        request: &CheckpointManifestRequest,
-    ) -> Result<CheckpointManifestPage> {
-        anyhow::ensure!(self.shard.is_none(), "a shard has no checkpoints");
-        self.client
-            .post("/v1/internal/replication/checkpoint", request)
-            .await
     }
 
     async fn answers(
@@ -1984,25 +1954,6 @@ impl Backend for MainBackend {
             .post("/v1/internal/replication/answers-check", check)
             .await?;
         Ok(())
-    }
-
-    async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
-        if self.shard.is_some() {
-            return Ok(None);
-        }
-        self.client
-            .post(
-                "/v1/internal/replication/checkpoint-need",
-                &serde_json::json!({}),
-            )
-            .await
-    }
-
-    async fn adopt_checkpoint(&self, manifest: &CheckpointManifest) -> Result<Vec<CheckpointAction>> {
-        anyhow::ensure!(self.shard.is_none(), "a shard has no checkpoints");
-        self.client
-            .post("/v1/internal/replication/checkpoint-adopt", manifest)
-            .await
     }
 
     async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {
@@ -2160,39 +2111,24 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
         peer_listen: config.peer_listen.clone(),
         fleet: config.fleet.clone(),
     };
-    // The daemon touches this file whenever the graph changes; each touch wakes the dialers.
+    // Outbound and membership followers subscribe to daemon-owned store revisions.
     let (wake, _) = watch::channel(0_u64);
-    let wake_file = config.state_dir.join("replication.wake");
-    if !wake_file.exists() {
-        fs::write(&wake_file, b"worker-start\n")?;
-    }
-    let watcher_wake = wake.clone();
-    let mut database_watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if event.is_ok() {
-                watcher_wake.send_modify(|generation| *generation = generation.saturating_add(1));
-            }
-        })?;
-    database_watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive)?;
     started_at_unix_ms();
     tokio::spawn(MainBackend::new(config.socket.clone()).report_process_cpu());
     let main = MainBackend::new(config.socket.clone());
     main.ready().await;
     let mut shards = Vec::new();
-    // Graph sync never waits on the shard. A 404 or 405 means this daemon holds none. Any other
-    // failure is taken as passing on a daemon that holds it: the shard is followed from an empty
-    // peer set, and if that guess is wrong the sync stays idle and dials nobody.
-    let held = match shard_peers(&main, MESSAGES_SHARD).await {
-        Ok(peers) => peers,
-        Err(error) => {
-            eprintln!("st replication-worker: messages shard peers unavailable, following: {error:#}");
-            Some(BTreeSet::new())
-        }
-    };
-    if let Some(peers) = held {
+    let mut followers = tokio::task::JoinSet::new();
+    let held = shard_peers(&main, MESSAGES_SHARD).await?;
+    if held.is_some() {
+        let discovery_revision = shard_discovery_revision(&main, MESSAGES_SHARD, None).await?;
+        // Registration precedes the peer read, so admission racing startup is retained.
+        let peers = shard_peers(&main, MESSAGES_SHARD).await?.unwrap_or_default();
         let (sender, receiver) = watch::channel(peers);
-        let shard_wake = wake.clone();
-        tokio::spawn(follow_shard_peers(main.clone(), MESSAGES_SHARD, sender, wake.subscribe()));
+        let (shard_wake, _) = watch::channel(0_u64);
+        followers.spawn(follow_shard_peers(
+            main.clone(), MESSAGES_SHARD, sender, Some(discovery_revision),
+        ));
         shards.push(smallclaims::sync::ShardSync {
             id: smallclaims::shards::ShardId::parse(MESSAGES_SHARD)?,
             backend: MainBackend::for_shard(config.socket.clone(), MESSAGES_SHARD),
@@ -2200,8 +2136,12 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
             wake: shard_wake,
         });
     }
-    smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards).await
+    tokio::select! {
+        result = smallclaims::sync::run_with_shards(worker, main, wake, fractal_routes(splice), shards) => result,
+        Some(result) = followers.join_next() => result.context("shard discovery follower failed")?,
+    }
 }
+
 
 /// The shard the daemon keeps messages in; see `fractal_store::store::messages_shard`.
 const MESSAGES_SHARD: &str = "messages";
@@ -2224,35 +2164,68 @@ async fn shard_peers(backend: &MainBackend, shard: &str) -> Result<Option<BTreeS
     }
 }
 
-/// Keep a shard's peer set current: advertisements arrive as graph claims, so look again
-/// when the graph wakes the dialers, at most every 5 seconds and at least every 30.
+async fn shard_discovery_revision(
+    backend: &MainBackend,
+    shard: &str,
+    after: Option<smallclaims::sync::revision::StoreRevision>,
+) -> Result<smallclaims::sync::revision::StoreRevision> {
+    backend.client.post(
+        &format!("/v1/internal/replication/shard/{shard}/peers/revision"), &after,
+    ).await
+}
+
+/// Follow admitted advertisement/membership changes; receipt and local mirrors do not refresh peers.
 async fn follow_shard_peers(
     backend: MainBackend,
     shard: &'static str,
     peers: watch::Sender<BTreeSet<String>>,
-    mut wake: watch::Receiver<u64>,
-) {
+    mut after: Option<smallclaims::sync::revision::StoreRevision>,
+) -> Result<()> {
     loop {
-        tokio::select! {
-            changed = wake.changed() => if changed.is_err() { return },
-            () = tokio::time::sleep(Duration::from_secs(30)) => {}
-        }
-        // Graph wakes come in bursts; one look covers every wake in the pause.
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        wake.mark_unchanged();
-        if let Ok(Some(current)) = shard_peers(&backend, shard).await {
-            peers.send_if_modified(|known| {
-                let changed = *known != current;
-                *known = current;
-                changed
-            });
-        }
+        let revision = shard_discovery_revision(&backend, shard, after).await?;
+        let current = shard_peers(&backend, shard).await?.unwrap_or_default();
+        peers.send_if_modified(|known| {
+            let changed = *known != current;
+            *known = current;
+            changed
+        });
+        after = Some(revision);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn only_local_receive_maps_the_daemon_ceiling_to_overloaded() {
+        use smallclaims::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
+        use tokio::io::AsyncReadExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("ceiling.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        for phase in [ReplicationFailurePhase::LocalReceive, ReplicationFailurePhase::LocalExport] {
+            let client = Client::unix(socket.clone());
+            let request = tokio::spawn(async move {
+                client.post::<_, Value>("/v1/internal/replication/receive", &serde_json::json!({})).await
+            });
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+            }
+            tokio::time::advance(Duration::from_secs(121)).await;
+            let error = request.await.unwrap().unwrap_err();
+            assert!(crate::client::daemon_deadline_exceeded(&error));
+            let error = MainBackend::exchange_error(error, phase, std::time::Instant::now());
+            let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+            assert_eq!(failure.phase, phase);
+            assert_eq!(failure.code == "replication-overloaded", phase == ReplicationFailurePhase::LocalReceive);
+            assert_eq!(failure.http_status, None);
+        }
+    }
+
 
     #[tokio::test]
     async fn peer_envelope_versions_are_accepted_by_the_client_relay() {
@@ -2496,15 +2469,7 @@ mod tests {
         assert!(relay.read("host/owner-node", &read).await.is_err());
     }
 
-    use crate::model::ClaimInput;
 
-    
-
-    
-
-    use serde_json::Value;
-
-    use std::collections::BTreeMap;
 
     
 
@@ -2516,7 +2481,7 @@ mod tests {
     
 
     use smallclaims::sync::{
-        FleetContext, PeerState, exchange, fetch_checkpoint_manifest, peer_router,
+        FleetContext, PeerState, exchange, peer_router,
         replication_http_client,
     };
 
@@ -2723,205 +2688,6 @@ mod tests {
             ),
             names(&["c"])
         );
-    }
-
-    #[tokio::test]
-    async fn a_peer_serves_a_checkpoint_manifest_to_its_fleet_only() {
-        use crate::store::{ClaimTombstone, EnvelopeTombstone, checkpoint_cut};
-        let fleet = "1f91ca65-7793-48cc-866e-ac15690130e1";
-        let auth = FleetAuth::test(fleet, &[6; 32]);
-        let target = Arc::new(Store::open_memory("target").unwrap());
-        target.bind_fleet(fleet).unwrap();
-        let checkpoint = "checkpoint/2026-09-27";
-        let cut = checkpoint_cut(checkpoint).unwrap();
-        let envelopes = (1..=3)
-            .map(|sequence| EnvelopeTombstone {
-                writer: "source".into(),
-                sequence,
-                envelope_hash: format!("{sequence:064x}"),
-                accepted_at_unix_ms: cut - 1_000 + u128::from(sequence),
-            })
-            .collect::<Vec<_>>();
-        let claims = envelopes
-            .iter()
-            .map(|envelope| ClaimTombstone {
-                id: format!("claim-{}", envelope.sequence),
-                writer: envelope.writer.clone(),
-                sequence: envelope.sequence,
-                envelope_hash: envelope.envelope_hash.clone(),
-                subject: "daemon/source".into(),
-                kind: "daemon.diagnostic".into(),
-                actor: None,
-                predecessors: Vec::new(),
-                operation_id: None,
-                request_digest: None,
-                accepted_at_unix_ms: envelope.accepted_at_unix_ms,
-            })
-            .collect::<Vec<_>>();
-        target
-            .apply_checkpoint_drop(checkpoint, &envelopes, &claims)
-            .unwrap();
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let state = PeerState::new(Local(target.clone()), "target".into(), auth.clone(), FleetContext::legacy(BTreeSet::from(["source".into()])));
-        let server = tokio::spawn(axum::serve(listener, peer_router(state, Router::new())).into_future());
-        let peer = PeerConfig {
-            name: "target".into(),
-            url: format!("http://{address}"),
-        };
-        let http = replication_http_client();
-        let dialer = FleetContext::legacy(BTreeSet::from(["target".into()]));
-        let manifest =
-            fetch_checkpoint_manifest(&http, &peer, "source", &auth, &dialer, checkpoint, cut)
-                .await
-                .unwrap();
-        assert_eq!(
-            manifest,
-            target.checkpoint_manifest(checkpoint, cut).unwrap()
-        );
-        assert_eq!(manifest.envelopes, envelopes);
-        assert_eq!(manifest.claims, claims);
-        crate::store::verify_checkpoint_manifest(
-            &manifest,
-            &crate::store::drop_digest(&envelopes, &claims),
-        )
-        .unwrap();
-
-        // A node that is not the target's peer, or holds another fleet secret, gets nothing.
-        let stranger =
-            fetch_checkpoint_manifest(&http, &peer, "stranger", &auth, &dialer, checkpoint, cut)
-                .await;
-        assert!(stranger.is_err());
-        let other_fleet = FleetAuth::test(fleet, &[7; 32]);
-        let forged = fetch_checkpoint_manifest(
-            &http,
-            &peer,
-            "source",
-            &other_fleet,
-            &dialer,
-            checkpoint,
-            cut,
-        )
-        .await;
-        assert!(forged.is_err());
-        server.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_new_node_adopts_the_checkpoint_its_peer_advertises() {
-        use crate::store::{CheckpointContext, newest_due_cut};
-        const DAY_MS: u128 = 24 * 60 * 60 * 1_000;
-        let fleet = "3c2b6f0e-4d1a-4f7e-9a53-2e8b1c0d7f64";
-        let auth = FleetAuth::test(fleet, &[8; 32]);
-        let scratch = tempfile::tempdir().unwrap();
-        let context = CheckpointContext {
-            now_unix_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-                + 3 * DAY_MS,
-            configured_peers: Vec::new(),
-            scratch: scratch.path().to_path_buf(),
-            reviewer: "person/operator".into(),
-        };
-        let [alder, birch] = ["alder", "birch"].map(|name| {
-            let store = Arc::new(Store::open_memory(name).unwrap());
-            store.bind_fleet(fleet).unwrap();
-            store
-        });
-        let sync = || {
-            for (source, target) in [(&alder, &birch), (&birch, &alder)] {
-                let exchange = source
-                    .export_replication_exchange(fleet, &target.replication_inventory().unwrap())
-                    .unwrap();
-                target
-                    .receive_replication_exchange(source.origin(), fleet, &exchange)
-                    .unwrap();
-                target.validate_replication_backlog().unwrap();
-                target.project_replication_backlog().unwrap();
-            }
-        };
-        for (store, count) in [(&alder, 6), (&birch, 4)] {
-            for index in 0..count {
-                store
-                    .append_as_older_build_for_test(&ClaimInput {
-                        subject: format!("daemon/{}", store.origin()),
-                        kind: "daemon.diagnostic".into(),
-                        actor: None,
-                        fields: BTreeMap::from([
-                            ("severity".into(), Value::String("warning".into())),
-                            ("code".into(), Value::String("slow-request".into())),
-                            ("reason".into(), Value::String(format!("slow {index}"))),
-                        ]),
-                        evidence: Vec::new(),
-                        expected_subject: None,
-                        idempotency_key: Some(format!("{}-slow-{index}", store.origin())),
-                    })
-                    .unwrap();
-            }
-        }
-        sync();
-        // Seal, verify, then trim on both.
-        for _ in 0..3 {
-            for store in [&alder, &birch] {
-                store.checkpoint_step(&context).unwrap();
-            }
-            sync();
-        }
-        let advertised = alder.trimmed_checkpoint().unwrap().expect("alder trimmed");
-        assert_eq!(
-            birch.trimmed_checkpoint().unwrap().as_ref(),
-            Some(&advertised)
-        );
-        assert_eq!(advertised.cut_unix_ms, newest_due_cut(context.now_unix_ms));
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let state = PeerState::new(Local(alder.clone()), "alder".into(), auth.clone(), FleetContext::legacy(BTreeSet::from(["cedar".into()])));
-        let server = tokio::spawn(axum::serve(listener, peer_router(state, Router::new())).into_future());
-        let peer = PeerConfig {
-            name: "alder".into(),
-            url: format!("http://{address}"),
-        };
-        let cedar = Arc::new(Store::open_memory("cedar").unwrap());
-        cedar.bind_fleet(fleet).unwrap();
-        let http = replication_http_client();
-        let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
-        for _ in 0..10 {
-            let moved = exchange(
-                &http,
-                &Local(cedar.clone()),
-                "cedar",
-                &peer,
-                &auth,
-                &dialer,
-            )
-            .await
-            .unwrap();
-            if !moved {
-                break;
-            }
-        }
-        assert_eq!(
-            cedar.trimmed_checkpoint().unwrap().as_ref(),
-            Some(&advertised)
-        );
-        assert_eq!(cedar.checkpoint_manifest_need().unwrap(), None);
-        let status = |store: &Store| {
-            let status = store.replication_status(true, Some(fleet), &[]).unwrap();
-            (status.authority_digest, status.graph_digest)
-        };
-        assert_eq!(status(&cedar), status(&alder));
-        assert_eq!(
-            cedar
-                .checkpoint_manifest(&advertised.id, advertised.cut_unix_ms)
-                .unwrap(),
-            alder
-                .checkpoint_manifest(&advertised.id, advertised.cut_unix_ms)
-                .unwrap()
-        );
-        server.abort();
     }
 
     #[tokio::test]

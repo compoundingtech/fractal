@@ -3,7 +3,7 @@
 This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
-Storage version: `23`
+Storage version: `28`
 Storage digest: `2ff9359bf57a5c31fa1ecd71e881d76828371529876191f16b3d6ce73fc24d1d`
 
 ## Subject families
@@ -26,9 +26,14 @@ Storage digest: `2ff9359bf57a5c31fa1ecd71e881d76828371529876191f16b3d6ce73fc24d1
 | `external` | `external/PROVIDER/KIND/IDENTITY` | no | An external account or actor, distinct from a native person. |
 | `file` | `file/HOST:/ABSOLUTE_PATH` | no | A read-only file gate target. |
 | `fleet-invite` | `fleet-invite/ID` | no | A single-use fleet join invite. |
+| `gate-admission` | `gate-admission/HOST/ID/OUTCOME` | no | One immutable transitional gate admission lifecycle receipt. |
 | `gate-operation` | `gate-operation/IDENTITY` | no | One gate evaluation attempt. |
+| `github-capture` | `github-capture/COMMIT_DIGEST` | no | A bounded source capture visibility marker and coverage frontier. |
 | `github-event` | `github-event/RESOURCE/ITEM/NUMBER/KEY` | no | One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller. |
+| `github-fact` | `github-fact/REVISION_DIGEST` | no | One bounded normalized GitHub entity revision, visible only through a committed capture. |
 | `github-post` | `github-post/OWNER/REPO/KIND/ID` | no | A GitHub comment or review an agent seat posted, by its GitHub ID. |
+| `github-scope` | `github-scope/NAME` | yes | An effective-dated versioned repository roster for native GitHub objectives. |
+| `github-source` | `github-source/NAME` | yes | An explicitly configured GitHub source and its fenced acquisition authority. |
 | `github-workflow-run` | `github-workflow-run/OWNER/REPO/RUN_ID` | no | One completed CI run of a GitHub repository, written once by its repository's poller. |
 | `glass` | `glass/person/NAME/UUID` | no | A private person workspace. |
 | `harness-question` | `harness-question/ID` | no | A question a seat's harness asked natively: question ids and option positions, never text. |
@@ -47,7 +52,9 @@ Storage digest: `2ff9359bf57a5c31fa1ecd71e881d76828371529876191f16b3d6ce73fc24d1
 | `pty` | `pty/RUN/LOCAL_ID` | no | A mission-run terminal runtime. |
 | `read-position` | `read-position/person/NAME` | no | One person's forward-only read positions across conversations. |
 | `repair` | `repair/ID` | yes | An immutable receipt for a bounded graph or replication repair. |
+| `residency` | `residency/HOST/EPISODE/ID` | no | Durable residency evidence, scoped to an owner host and logical episode. |
 | `resource` | `resource/NAME` | yes | An observed external or durable fact bag. |
+| `resource-admission` | `resource-admission/HOST or resource-admission/HOST/ID` | no | A host authority's durable admission source cut or membership lifecycle evidence. |
 | `revision-proposal` | `revision-proposal/ID` | no | A mission revision proposal. |
 | `rule` | `rule/NAME` | no | A permission rule, its mode, and the writes it audited. |
 | `run-generation` | `run-generation/ID` | no | An immutable mission-run generation. |
@@ -71,9 +78,9 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `uri.reference` | `uri:string immutable` | An external resource addressed by an opaque absolute URI. |
 | `vcs.commit` | `author:string`, `committed_at:string`, `committer:string`, `message:string`, `parents:array`, `repository:subject-reference immutable`, `sha:string immutable`, `state:string`, `tree:string immutable`, `url:string` | An immutable version control commit. |
 | `vcs.issue` | `author:string`, `closed_by:string`, `closed_by_resource:subject-reference`, `comments:integer`, `created_at:string`, `labels:array`, `last_comment:object`, `mentions:array`, `moved_to:subject-reference`, `node_id:string`, `number:integer`, `opened_by:subject-reference`, `opened_by_run:subject-reference`, `reactions:object`, `recent_comments:array`, `repository:subject-reference`, `state:string`, `state_reason:string`, `title:string`, `updated_at:string`, `url:string` | A version control issue. |
-| `vcs.pull-request` | `author:string`, `base:subject-reference`, `base_branch:string`, `branch:string`, `checks:array`, `checks_state:string`, `closed_by_resource:subject-reference`, `comments:integer`, `created_at:string`, `draft:boolean`, `head:subject-reference`, `head_sha:string`, `last_comment:object`, `mentions:array`, `merge_commit_sha:string`, `merge_queue:object`, `merged:boolean`, `merged_at:string`, `merged_by:string`, `moved_to:subject-reference`, `node_id:string`, `number:integer`, `opened_by:subject-reference`, `opened_by_run:subject-reference`, `reactions:object`, `recent_comments:array`, `repository:subject-reference`, `required_checks:object`, `review_decision:string`, `reviews:array`, `state:string`, `state_reason:string`, `title:string`, `updated_at:string`, `url:string` | A version control pull request. |
+| `vcs.pull-request` | `author:string`, `await_pr_observation:object`, `base:subject-reference`, `base_branch:string`, `branch:string`, `checks:array`, `checks_state:string`, `closed_by_resource:subject-reference`, `comments:integer`, `created_at:string`, `draft:boolean`, `head:subject-reference`, `head_sha:string`, `last_comment:object`, `mentions:array`, `merge_commit_sha:string`, `merge_queue:object`, `merged:boolean`, `merged_at:string`, `merged_by:string`, `moved_to:subject-reference`, `node_id:string`, `number:integer`, `opened_by:subject-reference`, `opened_by_run:subject-reference`, `reactions:object`, `recent_comments:array`, `repository:subject-reference`, `required_checks:object`, `review_decision:string`, `reviews:array`, `state:string`, `state_reason:string`, `title:string`, `updated_at:string`, `url:string` | A version control pull request. |
 | `vcs.ref` | `ancestors:array`, `head:string`, `name:string immutable`, `ref_type:string`, `repository:subject-reference immutable`, `target:subject-reference`, `url:string` | A named version control reference. |
-| `vcs.repository` | `default_ref:subject-reference`, `github_http_requests_since_start:integer`, `head:subject-reference`, `issues:array`, `main_performance_failures:array`, `moved_to:subject-reference`, `node_id:string`, `pull_requests:array`, `repository_id:integer`, `state:string`, `url:string`, `vcs:string` | A version control repository. |
+| `vcs.repository` | `await_prs_not_found:array`, `default_ref:subject-reference`, `github_http_requests_since_start:integer`, `head:subject-reference`, `issues:array`, `main_performance_failures:array`, `moved_to:subject-reference`, `node_id:string`, `pull_requests:array`, `repository_id:integer`, `state:string`, `url:string`, `vcs:string` | A version control repository. |
 | `custom.NAMESPACE.NAME` | open fact bag | A namespaced custom resource. |
 
 ## Claim kinds
@@ -101,6 +108,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `client.native-crash` | `client` | `system-only` | `append` | `local` | `app_version!:string`, `capture_source!:string`, `captured_at_unix_ms!:integer`, `event_id!:string`, `launch_id!:string`, `launch_id_basis!:string`, `native_build!:string`, `occurred_at_unix_ms!:integer`, `occurrence_time_basis!:string`, `os_version!:string`, `paired_device!:string`, `pairing_grant!:string`, `payload!:object`, `person_id!:string`, `platform!:string`, `runtime_version!:string`, `sequence!:integer`, `severity!:string`, `update_id!:string` |  |
 | `client.operation-authorized` | `custom` | `system-only` | `append` | `durable` | `completion_id:string`, `record_hash!:string`, `record_id!:string` |  |
 | `custom.client.action-result` | `custom` | `system-only` | `append` | `durable` | `authority_actor:string`, `request_digest!:string`, `result!:object` |  |
+| `custom.client.observation-minute` | `custom` | `system-only` | `once` | `durable` | `buckets!:array`, `carrier!:string`, `count!:integer`, `max_ms!:integer`, `over!:integer`, `pairing_grant!:string`, `path:string`, `report_digest!:string`, `report_id!:string`, `source!:string`, `start_ms!:integer`, `target!:string` |  |
 | `daemon.diagnostic` | `daemon` | `system-only` | `append` | `local` | `code!:string`, `reason!:string`, `severity!:string`, `status:string` |  |
 | `daemon.started` | `daemon` | `system-only` | `append` | `durable` | `features:object`, `pid:integer`, `schema:string`, `schema_digest:string`, `status!:string`, `version:string` | `reset` |
 | `delivery.hold` | `agent` | `authorized-requester` | `state-transition` | `durable` | `held!:boolean`, `legacy_adoption:boolean`, `reason!:string`, `until_unix_ms!:integer` |  |
@@ -126,6 +134,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `fleet.member-left` | `host` | `system-only` | `append` | `durable` | `high_water!:integer`, `member_key!:string` |  |
 | `fleet.member-removed` | `host` | `system-only` | `append` | `durable` | `high_water!:integer`, `member_key:string`, `reason!:string`, `removed_by:subject-reference(person)` |  |
 | `fleet.shard-bounds` | `host` | `system-only` | `append` | `durable` | `member_key!:string`, `shard_high_water!:object` |  |
+| `gate.admission.observed` | `gate-admission` | `system-only` | `once` | `durable` | `at_ms!:integer`, `class!:string`, `coverage!:string`, `epoch!:string`, `host!:string`, `id!:string`, `onset_ms!:integer`, `outcome!:string`, `reason!:string`, `schema!:string` |  |
 | `gate.head-bound` | `gate-operation` | `system-only` | `append` | `durable` | `attempt!:integer`, `author!:subject-reference(agent|person)`, `boundary!:subject-reference`, `change!:object`, `episode!:integer`, `generation!:subject-reference(run-generation)`, `head!:object`, `mission_revision!:string`, `observation!:string`, `owner!:subject-reference`, `previous_binding:string`, `reason!:string`, `request_operation!:subject-reference(gate-operation)`, `review_targets!:array`, `reviewer!:subject-reference(agent|person)`, `scope!:object`, `step_definition!:string` | `gate` |
 | `gate.remediation-attached` | `gate-operation` | `system-only` | `append` | `durable` | `attempt_receipt!:string`, `author_attempt!:integer`, `author_generation!:subject-reference(run-generation)`, `author_step!:subject-reference(step-run)`, `binding_claim!:string`, `boundary_attempt!:integer`, `episode!:integer`, `evidence!:array`, `finding_refs!:array`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `request!:string`, `reviewed_head!:object`, `verdict!:string` | `gate` |
 | `gate.requested` | `gate-operation` | `system-only` | `once` | `durable` | `attempt:integer`, `author:subject-reference(agent|person)`, `baseline:boolean`, `binding_claim:string`, `capability_expires_at:string`, `capability_hash:string`, `change:object`, `continuity:object`, `decisions:array`, `delta_ref:string`, `dispatch:object`, `episode:integer`, `gate:string`, `gate_subject:subject-reference(gate-operation)`, `generation:subject-reference(run-generation)`, `head:object`, `host:string`, `mission_revision:string`, `mode:string`, `model:string`, `operation:subject-reference`, `owner:subject-reference`, `question:string`, `review_targets:array`, `reviewer:subject-reference`, `runner:string`, `scope:object`, `status:string`, `step_definition:string`, `token_budget:integer`, `tools:array` | `gate` |
@@ -133,7 +142,11 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `gate.review-verdict` | `gate-operation` | `capability-holder` | `append` | `durable` | `attempt!:integer`, `binding_claim!:string`, `carry_forward_from:string`, `change!:object`, `episode!:integer`, `evidence!:array`, `finding_refs!:array`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `request!:string`, `review_targets!:array`, `reviewed_head!:object`, `reviewer!:subject-reference(agent|person)`, `scope!:object`, `source!:object`, `verdict!:string` | `gate` |
 | `gate.review-withdrawn` | `gate-operation` | `system-only` | `append` | `durable` | `attempt!:integer`, `authorization_evidence!:array`, `binding_claim!:string`, `episode!:integer`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `previous_binding!:string`, `reason!:string`, `request!:string`, `reviewer!:subject-reference(agent|person)`, `verdict!:string`, `withdrawing_actor!:subject-reference(agent|person)` | `gate` |
 | `gate.reviewer-reassigned` | `gate-operation` | `authorized-requester` | `append` | `durable` | `owner:subject-reference`, `previous_reviewer:subject-reference`, `request:string`, `reviewer:subject-reference` | `gate` |
+| `github.capture.authority` | `github-source` | `system-only` | `append` | `durable` | `record!:object` |  |
+| `github.capture.committed` | `github-capture` | `system-only` | `once` | `durable` | `record!:object` |  |
+| `github.capture.fenced` | `github-source` | `system-only` | `append` | `durable` | `record!:object` |  |
 | `github.event` | `github-event` | `system-only` | `once` | `durable` | `at!:string`, `detail:object`, `event!:string`, `head_sha:string`, `item!:subject-reference(resource)`, `observer!:subject-reference(observer)`, `version!:integer` |  |
+| `github.fact.observed` | `github-fact` | `system-only` | `once` | `durable` | `record!:object` |  |
 | `github.posted` | `github-post` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `id!:integer`, `item!:integer`, `kind!:string`, `login:string`, `repository!:string`, `url:string` |  |
 | `github.workflow-run` | `github-workflow-run` | `system-only` | `once` | `durable` | `attempt!:integer`, `completed_at!:string`, `conclusion!:string`, `created_at!:string`, `duration_ms!:integer`, `event!:string`, `flakes!:integer`, `flaky_tests!:integer`, `head_sha!:string`, `observer!:subject-reference(observer)`, `repository!:string`, `run_id!:integer`, `started_at!:string`, `version!:integer`, `workflow!:string` |  |
 | `glass.deleted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `replaced_revision:string` |  |
@@ -142,11 +155,12 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `harness-question.resolved` | `harness-question` | `system-only` | `append` | `durable` | `answers!:object`, `receipt:object`, `revision!:string`, `status!:string` |  |
 | `harness.context-clear.requested` | `agent` | `authorized-requester` | `append` | `durable` | `context_epoch:string`, `incarnation_id:string`, `operation_status:string`, `runtime_id:string` |  |
 | `harness.context-clear.result` | `agent` | `system-only` | `once` | `durable` | `context_epoch:string`, `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string` |  |
-| `harness.diagnostic` | `agent` | `same-subject-actor` | `append` | `durable` | `acted_for:subject-reference(person)`, `attempt:integer`, `auth_attention_key:string`, `code:string`, `delegation:object`, `driver:string`, `incarnation_id:string`, `invocation_id:string`, `matched_line:string`, `observed_since_ms:integer`, `ownership_sequence:integer`, `producer_version:string`, `provider_auth_sequence:integer`, `readiness_epoch:integer`, `reason:string`, `retry_after_unix_ms:integer`, `retry_attempt:integer`, `selector_scope:string`, `session_id:string`, `severity:string`, `status:string`, `step_run:subject-reference(step-run)`, `wake_attempts:integer` |  |
+| `harness.diagnostic` | `agent` | `same-subject-actor` | `append` | `durable` | `acted_for:subject-reference(person)`, `attempt:integer`, `auth_attention_key:string`, `code:string`, `delegation:object`, `driver:string`, `incarnation_id:string`, `invocation_id:string`, `matched_line:string`, `message_id:string`, `observed_since_ms:integer`, `ownership_sequence:integer`, `producer_version:string`, `provider_auth_sequence:integer`, `readiness_epoch:integer`, `reason:string`, `retry_after_unix_ms:integer`, `retry_attempt:integer`, `selector_scope:string`, `session_id:string`, `severity:string`, `status:string`, `step_run:subject-reference(step-run)`, `wake_attempts:integer` |  |
 | `harness.inventory.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `commands!:array`, `dynamic_commands!:string`, `harness!:string`, `incarnation_id!:string`, `observed_at!:string`, `session_id!:string` |  |
 | `harness.invocation` | `agent` | `system-only` | `append` | `durable` | `agent!:subject-reference(agent)`, `error:any`, `event_key:any`, `evidence:any`, `fallback:any`, `freshness:object`, `harness:any`, `harness_version:any`, `incarnation:any`, `invocation_id!:string`, `launch_input_digest:any`, `operation_id!:string`, `owner_attempt:any`, `owner_run:any`, `owner_step:any`, `parent_invocation_id:any`, `phase!:string`, `prompt_digest:any`, `provider_binary_digest:any`, `requested_model:any`, `trace_context:any`, `transcript_ref:any` |  |
 | `harness.invocation-artifact` | `agent` | `system-only` | `append` | `durable` | `artifact:object`, `deleted_at_unix_ms:integer`, `invocation_id!:string`, `kind:string`, `reason:string`, `sha256:string`, `status:string` |  |
 | `harness.limits` | `agent` | `same-subject-actor` | `append` | `durable` | `account:string`, `account_ref:string`, `driver!:string`, `five_hour_percent:number`, `five_hour_resets_at_unix_ms:integer`, `incarnation_id:string`, `measured_at_unix_ms!:integer`, `plan:string`, `weekly_percent:number`, `weekly_resets_at_unix_ms:integer` |  |
+| `harness.model-fallback.observed` | `agent` | `same-subject-actor` | `append` | `durable` | `cause:string`, `episode_id!:string`, `from:string`, `incarnation_id!:string`, `native_session!:string`, `observation!:string`, `observed_at_unix_ms!:integer`, `reason!:string`, `source_event!:string`, `to!:string` |  |
 | `harness.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `ask:string`, `background_jobs:integer`, `blocked_on:string`, `blocking:array`, `driver:string`, `evidence_incarnation:string`, `exit:string`, `incarnation_id:string`, `input_buffer:string`, `observed_at_ms:integer`, `observed_since_ms:integer`, `ownership_sequence:integer`, `provider_auth:boolean`, `provider_auth_sequence:integer`, `quiescent:boolean`, `reason:string`, `rollout_operation:string`, `state!:string`, `status_transition:boolean`, `transition_sequence:integer`, `transport:string` |  |
 | `harness.session-file` | `agent` | `authorized-requester` | `append` | `durable` | `account_ref:string`, `agent:subject-reference(agent)`, `desired_token:string`, `discovery_revision:string`, `harness!:string`, `incarnation_id:string`, `modified_at:string`, `path:string`, `session_id!:string`, `source_session:string`, `status:string` |  |
 | `harness.telemetry` | `agent` | `same-subject-actor` | `append` | `local` | `driver!:string`, `incarnation_id!:string`, `signals!:object`, `unit!:string` |  |
@@ -169,7 +183,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `message.read` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acting_for:subject-reference(agent)`, `status!:string` |  |
 | `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `assistant_grant_id:string`, `assistant_owner:subject-reference`, `assistant_session_actor:string`, `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `sender_class:string`, `session_id:string`, `status!:string`, `tags:array`, `thread_id:subject-reference(thread)`, `thread_origin_ask:subject-reference(step-run)`, `thread_origin_episode:string`, `thread_origin_source:subject-reference`, `thread_quote_id:subject-reference(message)`, `thread_reader_version:integer`, `title:string`, `to:subject-reference` | `message` |
 | `message.staged` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
-| `mission-run.created` | `mission-run` | `system-only` | `once` | `durable` | `ad_hoc_title:string`, `admission_publication:string`, `after:subject-reference`, `current_generation:subject-reference`, `deadline_at_unix_ms:integer`, `default_selector:object`, `generation:subject-reference`, `initial_revision:string`, `inputs:object`, `mission:subject-reference`, `mission_spec:object`, `mode:string`, `parent_step_run:subject-reference`, `phase:string`, `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `requester:subject-reference`, `revision:string`, `root_mission_run:subject-reference`, `root_revision:string`, `stalled_after_ms:integer`, `status:string`, `timeout_ms:integer`, `workspace:string`, `workspace_declaration:object` | `mission-run` |
+| `mission-run.created` | `mission-run` | `system-only` | `once` | `durable` | `ad_hoc_title:string`, `admission_publication:string`, `after:subject-reference`, `current_generation:subject-reference`, `deadline_at_unix_ms:integer`, `default_selector:object`, `generation:subject-reference`, `initial_revision:string`, `inputs:object`, `mission:subject-reference`, `mission_spec:object`, `mode:string`, `native_turn:object`, `native_turn_key:string`, `parent_attempt:integer`, `parent_step_run:subject-reference`, `phase:string`, `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `requester:subject-reference`, `revision:string`, `root_mission_run:subject-reference`, `root_revision:string`, `stalled_after_ms:integer`, `status:string`, `timeout_ms:integer`, `workspace:string`, `workspace_declaration:object` | `mission-run` |
 | `mission-run.gate-carried` | `mission-run` | `system-only` | `append` | `durable` | `continuity!:object`, `legacy_confirmed:boolean`, `source_answer!:string`, `source_confirmation:string`, `source_request!:string`, `source_run!:subject-reference(mission-run)`, `target_generation!:subject-reference(run-generation)` |  |
 | `mission-run.report-to` | `mission-run` | `system-only` | `state-transition` | `durable` | `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `stalled_after_ms:integer` |  |
 | `mission-run.retry-linked` | `mission-run` | `system-only` | `append` | `durable` | `reason:string`, `retry!:subject-reference(mission-run)`, `source!:subject-reference(mission-run)` |  |
@@ -177,7 +191,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `mission-run.supersede-linked` | `mission-run` | `system-only` | `append` | `durable` | `publication!:string`, `replacement!:subject-reference(mission-run)`, `source!:subject-reference(mission-run)` |  |
 | `mission.produced` | `mission`, `step-run` | `capability-holder` | `append` | `durable` | `attempt:integer`, `mission:subject-reference`, `name:string`, `revision:string`, `step_definition:string` | `produces` |
 | `mission.provenance` | `mission` | `system-only` | `once` | `durable` | `mission!:subject-reference(mission)`, `provenance!:object`, `revision!:string` | `provenance` |
-| `mission.published` | `mission` | `authorized-requester` | `append` | `durable` | `body:object`, `revision:string`, `state:string` | `mission` |
+| `mission.published` | `mission` | `authorized-requester` | `append` | `durable` | `body:object`, `per_run_missions:integer`, `revision:string`, `state:string` | `mission` |
 | `mission.renamed` | `mission` | `system-only` | `append` | `durable` | `declaration!:string`, `from!:subject-reference(agent|mission)`, `owner_host!:string`, `preserved_incarnation:string`, `previous_revision:string`, `reason!:string`, `request!:object`, `to!:subject-reference(agent|mission)` |  |
 | `mission.run.trace` | `mission-run` | `system-only` | `once` | `durable` | `trace:any` | `observability` |
 | `observer.observed` | `observer` | `system-only` | `append` | `durable` | `attempt:string`, `changed:boolean`, `changed_fields:array`, `cursor:string`, `locator:string`, `next_check_unix_ms:string`, `observation:subject-reference`, `provider:string`, `resource:subject-reference`, `revision:string`, `status:string` | `observer` |
@@ -208,13 +222,24 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `principal.key-revoked` | `person`, `agent` | `system-only` | `append` | `durable` | `key!:string`, `reason:string` |  |
 | `program.attempt.trace` | `step-run` | `system-only` | `append` | `durable` | `attempt!:integer`, `trace:any` | `observability` |
 | `program.step` | `step-run` | `system-only` | `append` | `durable` | `attempt!:integer`, `child:string`, `error:any`, `key!:string`, `ms:integer`, `program!:string`, `status!:string`, `value:any` | `step`, `program` |
+| `program.turn.report` | `mission-run` | `system-only` | `once` | `durable` | `report!:object` |  |
 | `publication.operation` | `*` | `system-only` | `append` | `durable` | `action:string`, `operation:string`, `status!:string` | `revision`, `reset`, `cancellation`, `refresh`, `feedback` |
 | `read-position.advanced` | `read-position` | `ordinary-client` | `append` | `durable` | `at_ms!:integer`, `conversation!:string`, `owner!:subject-reference(person)` |  |
 | `reconcile.fault` | `daemon`, `mission-run`, `observer`, `schedule`, `step-run`, `subscription` | `system-only` | `append` | `durable` | `publication:string`, `reason:string`, `scope!:string`, `status!:string` |  |
 | `record.repaired` | `repair` | `ordinary-client` | `once` | `durable` | `reason!:string`, `record!:string`, `replacement!:string` | `repair` |
 | `render.applied` | `agent`, `exec`, `pty` | `system-only` | `append` | `local` | `warnings:array`, `writes:array` |  |
 | `repair.applied` | `repair` | `system-only` | `once` | `durable` | `affected_subjects:array`, `item_count:integer`, `reason!:string`, `token!:string` |  |
-| `resource.exec-receipt` | `resource` | `system-only` | `once` | `durable` | `class!:string`, `clean_end:boolean`, `clean_start:boolean`, `coverage!:string`, `disk_reserved_bytes!:integer`, `exec_id!:string`, `exit_code:integer`, `exit_signal:integer`, `head_end:string`, `head_start:string`, `host!:string`, `io:string`, `memory_bytes:integer`, `memory_peak_bytes:integer`, `owner!:object`, `queue_wait_ms!:integer`, `state!:string`, `wall_duration_ms!:integer` |  |
+| `residency.eligibility-outcome` | `residency` | `system-only` | `once` | `durable` | `decided_at!:integer`, `eligible_since!:integer`, `host!:string`, `reason!:string`, `refused!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.first-turn` | `residency` | `system-only` | `once` | `durable` | `first_turn_at!:integer`, `host!:string`, `seat:subject-reference(agent)`, `turn_id!:string` |  |
+| `residency.host-sample` | `residency` | `system-only` | `append` | `durable` | `asleep_seats!:integer`, `held_silent_age_seconds:number`, `host!:string`, `host_available_delta_bytes:integer`, `memory_coverage!:string`, `observed_at!:integer`, `private_reclaimed_bytes:integer`, `seat:subject-reference(agent)` |  |
+| `residency.outcome` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `observed_at!:integer`, `reason!:string`, `resume_failed!:integer`, `seat:subject-reference(agent)`, `useless!:integer` |  |
+| `residency.resumed` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `incarnation!:string`, `native_session!:string`, `resumed_at!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.sleep-ended` | `residency` | `system-only` | `once` | `durable` | `end_class!:string`, `ended_at!:integer`, `host!:string`, `seat:subject-reference(agent)`, `short_sleep!:integer`, `suspended_at!:integer` |  |
+| `residency.unrouted` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `kind!:string`, `observed_at!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.wake-demand` | `residency` | `system-only` | `once` | `durable` | `demand_at!:integer`, `host!:string`, `origin_accepted_at!:integer`, `seat:subject-reference(agent)`, `source_message!:string`, `suspended_incarnation!:string` |  |
+| `resource.admission.coverage` | `resource-admission` | `system-only` | `append` | `durable` | `complete!:boolean`, `epoch!:string`, `host!:string` |  |
+| `resource.admission.observed` | `resource-admission` | `system-only` | `append` | `durable` | `admission_timeout_ms:integer`, `admitted_at:integer`, `class!:string`, `clock_uncertain!:boolean`, `coverage!:string`, `epoch!:string`, `finite!:boolean`, `host!:string`, `id!:string`, `owner!:object`, `queued_at!:integer`, `refusal:string`, `retired_at:integer`, `state!:string` |  |
+| `resource.exec-receipt` | `resource` | `system-only` | `once` | `durable` | `admissionDecision:object`, `argv:array`, `argv_sha256:string`, `class!:string`, `clean_end:boolean`, `clean_start:boolean`, `coverage!:string`, `disk_path:string`, `disk_reserved_bytes!:integer`, `exec_id!:string`, `exit_code:integer`, `exit_signal:integer`, `head_end:string`, `head_start:string`, `host!:string`, `io:string`, `ioStat:array`, `launched:boolean`, `learningCoverage:string`, `learningDecision:object`, `memoryEvents:object`, `memory_bytes:integer`, `memory_peak_bytes:integer`, `owner!:object`, `preRetirementPopulated:boolean`, `profile_estimate:object`, `profile_key:string`, `queue_wait_ms!:integer`, `refusal_code:string`, `request_id:string`, `state!:string`, `timed_out:boolean`, `wall_duration_ms!:integer` |  |
 | `resource.observed` | `resource` | `ordinary-client` | `append` | `durable` | `attribution_only:boolean`, `kind:string`, `observed_at:integer`, `state:any` | `resource` |
 | `revision-proposal.applied` | `revision-proposal` | `system-only` | `once` | `durable` | `reason:string`, `status:string`, `successor_generation:subject-reference` |  |
 | `revision-proposal.approved` | `revision-proposal` | `authorized-requester` | `once-per-actor` | `durable` | `all_approved:boolean`, `preview_hash:string`, `reviewer:subject-reference` |  |
@@ -225,11 +250,11 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `run-generation.created` | `run-generation` | `system-only` | `once` | `durable` | `compatible_steps:array`, `predecessor:subject-reference`, `reason:string`, `revision:string`, `run:subject-reference`, `status:string` | `mission-run`, `revision` |
 | `run-generation.state` | `run-generation` | `system-only` | `state-transition` | `durable` | `phase:string`, `previous_phase:string`, `reason:string`, `status:string`, `successor:subject-reference` | `mission-run`, `step`, `completion`, `finally`, `revision`, `cancellation` |
 | `run-generation.superseded` | `run-generation` | `system-only` | `once` | `durable` | `phase:string`, `previous_phase:string`, `reason:string`, `status:string`, `successor:subject-reference` | `revision` |
-| `runtime.action.deadline-reached` | `agent`, `exec`, `pty`, `gate-operation` | `system-only` | `append` | `system-local` | `action:string`, `blocking:array`, `code:string`, `credential_home:string`, `deadline_key:string`, `desired_token:string`, `harness:string`, `incarnation_id:string`, `launch_contract:object`, `native_session_id:string`, `operation:string`, `operation_status:string`, `reason:string`, `rollout:object`, `rollout_operation:string`, `runtime_id:string`, `runtime_pid:integer`, `runtime_pid_start_token:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
-| `runtime.action.failed` | `agent`, `exec`, `pty`, `gate-operation` | `system-only` | `append` | `system-local` | `action:string`, `blocking:array`, `code:string`, `credential_home:string`, `deadline_key:string`, `desired_token:string`, `harness:string`, `incarnation_id:string`, `launch_contract:object`, `native_session_id:string`, `operation:string`, `operation_status:string`, `reason:string`, `rollout:object`, `rollout_operation:string`, `runtime_id:string`, `runtime_pid:integer`, `runtime_pid_start_token:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
-| `runtime.action.requested` | `agent`, `exec`, `pty`, `gate-operation` | `authorized-requester` | `append` | `system-local` | `action:string`, `deadline_unix_ms:string`, `fresh_session:boolean`, `from_stale_handoff:boolean`, `host:string`, `ignore_fit:boolean`, `incarnation_id:string`, `operation:string`, `reason:string`, `rollout:object`, `runtime_id:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
-| `runtime.action.succeeded` | `agent`, `exec`, `pty`, `gate-operation` | `system-only` | `append` | `system-local` | `action:string`, `blocking:array`, `code:string`, `credential_home:string`, `deadline_key:string`, `desired_token:string`, `harness:string`, `incarnation_id:string`, `launch_contract:object`, `native_session_id:string`, `operation:string`, `operation_status:string`, `reason:string`, `rollout:object`, `rollout_operation:string`, `runtime_id:string`, `runtime_pid:integer`, `runtime_pid_start_token:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
-| `runtime.observed` | `agent`, `exec`, `pty`, `gate-operation` | `same-subject-actor` | `append` | `durable` | `adopted:boolean`, `driver:string`, `exit_code:integer`, `exit_evidence:object`, `exit_signal:integer`, `host:string`, `incarnation_id:string`, `reachability:string`, `reason:string`, `restarting_from:string`, `runtime_id:string`, `shutdown_timeout_ms:integer`, `status:string`, `terminal:boolean` |  |
+| `runtime.action.deadline-reached` | `agent`, `exec`, `pty`, `gate-operation` | `system-only` | `append` | `system-local` | `action:string`, `blocking:array`, `cause:string`, `code:string`, `credential_home:string`, `deadline_key:string`, `desired_token:string`, `harness:string`, `incarnation_id:string`, `launch_contract:object`, `mode:string`, `native_session_id:string`, `operation:string`, `operation_id:string`, `operation_status:string`, `reason:string`, `request_key:string`, `rollout:object`, `rollout_operation:string`, `runtime_id:string`, `runtime_pid:integer`, `runtime_pid_start_token:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
+| `runtime.action.failed` | `agent`, `exec`, `pty`, `gate-operation` | `system-only` | `append` | `system-local` | `action:string`, `blocking:array`, `cause:string`, `code:string`, `credential_home:string`, `deadline_key:string`, `desired_token:string`, `harness:string`, `incarnation_id:string`, `launch_contract:object`, `mode:string`, `native_session_id:string`, `operation:string`, `operation_id:string`, `operation_status:string`, `reason:string`, `request_key:string`, `rollout:object`, `rollout_operation:string`, `runtime_id:string`, `runtime_pid:integer`, `runtime_pid_start_token:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
+| `runtime.action.requested` | `agent`, `exec`, `pty`, `gate-operation` | `authorized-requester` | `append` | `system-local` | `action:string`, `cause:string`, `deadline_unix_ms:string`, `fresh_session:boolean`, `from_stale_handoff:boolean`, `host:string`, `idle_after_ms:integer`, `idle_declaration:string`, `idle_eligible_since_unix_ms:integer`, `idle_enabled_at_unix_ms:integer`, `idle_frontier:object`, `idle_wake_attempt:integer`, `idle_wake_lineage:string`, `ignore_fit:boolean`, `incarnation_id:string`, `model_return_attempt:integer`, `operation:string`, `reason:string`, `rollout:object`, `runtime_id:string`, `signal:string`, `source_host:string`, `suspend_operation_id:string`, `terminal:boolean` | `stop`, `gate` |
+| `runtime.action.succeeded` | `agent`, `exec`, `pty`, `gate-operation` | `system-only` | `append` | `system-local` | `action:string`, `blocking:array`, `cause:string`, `code:string`, `credential_home:string`, `deadline_key:string`, `desired_token:string`, `harness:string`, `incarnation_id:string`, `launch_contract:object`, `mode:string`, `native_session_id:string`, `operation:string`, `operation_id:string`, `operation_status:string`, `reason:string`, `request_key:string`, `rollout:object`, `rollout_operation:string`, `runtime_id:string`, `runtime_pid:integer`, `runtime_pid_start_token:string`, `signal:string`, `source_host:string`, `terminal:boolean` | `stop`, `gate` |
+| `runtime.observed` | `agent`, `exec`, `pty`, `gate-operation` | `same-subject-actor` | `append` | `durable` | `adopted:boolean`, `driver:string`, `exec_exited_at_unix_ms:integer`, `exit_code:integer`, `exit_evidence:object`, `exit_signal:integer`, `host:string`, `incarnation_id:string`, `reachability:string`, `reason:string`, `restarting_from:string`, `runtime_id:string`, `shutdown_timeout_ms:integer`, `start_operation:string`, `status:string`, `terminal:boolean`, `workspace:string or null` |  |
 | `runtime.readiness-deadline-reached` | `agent` | `system-only` | `append` | `local` | `deadline_unix_ms!:string`, `driver!:string`, `incarnation_id!:string`, `reason!:string`, `runtime_id!:string` |  |
 | `runtime.reconcile-decision` | `agent`, `exec`, `pty`, `schedule` | `system-only` | `append` | `durable` | `decision:string`, `gate:string`, `input_number:integer`, `key:string`, `owner_run:string`, `reachability:string`, `reason:string`, `restart_at_unix_ms:string` |  |
 | `runtime.refresh` | `agent` | `system-only` | `append` | `durable` | `episode!:object`, `version!:integer` |  |
@@ -252,6 +277,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `step-run.carried` | `step-run` | `system-only` | `once` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `definition_hash:string`, `person_continuity:object`, `source:subject-reference`, `source_attempt:integer`, `source_gate_request:string`, `source_generation:subject-reference`, `source_step_run:subject-reference`, `status:string`, `worker_reported:boolean` | `step` |
 | `step-run.retried` | `step-run` | `system-only` | `append` | `durable` | `attempt:integer`, `goals:array`, `not_before_unix_ms:integer`, `reason:string`, `status:string` | `step` |
 | `step-run.state` | `step-run` | `system-only` | `state-transition` | `durable` | `attempt:integer`, `readiness_epoch:integer`, `reason:string`, `status:string` | `step` |
+| `step.execution-phase` | `step-run` | `system-only` | `append` | `durable` | `at_unix_ms!:integer`, `attempt!:integer`, `exec!:string`, `host!:string`, `incarnation_id:string`, `phase!:string`, `reason:string`, `start_operation:string`, `timeout_extension_ms:integer` | `step` |
 | `subagent.appeared` | `agent` | `same-subject-actor` | `append` | `durable` | `description:string`, `driver!:string`, `incarnation_id!:string`, `lease_expires_at_unix_ms!:integer`, `session_id:string`, `started_at_unix_ms:integer`, `step_run:subject-reference(step-run)`, `subagent_id!:string`, `subagent_type:string` |  |
 | `subagent.ended` | `agent` | `same-subject-actor` | `append` | `durable` | `cache_write_tokens:integer`, `cached_tokens:integer`, `duration_ms:integer`, `ended_at_unix_ms:integer`, `input_tokens:integer`, `outcome!:string`, `output_tokens:integer`, `reason:string`, `subagent_id!:string`, `total_tokens:integer` |  |
 | `subagent.renewed` | `agent` | `same-subject-actor` | `append` | `durable` | `incarnation_id:string`, `lease_expires_at_unix_ms!:integer`, `subagent_id!:string` |  |
@@ -275,7 +301,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `thread.unread-cleared` | `thread` | `system-only` | `append` | `durable` | `observed_marks!:array`, `person!:subject-reference(person)` |  |
 | `thread.unread-marked` | `thread` | `system-only` | `append` | `durable` | `anchor_message!:subject-reference(message)`, `observed_marks!:array`, `person!:subject-reference(person)` |  |
 | `transport.observed` | `host` | `system-only` | `append` | `durable` | `last_success_at:integer`, `protocol:string`, `reason:string`, `remote_heads:object`, `status!:string` |  |
-| `usage.limits.observed` | `agent` | `same-subject-actor` | `append` | `durable` | `credit_readings!:array`, `readings!:array` |  |
+| `usage.limits.observed` | `agent` | `same-subject-actor` | `append` | `durable` | `credit_readings!:array`, `gaps:array`, `period_readings:array`, `readings!:array`, `source_frontier:object` |  |
 | `vcs.item.state` | `resource` | `system-only` | `append` | `durable` | `checks_state:string`, `draft:boolean`, `head_sha:string`, `item_kind!:string`, `merge_queue:object`, `merged:boolean`, `observer!:subject-reference(observer)`, `required_checks:object`, `review_decision:string`, `state!:string`, `version!:integer` |  |
 | `work.claimed` | `step-run` | `authorized-participant` | `state-transition` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `declared_model:string`, `extend_ms:integer`, `fallback:boolean`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `invocation_id:string`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `trace_id:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.extended` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `declared_model:string`, `extend_ms:integer`, `fallback:boolean`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `invocation_id:string`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `trace_id:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
@@ -288,6 +314,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `work.person-override` | `step-run` | `authorized-participant` | `append` | `durable` | `answer:object`, `episode:string`, `key:string`, `overrides:string`, `summary:string` |  |
 | `work.person-reassigned` | `step-run` | `authorized-requester` | `append` | `durable` | `attempt:integer`, `episode:string`, `generation:subject-reference`, `person:subject-reference`, `previous_person:subject-reference`, `run:subject-reference` |  |
 | `work.progress` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `declared_model:string`, `extend_ms:integer`, `fallback:boolean`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `invocation_id:string`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `trace_id:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
+| `work.rebound` | `step-run` | `system-only` | `append` | `durable` | `attempt:integer`, `claimant:subject-reference`, `from_incarnation:string`, `harness:string`, `session_id:string`, `to_incarnation:string` |  |
 | `work.released` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `declared_model:string`, `extend_ms:integer`, `fallback:boolean`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `invocation_id:string`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `trace_id:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.renewed` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `declared_model:string`, `extend_ms:integer`, `fallback:boolean`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `invocation_id:string`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `trace_id:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.submitted` | `step-run` | `authorized-participant` | `once-per-attempt` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `declared_model:string`, `extend_ms:integer`, `fallback:boolean`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `invocation_id:string`, `readiness_epoch:integer`, `reason:string`, `status:string`, `submitted_incarnation:string`, `summary:string`, `trace_id:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
@@ -324,6 +351,39 @@ Each credit represents one window-equivalent. Disposition is exactly
 `at` is nullable and `evidence_ref` is nullable nonblank text.
 Every nonnull timestamp is RFC3339; `measured_at` is required provider time.
 Unknown, missing and stale evidence never implies successful use or disposition.
+
+Optional `source_frontier` is a closed object with `producer_incarnation`, `host`,
+`sequence` (unsigned integer), nullable `previous_claim` (the actual accepted predecessor
+claim ID), `accounts` (sorted distinct `{provider, account}` objects), `observed_at`,
+`covered_from`, `covered_through` (RFC3339), and `complete` (boolean). Sequence zero
+requires null predecessor; later deltas require one. The host must equal the original
+claim origin, and each reading must belong to the fixed account roster. A new journal,
+roster or continuity gap requires a new incarnation. Publication time is not coverage.
+Each delta contains at most 128 quota and credit facts combined. Intermediate chunks
+are incomplete; only a complete, contiguous source/mirror chain certifies its interval.
+Collectors retain the accepted claim ID before sealing the next immutable request.
+Older observations without a frontier remain readable evidence, never completeness.
+
+Optional `period_readings` contains governing, comparable quota-period closures:
+`{period_id, account, provider, window, closed_at, measured_at, unused_fraction,
+close_kind, coverage, source, host, last_sample_at, max_gap_seconds}`. Text identities
+are nonblank, timestamps RFC3339, source is `omp-usage`, close_kind is
+`natural_rollover` or `early_reset`, max_gap_seconds is finite and nonnegative.
+Coverage uses the same enum; reported unused_fraction is 0–1, otherwise null.
+Unused fraction is an observed UPPER bound from the last pre-reset sample, never
+an exact terminal forfeiture. It is reported only for monotone usage in one stable,
+governing provider period; incomparable scoped windows cannot be added. Early resets
+are not natural loss. Bounds crossing the configured budget remain indeterminate.
+All account-bearing objects (quota, credit, period and roster entries) also permit
+optional nullable `provider_plan`, populated from the authoritative account registry.
+Missing plans remain readable historical evidence, but cannot prove plan-scoped loss
+coverage. Changing the plan changes the fixed source roster and requires a new incarnation.
+Optional bounded `gaps` records are closed `{provider, account_ref, provider_plan,
+source, host, reason, measured_at}` objects, with nullable provider_plan, RFC3339
+measured_at from the actual source observation, and nonblank text otherwise.
+They expose unsupported or unresolved account identities outside the certified source
+roster without inventing account digests. Gaps count toward the 128-fact delta limit;
+they never certify empty provider populations.
 
 The complete claim is durable: checkpoints must not prune credit history by keeping
 only the newest quota snapshot. Older members retain this unknown kind as retryable
@@ -444,7 +504,7 @@ Storage version 19 adds the owner-local `local_runtime_starts` ledger and its ad
 
 In the same installation transaction, `meta` captures `publication-operation-format-shared-cut` from `MAX(claims.store_index)` and `publication-operation-format-local-cut` from `MAX(local_observations.id)`, using zero for an empty table and `INSERT OR IGNORE`. These are two indexed maxima before the first operation-bound request, not history scans. Reopen, graph replay and view forgetting preserve both immutable cuts. A store with existing operation rows but a missing cut is refused rather than capturing a later boundary; preserve that store and its original boundary evidence for forward recovery. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary.
 
-Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. A per-subject `local_runtime_start_observation_subjects` bookmark records that subject's latest ledger mutation serial in the same transaction. The observation writer rejects a subject bookmark newer than its pre-physical capture serial when publishing a differing or absent incarnation; unrelated subjects cannot starve recording of exits or absence. This is a ledger-mutation witness, not general runtime identity or a selected-declaration token. The bookmark table survives replay/forget and adds one row per ledger subject, without a history backfill. The observation writer reports repeated refusals through telemetry and a visible fault; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
+Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. A per-subject `local_runtime_start_observation_subjects` bookmark records that subject's latest ledger mutation serial in the same transaction. The observation writer rejects a subject bookmark newer than its pre-physical capture serial even when publishing the same incarnation: an earlier running snapshot cannot overwrite terminal evidence published by completion. Only runtime-start ledger mutations advance this witness, so heartbeat, work, usage claims and unrelated subjects cannot starve recording of exits or absence. This is a ledger-mutation witness, not general runtime identity or a selected-declaration token. The in-memory physical capture also retains the indexed `MAX(claims.store_index)` in the same SQLite snapshot. The completion writer preserves an owning-origin observation of the exact runtime/incarnation whose store index is newer than this frontier, retaining its receipt and terminal evidence while still recording launch success. This covers observations appended by the broad pass, which do not advance the ledger generation. The bookmark table survives replay/forget and adds one row per ledger subject, without a history backfill. The observation writer reports repeated refusals through telemetry and a visible fault; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
 
 Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
 
@@ -467,16 +527,18 @@ since keeps the legacy value, which equals what would be stored.
 ## Retired identity ledger
 
 `retired_claim_ids` and `retired_envelopes` hold permanent deletion knowledge apart from the
-checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
-`checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
-background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
-per background writer loan with its cursor in `meta`, resting outside the loan for
-max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
-identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
-stays retired and is also labeled in `retired_claim_withdrawals` or
-`retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read
-the checkpoint tables: reading the ledger before local-mode activation stops those withdrawals
-would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
+checkpoint tables that record a trim's tombstones. Until a member trims (`[trim] local`, the
+default), triggers union every identity a row of `checkpoint_claims` or `checkpoint_envelopes`
+gains, through INSERT, UPDATE or before DELETE. A background job
+(`maintenance.retired_identities`) unions rows that predate the triggers, 4,096 per background
+writer loan with its cursor in `meta`, resting outside the loan for max(100 ms, 4 x the loan's
+hold), capped at 5 s. Once that import has finished, a member that trims makes the ledger its
+authority, judging it once: an identity that only an uncommitted checkpoint recorded, or that an
+older build's adoption withdrew (labeled in `retired_claim_withdrawals` or
+`retired_envelope_withdrawals`), was no deletion and leaves it, and the labels are spent. From then
+on an identity enters only as a trim deletes it, in the deleting transaction, and admission refuses
+a retired envelope or claim. Retired claim IDs a peer reports are added too. The ledger has no cap
+and no reclamation. Evidence still reads the checkpoint tables. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
 
@@ -486,9 +548,8 @@ equates with a BLOB.
 batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
 newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
 maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
-and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
-this table existed), and the writer floor; the chain's previous hash is the higher of the newest
-batch and the stored head.
+and in `retired_envelopes` (heads trimmed before this table existed), and the writer floor; the
+chain's previous hash is the higher of the newest batch and the stored head.
 
 ## Repaired claim replacements
 
@@ -504,9 +565,9 @@ Readers still use the records and `projection_digest_repaired_claims`.
 (claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
 read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
 cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
-them, including rows adoption later withdraws, so they only grow. Claim identities use the
-ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
-activation stops those withdrawals.
+them, including rows an older build's adoption withdrew, so they only grow. Claim identities use
+the ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until a member that
+trims makes the ledger its authority.
 
 ## Claim range digests
 
@@ -521,6 +582,39 @@ event, and once folds the claims that predate the triggers, tracked by `claim_ra
 takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
 loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
 import are both empty. Nothing reads them yet.
+
+## Verdict dependency readers
+
+The default writer storage version remains 20; readers accept through version 22 without
+lowering an existing marker. Version-21 signature-reference behavior is unchanged.
+Initialization installs the following empty local derived index and read-only union view:
+
+```sql
+CREATE TABLE IF NOT EXISTS claim_verdict_dependency_keys (
+    id INTEGER PRIMARY KEY,
+    link TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS claim_verdict_dependency_edges (
+    dependency_id INTEGER NOT NULL REFERENCES claim_verdict_dependency_keys(id)
+        DEFERRABLE INITIALLY DEFERRED,
+    claim_id TEXT NOT NULL,
+    PRIMARY KEY(dependency_id,claim_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_verdict_dependency_edges_claim
+    ON claim_verdict_dependency_edges(claim_id,dependency_id);
+CREATE VIEW IF NOT EXISTS claim_verdict_dependency_links AS
+    SELECT link,claim_id FROM claim_verdict_links
+    UNION ALL
+    SELECT k.link,e.claim_id FROM claim_verdict_dependency_keys k
+    JOIN claim_verdict_dependency_edges e ON e.dependency_id=k.id;
+```
+
+Readers conservatively include both dependency representations. Paged invalidation deduplicates
+claim IDs before applying canonical claim-ID order and the 1,024-row limit. Newly recorded
+dependencies still use `claim_verdict_links`, including in version-22 stores; this reader release
+does not populate integer edges, convert existing links, or activate a production writer cutover.
+These tables and their view are local caches outside shared digests, replicated claim vocabulary
+and historical reconstruction. Installation requires neither claim replay nor a history scan.
 
 ## Local message selectors
 
@@ -580,7 +674,11 @@ The fourteen page indexes are partial on `born_index >= 0` and order by `sent_ke
 
 Triggers on `claims` (insert, update, delete) for `message/` subjects and on `desired` (insert, update, delete) add a pending row with the reason. Insert triggers mark only claims that can change a selector field: `message.sent`, `message.closed`, `intent.desired`, or a claim that sets `from`, `to`, `tags` or `status`. A body-only edit adds no new header version. Deleting a `desired` row immediately clears the fields it supplied (`desired_mask`) and recomputes eligibility only for that subject and the old/new global and affected-recipient reminder winners. Each candidate or previous-winner lookup is an indexed seek with `LIMIT 1`, in canonical `version DESC, subject DESC` order for candidates; it never enumerates or updates the superseded open members of a reminder group. At most seven live headers and one subject-keyed pending row are touched per desired deletion, independent of group size. The pending row retains the old reminder and recipient for bounded durable reconciliation. A fresh page therefore never shows a removed declaration, even before the transaction's flush.
 
-A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). A read that hears a host's close queues it without waiting for the writer; a background writer records at most 64 per transaction, and its insert trigger adds a pending row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
+A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). Daemon-owned maintenance discovers remote closes independently of GETs. Relevant selector, recipient ownership and daemon-feature changes enqueue durable host/recipient/message keys in `local_relayed_close_work`; bounded indexed seeks update only the affected candidates. An unchanged open answer consumes its key and is not periodically rediscovered. Settlement reads host-owned seats through the declared-member host index, not the full desired population. A background writer records at most 64 closes per transaction; discovery waits for each bounded page to settle before admitting more, and its insert trigger adds a pending selector row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
+
+Hosts advertising `message_mark_events: 1` expose authenticated long-poll event pages through the seat-freshness relay. Indexed graph-mark, held-message, recipient-ownership and shard-lifecycle changes return message or consumer keys. Empty transport keepalives do not rebuild message answers or rerun discovery. An initial cursor, daemon restart or retained-event gap resets only that host's local candidate set. Disconnected subscriptions reconnect with network backoff, not a discovery interval. During mixed-version operation, only hosts lacking this capability retain a 30-second compatibility schedule: it seeks their already indexed pending message candidates, never rebuilds the relay-host mapping or scans other hosts. Upgrading a host replaces this compatibility arm with its event subscription. Remove the arm once every active relay host advertises the feature and `legacy_peer_discovery_passes` stays zero. `/v1/performance` exports `relayed_close_work.discovery_passes`, `candidate_messages`, `remote_event_pages`, `remote_changed_messages` and `legacy_peer_discovery_passes`; unchanged inputs with capable peers must add zero discovery passes and candidate messages.
+
+Discovery retains a durable read job until a successful marks answer. A failed remote read schedules an explicit exponential network retry deadline (one to sixty seconds), independent of the event subscription. Successful terminal answers commit to `local_relayed_message_closes_pending` before their read jobs are acknowledged; final recording and pending-evidence deletion share a transaction. A local writer failure retains that evidence across restart, surfaces an error, and suspends maintenance until actual committed writer recovery; it never starts a local-failure retry timer. Event cursors advance only after their local changed-key admission succeeds.
 
 The seventh source-change trigger, `client_selector_repair`, watches `replica_records` updates of `state` and `replacement_claim_id`. A message claim newly marked `repaired`, or already repaired with a changed replacement claim, queues a full selector fold and a destructive quarantine marker. The paired epoch trigger invalidates previously issued cuts for both initial repair and replacement reselection.
 

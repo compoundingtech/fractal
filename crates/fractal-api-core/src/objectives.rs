@@ -75,6 +75,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
             )),
             "cpu" => rows.extend(cpu(about, target)),
             "database" => rows.push(database(about, target)),
+            "database-archive" => rows.push(database_archive(about, target)),
             _ if target["min_percent"].is_number() => rows.push(share(name, about, target)),
             _ => {
                 rows.push(p99(name, about, "requests", target["p99_ms"].as_f64(), &target["windows"]));
@@ -159,9 +160,22 @@ fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, eviden
         if no_events { "no-qualifying-events" } else { "no-data" },
     );
     let diagnostic_target = row["target"].as_str().unwrap_or_default().to_owned();
-    let diagnostic_current = row["current"].as_str().unwrap_or_default().to_owned();
+    let sparse_diagnostic_empty = matches!(row["id"].as_str(), Some("terminal-attach" | "person-read-fresh"))
+        && row["status"] == "no-data";
+    let retained_hour_events = window(3_600_000).and_then(|window| window["eligible"].as_f64())
+        .filter(|_| evidence["available"] == true);
+    let retained_hour_has_events = retained_hour_events.is_some_and(|events| events > 0.0);
+    let diagnostic_current = if let Some(events) = retained_hour_events.filter(|events| sparse_diagnostic_empty && *events > 0.0) {
+        format!("p99 unavailable in this process; {events} qualifying events retained in the last hour")
+    } else {
+        row["current"].as_str().unwrap_or_default().to_owned()
+    };
+    let sparse_empty = sparse_diagnostic_empty && !retained_hour_has_events;
     let unit = if cadence_ms == 0 { "events" } else { "covered milliseconds" };
-    let coverage = window(policy.horizon_ms).and_then(|window| window["coverage"].as_f64()).unwrap_or_default();
+    let coverage = window(policy.horizon_ms).and_then(|window| window["coverage"].as_f64())
+        .filter(|_| evidence["available"] == true);
+    let coverage_text = coverage.map_or_else(|| "unknown observed coverage".to_owned(),
+        |coverage| format!("{:.1}% observed coverage", coverage * 100.0));
     let burn = |evidence: BudgetEvidence| if evidence.eligible && evidence.total > 0.0 {
         format!("{:.2}×", evidence.bad / evidence.total / policy.allowance)
     } else {
@@ -171,14 +185,28 @@ fn native_budget(mut row: Value, policy: &crate::objective::BudgetPolicy, eviden
     let slow = pair(policy.slow);
     row["target"] = json!(format!("≤ {:.1}% bad {unit}; diagnostic {diagnostic_target}", policy.allowance * 100.0));
     row["current"] = json!(format!("{} / {} bad {unit}; diagnostic {diagnostic_current}", horizon.bad, horizon.total));
+    if sparse_empty {
+        row["current"] = json!(if evidence["available"] == true
+            && window(policy.horizon_ms).is_some_and(|window|
+                window["eligible"].as_f64().is_some() && window["bad"].as_f64().is_some()) {
+            format!("No qualifying events in the last hour; {} / {} bad {unit} over the accounting horizon", horizon.bad, horizon.total)
+        } else {
+            "No qualifying events in the last hour; accounting evidence unavailable".to_owned()
+        });
+    }
     row["window"] = json!(if policy.horizon_ms.is_multiple_of(86_400_000) {
         format!("{}d", policy.horizon_ms / 86_400_000)
     } else { duration(policy.horizon_ms) });
     row["remaining_percent"] = json!(remaining);
     row["status"] = json!(status);
+    row["coverage"] = json!(coverage);
+    if sparse_empty && horizon.total == 0.0 {
+        row["status"] = json!("no-data");
+        row["remaining_percent"] = Value::Null;
+    }
     row["explain"] = json!(format!(
-        "{} Operational budget: {:.1}% bad {unit}, {:.1}% observed coverage over {}. Fast pair {}/{} (>{:.1}×); slow pair {}/{} (>{:.1}×). Both windows of a pair must burn; short spikes alone are diagnostic. Missing coverage is unknown, not recovery. Diagnostic aspiration: {diagnostic_target}; {diagnostic_current}.{}",
-        row["about"].as_str().unwrap_or_default(), policy.allowance * 100.0, coverage * 100.0, duration(policy.horizon_ms),
+        "{} Operational budget: {:.1}% bad {unit}, {coverage_text} over {}. Fast pair {}/{} (>{:.1}×); slow pair {}/{} (>{:.1}×). Both windows of a pair must burn; short spikes alone are diagnostic. Missing coverage is unknown, not recovery. Diagnostic aspiration: {diagnostic_target}; {diagnostic_current}.{}",
+        row["about"].as_str().unwrap_or_default(), policy.allowance * 100.0, duration(policy.horizon_ms),
         burn(fast.0), burn(fast.1), policy.fast.burn_rate, burn(slow.0), burn(slow.1), policy.slow.burn_rate,
         if cadence_ms == 0 { "" } else { " Hourly evidence uses cadence-aware pairs: 2h+1h and 6h+1h." },
     ));
@@ -215,7 +243,8 @@ fn p99(id: &str, about: &str, what: &str, target_ms: Option<f64>, windows: &Valu
     if samples == 0 && WINDOWS.iter().all(|w| count(&windows[*w]) == 0) {
         return json!({
             "id": id, "kind": "objective", "about": about,
-            "target": format!("p99 ≤ {}", ms(target)), "current": "no samples", "window": "1h",
+            "target": format!("p99 ≤ {}", ms(target)),
+            "current": if matches!(id, "terminal-attach" | "person-read-fresh") { "No qualifying events" } else { "no samples" }, "window": "1h",
             "remaining_percent": null, "status": "no-data",
             "explain": format!(
                 "{about}. Goal: 99 of every 100 {what} finish within {}. Nothing has been measured in the last hour, so there is no budget to spend or save yet.",
@@ -335,7 +364,9 @@ fn cpu(about: &str, target: &Value) -> [Value; 2] {
             ),
         }),
         None => json!({
-            "current": if verdict.minutes < 60 {
+            "current": if crate::slo::cpu_idle_busy(target) {
+                "not eligible: busy".to_owned()
+            } else if verdict.minutes < 60 {
                 format!("unknown: {} of 60 minutes held", verdict.minutes)
             } else {
                 format!("unknown: {}, needs {needed}", plural(verdict.idle_minutes, "idle minute"))
@@ -360,6 +391,38 @@ fn cpu(about: &str, target: &Value) -> [Value; 2] {
             "explain": idle["explain"],
         }),
     ]
+}
+
+/// The inactive archive gauge has observations, not a configured allowance or health verdict.
+fn database_archive(about: &str, target: &Value) -> Value {
+    let size = &target["size"];
+    let (status, current) = if size.is_null() {
+        ("no-data", "not measured yet".to_owned())
+    } else if target["fresh"] != true {
+        ("stale", "stale measurement; current archive size and growth unknown".to_owned())
+    } else {
+        match target["status"].as_str() {
+            Some("not-activated") => ("not-eligible", "not activated; archive size and growth unknown".to_owned()),
+            Some("available") => {
+                let bytes = size["archive_bytes"].as_u64()
+                    .map_or_else(|| "archive bytes unknown".to_owned(), |bytes| format!("archive {bytes} bytes"));
+                let capacity = size["capacity_bytes"].as_u64()
+                    .map_or_else(|| "capacity bytes unknown".to_owned(), |bytes| format!("capacity {bytes} bytes"));
+                let growth = size["growth_bytes_per_day"].as_i64()
+                    .map_or_else(|| "growth unknown (daily baseline not available)".to_owned(), |bytes| format!("growth {bytes:+} bytes a day"));
+                ("not-eligible", format!("{bytes}, {capacity}, {growth}"))
+            }
+            _ => ("no-data", "measurement unavailable; archive size and growth unknown".to_owned()),
+        }
+    };
+    json!({
+        "id": "database-archive", "kind": "objective", "about": about,
+        "target": "observational only; no configured target", "current": current, "window": "1d",
+        "remaining_percent": null, "status": status, "budget": null,
+        "fresh": target["fresh"], "measurement_status": target["status"], "size": size,
+        "integrity": target["integrity"], "catalogue_coverage": target["catalogue_coverage"],
+        "explain": format!("{about}. {current}. No configured target or budget; these bytes do not prove hot-store savings or durability. Integrity is not assessed and catalogue coverage is unknown."),
+    })
 }
 
 fn database(about: &str, target: &Value) -> Value {
@@ -638,6 +701,76 @@ pub fn find<'a>(rows: &'a [Value], id: &str) -> Result<&'a Value, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_row_corpus_covers_every_shipped_row() {
+        use crate::objective::Indicator;
+
+        let mut targets: Vec<_> = crate::slo::shipped().iter()
+            .filter(|objective| !matches!(objective.indicator, Indicator::Divergence))
+            .map(|objective| {
+                let mut target = json!({"name": objective.name});
+                if objective.target("p99", true).is_some() {
+                    target["remote_windows"] = json!({});
+                }
+                target
+            })
+            .collect();
+        // The observational archive gauge is emitted by the native report, not a configured objective.
+        targets.push(json!({"name": "database-archive", "kind": "gauge", "fresh": false,
+            "size": null, "integrity": "not-assessed", "catalogue_coverage": null, "budget": null}));
+        let mut emitted = rows(&json!({"targets": targets}), &[], 0, 0);
+        emitted.push(divergence(0));
+        let store = crate::store::Store::open_memory("node").unwrap();
+        emitted.push(crate::roll_completion::row(&store, 0));
+        let mut actual: Vec<_> = emitted.iter().map(|row| row["id"].as_str().unwrap()).collect();
+        actual.sort_unstable();
+        let corpus: Value = serde_json::from_str(include_str!("../../../fixtures/objective-native-rows.json")).unwrap();
+        let expected: Vec<_> = corpus["rows"].as_array().unwrap().iter().map(|row| row.as_str().unwrap()).collect();
+        assert_eq!(actual, expected, "update the shared Rust/TypeScript native row corpus when emitted rows change");
+    }
+
+    #[test]
+    fn archive_objectives_preserve_unknown_observations_without_a_latency_target() {
+        let available = json!({"name": "database-archive", "kind": "gauge", "about": "Archive capacity",
+            "fresh": true, "status": "available", "size": {"archive_bytes": 42, "capacity_bytes": 64,
+                "growth_bytes_per_day": null}, "integrity": "not-assessed",
+            "catalogue_coverage": null, "budget": null});
+        let mut missing = available.clone();
+        missing["fresh"] = json!(false);
+        missing["status"] = Value::Null;
+        missing["size"] = Value::Null;
+        let mut stale = available.clone();
+        stale["fresh"] = json!(false);
+        stale["status"] = Value::Null;
+        let mut inactive = available.clone();
+        inactive["status"] = json!("not-activated");
+        inactive["size"] = json!({"archive_bytes": null, "capacity_bytes": null, "growth_bytes_per_day": null});
+        let mut unavailable = inactive.clone();
+        unavailable["status"] = json!("unavailable");
+        for (target, status, current) in [
+            (missing, "no-data", "not measured yet"),
+            (stale, "stale", "stale measurement"),
+            (available, "not-eligible", "archive 42 bytes, capacity 64 bytes, growth unknown"),
+            (inactive, "not-eligible", "not activated"),
+            (unavailable, "no-data", "measurement unavailable"),
+        ] {
+            let report = json!({"targets": [target]});
+            let emitted = rows(&report, &[], 0, 0);
+            assert_eq!(emitted.len(), 1);
+            let row = by_id(&emitted, "database-archive");
+            assert_eq!(row["status"], status);
+            assert!(row["current"].as_str().unwrap().contains(current), "{row}");
+            assert_eq!(row["target"], "observational only; no configured target");
+            assert!(row["remaining_percent"].is_null());
+            assert!(row["budget"].is_null());
+            assert_eq!(row["integrity"], "not-assessed");
+            assert!(row["catalogue_coverage"].is_null());
+            assert_eq!(row["size"], report["targets"][0]["size"]);
+            assert_eq!(row["measurement_status"], report["targets"][0]["status"]);
+            assert!(!row["explain"].as_str().unwrap().contains("p99"));
+        }
+    }
+
     fn window(count: u64, p99: f64, over: u64) -> Value {
         json!({"count": count, "p50_ms": 1.0, "p99_ms": p99, "max_ms": p99 + 1.0,
             "over_target": over, "over_target_share": over as f64 / count.max(1) as f64})
@@ -734,6 +867,83 @@ mod tests {
     }
 
     #[test]
+    fn sparse_organic_latency_shows_no_qualifying_events_and_coverage() {
+        for name in ["terminal-attach", "person-read-fresh"] {
+            for coverage in [None, Some(0.0), Some(0.25), Some(1.0)] {
+                let mut evidence = retained_budget(0, 0);
+                for window in evidence["windows"].as_object_mut().unwrap().values_mut() {
+                    window["coverage"] = json!(coverage);
+                }
+                let report = json!({"targets": [{
+                    "name": name, "about": "Organic successful first response", "p99_ms": 200,
+                    "windows": windows(0, 0.0, 0), "budget": evidence,
+                }]});
+                let rendered = rows(&report, &[], 0, 0);
+                let row = by_id(&rendered, name);
+                assert_eq!(row["status"], "no-data");
+                assert!(row["remaining_percent"].is_null());
+                assert!(row["current"].as_str().unwrap().starts_with("No qualifying events"));
+                assert_eq!(row["coverage"], json!(coverage));
+                let expected = coverage.map_or_else(|| "unknown observed coverage".to_owned(),
+                    |coverage| format!("{:.1}% observed coverage", coverage * 100.0));
+                assert!(row["explain"].as_str().unwrap().contains(&expected));
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_terminal_coverage_is_unknown_without_ledger_evidence() {
+        let report = json!({"targets": [{
+            "name": "terminal-attach", "p99_ms": 200, "windows": windows(0, 0.0, 0),
+        }]});
+        let rendered = rows(&report, &[], 0, 0);
+        let row = by_id(&rendered, "terminal-attach");
+        assert_eq!(row["status"], "no-data");
+        assert!(row["remaining_percent"].is_null());
+        assert!(row["coverage"].is_null());
+        assert_eq!(row["current"], "No qualifying events in the last hour; accounting evidence unavailable");
+        assert!(row["explain"].as_str().unwrap().contains("unknown observed coverage"));
+    }
+
+    #[test]
+    fn a_quiet_terminal_hour_preserves_eligible_accounting_history() {
+        let mut evidence = retained_budget(100, 0);
+        evidence["windows"]["1h"]["eligible"] = json!(0);
+        evidence["windows"]["1h"]["samples"] = json!(0);
+        let report = json!({"targets": [{
+            "name": "terminal-attach", "p99_ms": 200, "windows": windows(0, 0.0, 0),
+            "budget": evidence,
+        }]});
+        let rendered = rows(&report, &[], 0, 0);
+        let row = by_id(&rendered, "terminal-attach");
+        assert_eq!(row["status"], "met");
+        assert_eq!(row["remaining_percent"], 100.0);
+        assert_eq!(row["coverage"], 1.0);
+        assert!(row["current"].as_str().unwrap().starts_with("No qualifying events"));
+    }
+
+    #[test]
+    fn a_restart_does_not_erase_retained_hourly_qualifying_events() {
+        for name in ["terminal-attach", "person-read-fresh"] {
+            // The process-local histogram starts empty, but the durable hour still has events.
+            let report = json!({"targets": [{
+                "name": name, "p99_ms": 200, "windows": windows(0, 0.0, 0),
+                "budget": retained_budget(100, 0),
+            }]});
+            let rendered = rows(&report, &[], 0, 0);
+            let row = by_id(&rendered, name);
+            assert_eq!(row["status"], "met");
+            assert_eq!(row["remaining_percent"], 100.0);
+            assert_eq!(row["coverage"], 1.0);
+            for field in ["current", "explain"] {
+                let text = row[field].as_str().unwrap();
+                assert!(text.contains("100 qualifying events retained in the last hour"), "{text}");
+                assert!(!text.contains("No qualifying events"), "{text}");
+            }
+        }
+    }
+
+    #[test]
     fn a_native_latency_budget_is_distinct_from_the_percentile_aspiration() {
         let report = json!({"targets": [
             {"name": "person-read", "about": "Reads a person waits on", "p99_ms": 100,
@@ -806,6 +1016,61 @@ mod tests {
         assert_eq!(by_id(&rows, "transaction/write")["remaining_percent"], 0.0);
         assert_eq!(by_id(&rows, "transaction/write")["status"], "exhausted");
         assert_eq!(by_id(&rows, "transaction/writer_hold")["status"], "no-data");
+    }
+
+    #[test]
+    fn measured_latency_mix_needs_the_missing_accounting_and_slow_windows() {
+        let policy = crate::slo::shipped().iter().find(|objective| objective.name == "person-read").unwrap().budget.as_ref().unwrap();
+        let diagnostic = p99("person-read", "Reads", "requests", Some(300.0), &windows(5213, 5242.879, 1837));
+        let mut evidence = retained_budget(0, 0);
+        for window in evidence["windows"].as_object_mut().unwrap().values_mut() {
+            window["coverage"] = json!(0.0);
+        }
+        for (name, total, bad) in [("1h", 5213, 1837), ("5m", 477, 185)] {
+            evidence["windows"][name]["eligible"] = json!(total);
+            evidence["windows"][name]["bad"] = json!(bad);
+            evidence["windows"][name]["samples"] = json!(total);
+            evidence["windows"][name]["coverage"] = json!(1.0);
+        }
+        // Eligible hour/five-minute evidence alone cannot prove either 30d accounting or
+        // the six-hour/thirty-minute pair. A 7x burn is below the fast 14.4x threshold.
+        let partial = native_budget(diagnostic.clone(), policy, &evidence, 0);
+        assert_eq!(partial["status"], "no-data");
+        assert!(partial["remaining_percent"].is_null());
+        assert!(partial["explain"].as_str().unwrap().contains("Fast pair 7.05×/7.76×"));
+        assert!(partial["explain"].as_str().unwrap().contains("slow pair unknown/unknown"));
+
+        // This is a sustained-load scenario, not reconstructed history: if independent
+        // covered slow windows have the same >30% slow mix, the slow pair burns.
+        for name in ["6h", "30m"] {
+            evidence["windows"][name]["eligible"] = json!(5213);
+            evidence["windows"][name]["bad"] = json!(1837);
+            evidence["windows"][name]["samples"] = json!(5213);
+            evidence["windows"][name]["coverage"] = json!(1.0);
+        }
+        let sustained = native_budget(diagnostic, policy, &evidence, 0);
+        assert_eq!(sustained["status"], "burning");
+        assert!(sustained["remaining_percent"].is_null());
+    }
+
+    #[test]
+    fn transaction_write_below_one_percent_keeps_the_max_miss_diagnostic() {
+        // A representative 0.45% slow mix, under complete retained coverage. The max is
+        // still a miss; neither the diagnostic miss nor its magnitude empties the ratio.
+        let mut write = windows(210097, 139.263, 944);
+        for name in WINDOWS {
+            write[name]["max_ms"] = json!(19074.382);
+        }
+        write["budget"] = retained_budget(210097, 944);
+        let report = json!({"targets": [{"name": "transaction", "about": "Transactions", "max_ms": 300,
+            "read": windows(0, 0.0, 0), "write": write, "writer_hold": windows(0, 0.0, 0)}]});
+        let rows = rows(&report, &[], 0, 0);
+        let row = by_id(&rows, "transaction/write");
+        assert_eq!(row["status"], "met");
+        assert!(row["remaining_percent"].as_f64().unwrap() > 55.0);
+        assert!(row["remaining_percent"].as_f64().unwrap() < 55.1);
+        assert!(row["target"].as_str().unwrap().contains("≤ 1.0% bad events; diagnostic max ≤ 300 ms"));
+        assert!(row["explain"].as_str().unwrap().contains("19074 ms"));
     }
 
     #[test]
@@ -899,6 +1164,13 @@ mod tests {
         let (_, idle) = both(target(Some(0.4), 60, 9, Some(0.01)));
         assert_eq!((idle["status"].as_str(), idle["current"].as_str()), (Some("no-data"), Some("unknown: 9 idle minutes, needs 10")));
         assert_eq!(idle["remaining_percent"], Value::Null);
+        let mut busy = target(None, 60, 0, None);
+        busy["targets"][0]["idle"]["not_idle"]["seat"] = json!(59);
+        let (hour, idle) = both(busy);
+        assert_eq!(idle["current"], "not eligible: busy");
+        assert_eq!(idle["status"], "no-data");
+        assert_eq!(idle["remaining_percent"], Value::Null);
+        assert_eq!(hour["status"], "no-data", "ineligibility must not hide missing whole-hour CPU");
         // A daemon up less than the hour: both unknown.
         let (hour, idle) = both(target(None, 42, 30, Some(0.01)));
         assert_eq!((hour["status"].as_str(), idle["status"].as_str()), (Some("no-data"), Some("no-data")));
@@ -1055,7 +1327,7 @@ mod tests {
         for latency in &crate::slo::targets().latency {
             assert!(rows.iter().any(|row| row["id"] == latency.name.as_str()), "{} is missing", latency.name);
         }
-        for id in ["sql-statement", "transaction/read", "cpu", "cpu/idle", "database"] {
+        for id in ["sql-statement", "transaction/read", "cpu", "cpu/idle", "database", "database-archive"] {
             assert!(rows.iter().any(|row| row["id"] == id), "{id}");
         }
         let mut ids = rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();

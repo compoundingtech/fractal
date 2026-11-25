@@ -14,7 +14,25 @@ fn append(store: &Store, subject: &str, at: u128, fields: Value) -> String {
     claim.id
 }
 
+/// Finish the preparation a delivery deferred before a fenced read. The writer runs it in paced
+/// turns between loans (#6859), and one landing between the fence's seed and its check moves the
+/// cut, which the fence rightly refuses. Waiting for those turns timed out on a loaded host, so
+/// the test drains the work itself, on the writer, until none is left.
+fn settle(store: &Store) {
+    for _ in 0..10_000 {
+        if !store.runtime.deferred_pending(&store.readers.get()).unwrap() {
+            return;
+        }
+        let runtime = store.runtime.clone();
+        store.connection.batched(move |transaction| {
+            runtime.rebuild_deferred(transaction, std::time::Duration::from_millis(50))
+        }).unwrap().unwrap();
+    }
+    panic!("deferred preparation must finish");
+}
+
 fn read(store: &Store) -> (Option<Value>, u64) {
+    settle(store);
     let fence = resource_preparation::Fence::new(store);
     let prepared = fence.prepare_with_actuals(store, |connection, serial| {
         let work = smallclaims::sqlite::work::SqliteWorkScope::start();
@@ -72,36 +90,41 @@ proptest! {
     fn observer_actuals_equal_full_fold_across_late_arrivals_repairs_and_nulls(
         reverse in any::<bool>(), nullable in any::<bool>(),
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let target = Store::open(&directory.path().join("store.db"), "cedar").unwrap();
-        let old = Store::open_memory("alder").unwrap();
-        let new = Store::open_memory("birch").unwrap();
-        let old_id = append(&old, SUBJECT, 10, json!({"facts":{"state":"open"},"carried":"kept"}));
-        let new_id = append(&new, SUBJECT, 20, json!({"facts":{"state":"closed"},
-            "nullable":if nullable { Value::Null } else { json!("set") }}));
-        prop_assert_eq!(read(&target).0, None);
-        let sources = if reverse { [&new, &old] } else { [&old, &new] };
-        for source in sources {
-            receive_and_project(&target, &source.origin, &exchange_from(source, &ReplicationInventory::default()));
+        // Admission can install the deferred writer again, so control publication order
+        // throughout delivery as well as open. Unrelated commits correctly stale the fence.
+        smallclaims::sqlite::without_deferred_maintenance_for_test(|| -> Result<(), TestCaseError> {
+            let directory = tempfile::tempdir().unwrap();
+            let target = Store::open(&directory.path().join("store.db"), "cedar").unwrap();
+            let old = Store::open_memory("alder").unwrap();
+            let new = Store::open_memory("birch").unwrap();
+            let old_id = append(&old, SUBJECT, 10, json!({"facts":{"state":"open"},"carried":"kept"}));
+            let new_id = append(&new, SUBJECT, 20, json!({"facts":{"state":"closed"},
+                "nullable":if nullable { Value::Null } else { json!("set") }}));
+            prop_assert_eq!(read(&target).0, None);
+            let sources = if reverse { [&new, &old] } else { [&old, &new] };
+            for source in sources {
+                receive_and_project(&target, &source.origin, &exchange_from(source, &ReplicationInventory::default()));
+                read(&target);
+                prop_assert_eq!(read(&target).1, 0);
+            }
+            let actual = read(&target).0.unwrap();
+            prop_assert_eq!(&actual["carried"], &json!("kept"));
+            prop_assert_eq!(&actual["nullable"], &if nullable { Value::Null } else { json!("set") });
+            // A named repair excludes an original already represented in a warm reduction.
+            target.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h8c4637c155a8 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&new_id]).unwrap();
+            let repaired = read(&target);
+            prop_assert!(repaired.1 > 0);
+            prop_assert_eq!(&repaired.0.unwrap()["facts"]["state"], &json!("open"));
+            // Undo and direct source mutations are conservatively global invalidations.
+            target.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-ha217fa8e64a8 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_digest_repaired_claims WHERE id=?1", [&new_id]).unwrap();
             read(&target);
-            prop_assert_eq!(read(&target).1, 0);
-        }
-        let actual = read(&target).0.unwrap();
-        prop_assert_eq!(&actual["carried"], &json!("kept"));
-        prop_assert_eq!(&actual["nullable"], &if nullable { Value::Null } else { json!("set") });
-        // A named repair excludes an original already represented in a warm reduction.
-        target.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h8c4637c155a8 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&new_id]).unwrap();
-        let repaired = read(&target);
-        prop_assert!(repaired.1 > 0);
-        prop_assert_eq!(&repaired.0.unwrap()["facts"]["state"], &json!("open"));
-        // Undo and direct source mutations are conservatively global invalidations.
-        target.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-ha217fa8e64a8 owner=fractal_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_digest_repaired_claims WHERE id=?1", [&new_id]).unwrap();
-        read(&target);
-        target.connection.write().execute(
-            /* sqlite-large-value: allow-for-now lv-h9d654011ce51 owner=fractal_store::store::observer_actuals_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.carried','changed') WHERE id=?1", [&old_id]).unwrap();
-        prop_assert_eq!(&read(&target).0.unwrap()["carried"], &json!("changed"));
+            target.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h9d654011ce51 owner=fractal_store::store::observer_actuals_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.carried','changed') WHERE id=?1", [&old_id]).unwrap();
+            prop_assert_eq!(&read(&target).0.unwrap()["carried"], &json!("changed"));
+            Ok(())
+        })?;
     }
 }
 
@@ -382,25 +405,30 @@ proptest! {
         width in 1usize..4,
         copies in 1usize..3,
     ) {
-        let exchange = tied_actuals_fixture();
-        prop_assert!(exchange.envelopes.len() <= ranks.len());
-        let mut order = (0..exchange.envelopes.len()).collect::<Vec<_>>();
-        order.sort_by_key(|&index| (ranks[index], index));
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("store.db");
-        let target = Store::open(&path, "elm").unwrap();
-        for chunk in order.chunks(width) {
-            let envelopes = chunk.iter().flat_map(|&index|
-                std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
-            let admission = receive_and_project(&target, "dogwood",
-                &crate::store::tests_shared_seats::exchange_of("dogwood", envelopes));
-            prop_assert_eq!((admission.invalid, admission.unknown), (0, 0));
-            // Each read warms the reduction the next delivery must invalidate or extend.
-            read(&target);
-        }
-        prop_assert_eq!(&read(&target).0, tied_actuals_reference());
-        drop(target);
-        let target = Store::open(&path, "elm").unwrap();
-        prop_assert_eq!(&read(&target).0, tied_actuals_reference());
+        // Cover fixture creation, every delivery, and reopen: admission can install the
+        // deferred writer even when the constructor did not install it.
+        smallclaims::sqlite::without_deferred_maintenance_for_test(|| -> Result<(), TestCaseError> {
+            let exchange = tied_actuals_fixture();
+            prop_assert!(exchange.envelopes.len() <= ranks.len());
+            let mut order = (0..exchange.envelopes.len()).collect::<Vec<_>>();
+            order.sort_by_key(|&index| (ranks[index], index));
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("store.db");
+            let target = Store::open(&path, "elm").unwrap();
+            for chunk in order.chunks(width) {
+                let envelopes = chunk.iter().flat_map(|&index|
+                    std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
+                let admission = receive_and_project(&target, "dogwood",
+                    &crate::store::tests_shared_seats::exchange_of("dogwood", envelopes));
+                prop_assert_eq!((admission.invalid, admission.unknown), (0, 0));
+                // Each read warms the reduction the next delivery must invalidate or extend.
+                read(&target);
+            }
+            prop_assert_eq!(&read(&target).0, tied_actuals_reference());
+            drop(target);
+            let target = Store::open(&path, "elm").unwrap();
+            prop_assert_eq!(&read(&target).0, tied_actuals_reference());
+            Ok(())
+        })?;
     }
 }

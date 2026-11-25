@@ -16,7 +16,7 @@ use fractal_client::{
     ReferenceSemantics, RequestHistoryItem, RequestHistoryPage, SourceEpisode,
 };
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 
 use super::doc::{Doc, Hit, Target};
 use super::text::{self, Run, run};

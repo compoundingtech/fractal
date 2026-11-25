@@ -480,3 +480,223 @@ In [hosted run 44158892426](https://github.com/compoundingtech/fractal/actions/r
 seed 2 converged and trimmed an initial checkpoint with this corpus, so v34's non-trimming
 expectation for seed 2 no longer applies. The v35 never-trim set is `[179]`; exact per-seed
 equality, continuation after excusing the old build, and majority trim coverage remain enforced.
+
+`claims-v36.json` adds `github.fact.observed`, `github.capture.committed`,
+`github.capture.authority`, and `github.capture.fenced` from the complete native registry.
+Versions 1 through 35 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v36.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v36.
+Native capture draws encode typed records: public repository observations have content-derived
+subjects, commits reference admitted authority and fact claim IDs and fact digests, and subsequent
+commits link the preceding commit and increment its sequence. Coverage and completed scan
+checkpoints identify the observed repository. A fencing receipt names the stopped writer's grant
+and final commit; that writer generates no further commits. Dependency-free authority and fact
+draws seed these inputs through ordinary schedule writes rather than hidden fixture appends.
+The focused `the_corpus_generates_valid_native_capture_inputs` regression validates and admits
+all four kinds, checks the commit chain and stopped frontier, and replicates them to the oracle.
+The admission check also verifies the stored `/fields/record` envelope. Capture dependency
+lookups use that same path as the production projection, not the flat body of native missions.
+The full registry-kind coverage assertion remains intact.
+
+Adding kinds changes the shared seeded schedule. The v35 observations above are historical,
+not a measured v36 characterization. Exact per-seed trim equality, old-build-excusal continuation,
+the three-seed cap, and majority trim coverage remain enforced.
+
+`claims-v37.json` adds the eight durable residency evidence kinds from the complete
+reader-first registry. Versions 1 through 36 remain frozen. Regenerate with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v37.json`.
+The simulation and audit reports select v37. Residency inputs bind their host to
+the subject, use integer 0/1 outcome flags and unavailable memory coverage without
+fabricated deltas. The focused residency corpus regression validates every new kind.
+Adding kinds shifts the shared seeded schedule; prior characterization remains
+historical. Exact trim equality, continuation and majority coverage stay enforced.
+
+In [hosted run 44419937655, shard 2](https://github.com/compoundingtech/fractal/actions/runs/44419937655/job/135233311105),
+seed 34 converged without an initial trim, then trimmed on every modern node
+after the old build was excused and the cut advanced (`trimmed=false`,
+`after excuse and cut=Some(true)`), identically on all three attempts.
+The shard passed 6,487 tests and failed only the stale seed-34 trim expectation.
+The measured v37 never-trim set is `[34, 179]`; exact per-seed equality,
+old-build-excusal continuation, the three-seed cap and majority coverage remain enforced.
+
+`claims-v38.json` adds the durable native admission evidence kinds
+`resource.admission.observed`, `resource.admission.coverage`, and `gate.admission.observed`
+to the registry that already includes residency. Versions 1 through 37 remain frozen.
+Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v38.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v38.
+Native admission draws use the originating simulation host, a coherent epoch and simulation
+clock, a typed queued owner, and a finite admission request. Gate evidence records a durable
+accepted outcome with the same onset and observation clock; these facts confer no build grant.
+The focused `the_corpus_generates_valid_native_admission_inputs` regression checks all three
+specifications against the live registry, validates and admits their generated inputs, and
+replicates every resulting claim to the oracle. Full registry-kind coverage remains intact.
+New corpus additions do not relax exact per-seed trim equality, mandatory trimming after
+old-build excusal, the three-seed cap, or majority trim coverage. Any schedule characterization
+must come from actual v38 outcomes rather than assuming historical results still apply.
+
+In [hosted run 44486252490, shard 2](https://github.com/compoundingtech/fractal/actions/runs/44486252490/job/135438980421),
+seed 34 converged and trimmed an initial checkpoint with v38 (`trimmed=true`,
+`after excuse and cut=None`), so its v37 non-trimming expectation no longer applies.
+The shard executed 6,541 tests: 6,540 passed and only the stale seed-34 expectation failed.
+The v38 never-trim set is `[179]`; exact per-seed equality, old-build-excusal continuation,
+the three-seed cap and majority trim coverage remain enforced.
+
+`claims-v39.json` adds the durable `custom.client.observation-minute` summary kind.
+Versions 1 through 38 remain frozen. Regenerate with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v39.json`.
+The simulation and audit reports select v39. Phone summaries retain source-bound
+minute populations and canonical latency histograms; missing minutes are not
+invented by the native evaluator. Previous seeded trim characterizations remain
+historical; exact per-seed equality, old-build-excusal continuation, the three-seed
+cap and majority trim coverage are unchanged.
+
+In hosted run [44551516592](https://github.com/compoundingtech/fractal/actions/runs/44551516592),
+[seed 2](https://github.com/compoundingtech/fractal/actions/runs/44551516592/job/135697651881)
+and [seed 34](https://github.com/compoundingtech/fractal/actions/runs/44551516592/job/135697652144)
+each converged without an initial checkpoint trim, then trimmed on every modern node after
+the old build was excused and the cut advanced (`trimmed=false`,
+`after excuse and cut=Some(true)`), identically on all three attempts. The loader selected
+v39; the failure messages still named the superseded v38 characterization.
+The current v39 never-trim list is `[2, 34, 179]`, retaining the prior seed-179 expectation
+and adding the two measured changes. This run does not establish a full dense-seed
+characterization. Exact per-seed equality, mandatory post-excusal trimming, the three-seed
+cap and majority trim coverage remain enforced; the v38 observations above are unchanged.
+
+`claims-v40.json` aligns native resource admission evidence with losslessly readable
+future class strings and the `recovery-not-allowed` refusal. Versions 1 through 39
+remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v40.json`.
+The v40 simulation and audit reports selected it. Publication still withholds unsupported
+classes and fences recovery refusal observations on signed support from every active
+reader; widening the evidence reader does not widen admission authority.
+The prior seed characterizations remain historical. Exact per-seed trim equality,
+mandatory post-excusal trimming, the three-seed cap and majority coverage are unchanged.
+
+## Local trim (2026-11-20)
+
+Shared checkpoint agreement is removed: members no longer seal, verify, excuse or adopt, and
+each trims its own cuts. The suite keeps the v40 corpus and its seeds, and the scheduler keeps
+partitions, offline days, clock skew, crashes at trim boundaries, restarts, new empty nodes and
+an old build, which is now a node with `[trim] local = false`. Each modern node's step is its
+own trim (`checkpoint_step` with trim on); the former excusal slot is another trim step, and
+`NEVER_TRIMS` and the old build's excusal continuation are gone. After quiescence the checks
+are: the same retained claims, outside those some node retired, on every trimming node; the
+oracle's projection digests and reader answers on every node; every claim no rule lets a node
+drop, and every person's claim, with the oracle's body; a lacked claim only of a
+`LOCAL_TRIM_KINDS` kind and retired; no invalid or pending record. Exact equality of retained
+and retired sets across trimming nodes, and a node retiring a claim another retired before it
+ever held it, wait for retired IDs to travel with an exchange (TODO: T-wins deletion,
+set-sync S2d); until then such a claim is allowed and that node's `claim_sources`,
+`operations` and graph digest are not compared. The sabotage check is a trim that forgets a
+claim it retired.
+
+## Native turn claim registration
+
+`claims-v41.json` adds the durable `program.turn.report` receipt and optional
+`native_turn`, `native_turn_key`, and `parent_attempt` creation fields. Versions 1 through
+40 remain frozen. It was generated from the native-turn registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v41.json`;
+do not hand-edit the snapshot. The simulation and audit reports selected v41. The native
+report is a system-only once-per-run fact; neither its retention nor its schema grants work
+authority. Local-trim convergence, retained claim equality, oracle reader comparisons,
+person-authored claim preservation, and invalid/pending-record checks remain unchanged.
+
+## Native spend source evidence
+
+`claims-v42.json` adds the optional bounded `usage.limits.observed` source frontiers,
+reset-period observations and explicit unsupported account gaps to the complete
+merged registry. Versions 1 through 41 remain frozen, including main's native-turn
+v41 corpus. Generate v42 with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v42.json`.
+The simulation loader and audit report selected v42. Existing producers may
+omit the new optional fields, but omission cannot assert source completeness.
+The existing usage draw deliberately exercises that legacy-compatible shape;
+authenticated source chains, reordered replay, native owner bindings and period
+bounds have dedicated regressions. No claim kind or historical-kind exclusion is
+added. Member-local trim convergence, retained claim equality, oracle reader
+comparisons, person-authored claim preservation, invalid/pending-record checks and
+majority trim coverage remain enforced. The former shared-checkpoint never-trim
+sets and post-excusal continuation remain historical, not active assertions.
+
+## Native execution and delivery phases
+
+`claims-v43.json` adds durable `step.execution-phase` evidence and the
+`exec_exited_at_unix_ms` and `start_operation` fields on `runtime.observed` to
+main's spend-source registry. Versions 1 through 42 remain frozen, including
+main's native-turn v41 and spend-source v42 snapshots. Generate the complete
+merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v43.json`.
+The execution-phase simulation, diagnostics and audit reports selected v43. The
+active-corpus freshness regression compares the complete generated registry byte-for-byte;
+the focused execution-phase regression also validates a generated phase input.
+Main's local-trim convergence and oracle checks remain unchanged; obsolete shared
+checkpoint agreement and its historical never-trim characterizations are not restored.
+
+Native execution wait accounting is shared through
+`fractal_kernel::step_execution::execution_wait`; both the store's timing fold
+and the reconciler's executor attestation use that leaf helper after the crate split.
+
+## Native-session work lease continuity
+
+`claims-v44.json` adds the durable `work.rebound` evidence kind to main's v43
+registry. Versions 1 through 43 remain frozen. Generate the complete merged registry with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v44.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, freshness check, and audit
+reports selected v44. Rebound inputs identify an agent claimant, a positive attempt, distinct
+old and new harness incarnations, and the native session resumed by the new incarnation.
+The focused `the_corpus_generates_valid_work_rebound_inputs` regression checks the
+specification against the live registry, validates and admits the generated input, and
+replicates it to the oracle.
+
+The complete owning serialization was captured byte-for-byte from the strict registry
+freshness assertion in hosted run
+[45039725615](https://github.com/compoundingtech/fractal/actions/runs/45039725615)
+at source `1653f03a265710ea65d0f3a4d1bb5afddb97cb61`; all three attempts emitted identical
+335,746-byte outputs (SHA-256
+`9464faa501cd654dec87b75744009d595661acefb1bad944d1995565092548d1`).
+After integrating main's final v43, the entire `fractal-schema` crate tree and `Cargo.lock`
+were identical to that captured source before promoting the output as the new v44.
+No historical JSON was hand-merged. Main's local-trim semantics remain unchanged: no
+shared checkpoint agreement, old-build excusal continuation, or historical never-trim
+expectations are reintroduced. Retained claim equality, oracle reader comparisons,
+person-authored claim preservation, invalid/pending-record checks, retired-ledger
+sabotage coverage, and complete active-corpus freshness remain enforced.
+
+## Native model fallback evidence
+
+The native fallback input generator supplies bounded session, incarnation,
+source-event and episode provenance for `harness.model-fallback.observed`, an
+explicit sanitized cause, and the same-subject agent actor. Model mismatch alone
+does not establish fallback. `runtime.action.requested.model_return_attempt`
+records the durably admitted return attempt.
+
+Member-local trim convergence, retained claim equality, oracle reader comparisons,
+person-authored claim preservation, and invalid/pending-record checks remain unchanged.
+
+
+## Combined native execution, work rebound, and model fallback corpus
+
+`claims-v45.json` captures the complete merged registry, including
+`step.execution-phase`, `work.rebound`, and `harness.model-fallback.observed`,
+the execution and delivery fields on `runtime.observed`, and
+`runtime.action.requested.model_return_attempt`. Earlier snapshots remain unchanged.
+The simulation loader, exact registry equality check, and audit reports select v45.
+Regenerate the complete snapshot with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v45.json`;
+never assemble a corpus from individual field deltas or rename a partial snapshot.
+
+This snapshot was recovered losslessly from the owning serialization's complete
+`the_current_corpus_matches_the_registry` assertion output in
+[hosted run 45047378281](https://github.com/compoundingtech/fractal/actions/runs/45047378281),
+`linux-tests-logs` artifact 14766285196, `_temp/ci-logs/tests.log`.
+The source receipt identifies tested merge
+`a417b907ba6794c95eab322e6467a811185e0bfb`, whose `fractal-schema` and
+`fractal-storage-version` sources match head
+`d5784b31bf81211ebff3693fe819ebefb01e74b2`. The bytes are exactly
+`serde_json::to_string_pretty(&fractal_schema::registry().claims)`, with no added
+newline, as emitted by the `claim_corpus` example.
+
+Member-local trim convergence, retained claim equality, oracle reader comparisons,
+person-authored claim preservation, and invalid/pending-record checks remain unchanged.
+

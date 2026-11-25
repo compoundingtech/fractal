@@ -303,7 +303,10 @@ mod tests {
             assert!(!policy.local_code("harness.diagnostic", Some(code)), "{code} must stay a claim");
         }
         assert!(!policy.local_code("harness.diagnostic", None));
-        for code in ["codex-driver-failed", "native-delivery-degraded", "render-warning"] {
+        for code in [
+            "codex-driver-failed", "native-delivery-degraded", "render-warning",
+            "omp-channel-admission-fallback",
+        ] {
             assert!(policy.local_code("harness.diagnostic", Some(code)), "{code} is observability");
         }
         assert!(!policy.local_code("daemon.started", Some("codex-driver-failed")));

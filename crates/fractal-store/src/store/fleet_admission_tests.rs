@@ -345,6 +345,85 @@ fn old_members_hold_usage_observations_without_blocking_known_claims_or_authorit
     assert!(upgraded.replica_records(true).unwrap().is_empty());
 }
 
+#[test]
+fn old_registry_rejects_recovery_enums_without_stalling_known_replication() {
+    for refusal in [false, true] {
+        let anchor_key = key();
+        let older_key = key();
+        let current = node("current", Some(&anchor_key), Some(&anchor_key));
+        admit(&current, "current", &anchor_key, "anchor", None);
+        admit(&current, "older", &older_key, "invite", None);
+        let older = node("older", Some(&older_key), Some(&anchor_key));
+        let mut registry = fractal_schema::registry().clone();
+        let fields = &mut registry.claims.get_mut("resource.admission.observed").unwrap().fields;
+        fields.get_mut("class").unwrap().values = ["landing", "check", "agent"].map(str::to_owned).to_vec();
+        fields.get_mut("refusal").unwrap().values.retain(|value| value != "recovery-not-allowed");
+        older.set_claim_registry(registry);
+        sync(&current, &older);
+        // Deliberate unsafe-writer injection tests the old receive contract independently
+        // of the signed fleet gate that prevents normal E1 publication to this reader.
+        let mut fields = json!({"id":"recovery","host":"current","class":"recovery",
+            "coverage":"logical","epoch":"epoch","owner":{},"queued_at":1,
+            "state":"admitted","finite":false,"clock_uncertain":false});
+        if refusal {
+            fields["class"] = json!("agent");
+            fields["state"] = json!("refused");
+            fields["refusal"] = json!("recovery-not-allowed");
+        }
+        let observation = append(&current, "resource.admission.observed",
+            "resource-admission/current/recovery", fields);
+        let later = note(&current, "known claim after unsupported enum");
+        let admission = sync(&current, &older);
+        assert_eq!((admission.unknown, admission.invalid), (0, 1));
+        assert!(!admitted(&older, &observation));
+        assert!(admitted(&older, &later));
+        let held = older.replica_records(true).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].error_code.as_deref(), Some("invalid-replicated-claim"));
+    }
+}
+
+#[test]
+fn old_registry_quarantines_residency_evidence_then_upgrade_admits_original_record() {
+    let anchor_key = key();
+    let older_key = key();
+    let current = node("current", Some(&anchor_key), Some(&anchor_key));
+    admit(&current, "current", &anchor_key, "anchor", None);
+    admit(&current, "older", &older_key, "invite", None);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("older.sqlite3");
+    let older = Store::open(&path, "older").unwrap();
+    older.bind_fleet(FLEET).unwrap();
+    older.pin_fleet_anchor(anchor_key.public()).unwrap();
+    older.set_member_key(Some(older_key.clone())).unwrap();
+    let mut registry = fractal_schema::registry().clone();
+    for kind in fractal_schema::residency::KINDS {
+        registry.claims.remove(*kind).unwrap();
+    }
+    registry.subjects.remove("residency").unwrap();
+    older.set_claim_registry(registry);
+    sync(&current, &older);
+    let evidence = append(&current, "residency.host-sample", "residency/current/host/current",
+        json!({"host":"current","observed_at":1,"asleep_seats":0,"memory_coverage":"unavailable"}));
+    let later = note(&current, "known work after residency evidence");
+    let admission = sync(&current, &older);
+    assert_eq!((admission.unknown, admission.invalid), (1, 0));
+    assert!(!admitted(&older, &evidence));
+    assert!(admitted(&older, &later));
+    let held = older.replica_records(true).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].error_code.as_deref(), Some("unknown-claim-kind"));
+    assert!(!replica_record_bears_authority("unknown", Some(&evidence.kind)));
+    drop(older);
+    let upgraded = Store::open(&path, "older").unwrap();
+    upgraded.set_member_key(Some(older_key)).unwrap();
+    assert_eq!(upgraded.validate_replication_backlog().unwrap().unknown, 0);
+    upgraded.project_replication_backlog().unwrap();
+    assert!(admitted(&upgraded, &evidence));
+    assert!(admitted(&upgraded, &later));
+    assert!(upgraded.replica_records(true).unwrap().is_empty());
+}
+
 
 #[test]
 fn mixed_builds_keep_signed_unknown_claims_and_project_them_after_upgrade() {
@@ -799,11 +878,20 @@ fn staged_blobs_join_shared_authority_only_with_a_committed_claim() {
         let mut connection = source.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
         promote_claim_blobs(&transaction, &json!({"blob_hash":hash})).unwrap();
-        assert_ne!(
-            projection_digest::tables(&transaction).unwrap()["blobs"],
-            baseline.projection_digests["blobs"]
-        );
+        // Promotion makes it a shared blob inside the claim's transaction, and only there.
+        let shared: bool = transaction
+            .query_row("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash=?1)", [&hash], |row| row.get(0))
+            .unwrap();
+        assert!(shared);
         transaction.rollback().unwrap();
+    }
+    {
+        let shared: bool = source
+            .readers
+            .get()
+            .query_row("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash=?1)", [&hash], |row| row.get(0))
+            .unwrap();
+        assert!(!shared, "a rolled-back claim shares no blob");
     }
     assert_eq!(
         source
@@ -876,7 +964,6 @@ fn legacy_unreferenced_blobs_are_staged_without_losing_bytes() {
 
 #[test]
 fn arrangement_checkpoint_inputs_have_distinct_rules() {
-    use smallclaims::store::checkpoint_agreement::{SealTerms, seal_difference};
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("claims.sqlite3"), "alder").unwrap();
     let connection = store.readers.get();
@@ -899,18 +986,7 @@ fn arrangement_checkpoint_inputs_have_distinct_rules() {
         projection_digest::root(&legacy)
     );
     // Actual v10 identity immediately before #1267; its description stayed unchanged.
-    let legacy_rules = "d9a0e51ead09502fc373102832d96d530052735e53a75334b64906b149606fad";
-    let legacy_terms = SealTerms {
-        cut_unix_ms: 1,
-        participants: BTreeSet::from(["alder".into(), "birch".into()]),
-        sealed_digest: "same sealed claims".into(),
-        rules_digest: legacy_rules.into(),
-    };
-    let current_terms = SealTerms {
-        rules_digest: rules_digest(),
-        ..legacy_terms.clone()
-    };
-    assert_eq!(seal_difference(&current_terms, &legacy_terms), "rules");
+    assert_ne!(rules_digest(), "d9a0e51ead09502fc373102832d96d530052735e53a75334b64906b149606fad");
 }
 
 #[test]

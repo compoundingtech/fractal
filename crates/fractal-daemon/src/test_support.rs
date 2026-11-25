@@ -1,4 +1,4 @@
-//! Process-local fixture tools: st3-api's and st3-api-mailbox's, with the mailbox protocol routers
+//! Process-local fixture tools: fractal-api-core's and fractal-api-mailbox's, with the mailbox protocol routers
 //! over the router the daemon serves.
 
 pub use fractal_api_mailbox::test_support::*;

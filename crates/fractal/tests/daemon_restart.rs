@@ -35,11 +35,11 @@ impl Daemon {
         let log = std::fs::File::create(root.join("daemon.log")).unwrap();
         let _ = tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_env_filter("st3=debug")
+            .with_env_filter("fractal=debug")
             .with_writer(std::sync::Mutex::new(log))
             .try_init();
         let store = Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap();
-        // `st up` copies WAL pages on its own checkpoint thread every five seconds, so its
+        // `fractal up` copies WAL pages on its own checkpoint thread every five seconds, so its
         // writer stays under SQLite's 1000-page automatic checkpoint. This daemon has no such
         // thread: without this, a commit past 1000 pages copies the WAL on the writer and every
         // queued receipt waits for that copy and its fsync. The WAL grows for the test instead.
@@ -3503,9 +3503,10 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
     // Consumption happens while receipt publication is unavailable. The channel
     // must keep proof, retry only the receipt, and never repeat the notification.
     daemon.stop().await;
+    let native_consumed_at = chrono::Utc::now();
     fixture.append(
         root,
-        json!({"type":"user","isMeta":true,
+        json!({"type":"user","isMeta":true,"timestamp":native_consumed_at.to_rfc3339(),
         "message":{"role":"user","content":frame["params"]["content"]}}),
     );
     tokio::time::sleep(Duration::from_millis(1200)).await;
@@ -3522,9 +3523,18 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
                 .unwrap()
                 .status
                 == "read"
+                && daemon.has_diagnostic("agent/quartz", "replacement", "claude-acceptance-frontier-unsettled")
         },
     )
     .await;
+    // Acceptance is independently durable even without the optional seat TODO journal.
+    // Recovery must publish the native clock, not manufacture one from a delivery status.
+    let accepted_at: u64 = daemon.store.readers.get().query_row(
+        "SELECT accepted_at_unix_ms FROM local_mail_input_acceptance_v1
+         WHERE message='message/live' AND recipient='agent/quartz' AND incarnation='replacement'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(accepted_at, u64::try_from(native_consumed_at.timestamp_millis()).unwrap());
     assert!(received.recv_timeout(Duration::from_millis(1200)).is_err());
     assert!(stop(channel).is_empty());
     daemon.observe_running("agent/quartz", "second-restart");

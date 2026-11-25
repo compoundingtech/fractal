@@ -54,7 +54,7 @@ pub const SUPERSEDED_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The table, before any projection backfill folds it in.
 pub fn create_table(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hfe0fdba03f21 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
+        /* sqlite-large-value: allow-for-now lv-h6ddd39fcffe1 owner=fractal_store::store::message_marks TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_message_marks (
     message TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('message.delivered','message.read','message.closed')),
@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS local_message_mark_events (
     message TEXT NOT NULL,
     consumer TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS local_message_mark_scope_events (
+    -- Retention always preserves the newest row, so SQLite's next rowid stays monotonic.
+    -- Avoid AUTOINCREMENT's shared sqlite_sequence scan on every other journal's insert.
+    id INTEGER PRIMARY KEY,
+    message TEXT,
+    consumer TEXT
+);
 ",
     )?;
     Ok(())
@@ -88,7 +95,7 @@ CREATE TABLE IF NOT EXISTS local_message_mark_events (
 /// The triggers, once every projection they maintain exists.
 pub fn create_triggers(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h074f8716f6c1 owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
+        /* sqlite-large-value: allow-for-now lv-hbaf488ab92c8 owner=fractal_store::store::message_marks TODO=prepare-body-and-predecessor-values */ "
 -- The same projection rows a lifecycle claim of the mark's kind writes (see the claim triggers
 -- in store.rs, idle_mail.rs, unread_mail.rs, coordination.rs and client_messages.rs). A lifecycle
 -- claim carries a status field, so it always marks the client selector dirty; a mark does too.
@@ -145,6 +152,42 @@ BEGIN
     INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
     VALUES(OLD.message,-1,1,2)
     ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|2,created_index=created_index+1;
+END;
+-- Held and authorization changes have their own keyed journal: do not manufacture marks.
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_message_insert AFTER INSERT ON message_index
+BEGIN
+    INSERT INTO local_message_mark_scope_events(message) VALUES(NEW.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_message_delete AFTER DELETE ON message_index
+BEGIN
+    INSERT INTO local_message_mark_scope_events(message) VALUES(OLD.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_desired_insert AFTER INSERT ON desired
+WHEN NEW.member IS NOT NULL
+BEGIN
+    INSERT INTO local_message_mark_scope_events(consumer) VALUES(NEW.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_desired_update AFTER UPDATE OF member ON desired
+WHEN OLD.member IS NOT NEW.member
+BEGIN
+    INSERT INTO local_message_mark_scope_events(consumer) VALUES(NEW.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_desired_delete AFTER DELETE ON desired
+WHEN OLD.member IS NOT NULL
+BEGIN
+    INSERT INTO local_message_mark_scope_events(consumer) VALUES(OLD.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS local_mark_scope_trim AFTER INSERT ON local_message_mark_scope_events
+BEGIN
+    DELETE FROM local_message_mark_scope_events WHERE id <= NEW.id - 16384;
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_marks_removed_event AFTER DELETE ON local_message_marks
+BEGIN
+    INSERT INTO local_message_mark_events(message, consumer) VALUES(OLD.message, OLD.consumer);
+END;
+CREATE TRIGGER IF NOT EXISTS local_message_staged_removed_event AFTER DELETE ON local_message_staged
+BEGIN
+    INSERT INTO local_message_mark_events(message, consumer) VALUES(OLD.message, OLD.consumer);
 END;
 ",
     )?;
@@ -360,13 +403,12 @@ pub struct HostMark {
     pub receipt: String,
 }
 
-/// For each of `messages`: whether this member holds it, and the marks of `consumers` it
-/// recorded, a graph message's from `local_message_marks` and a stream item's from the messages
-/// shard's `stream_lifecycle`. What another member asks this host on the seat-freshness relay.
+/// For each of `messages`: whether this member holds it, and the marks of consumers whose
+/// current declarations place them on this host. Graph marks come from `local_message_marks`
+/// and stream marks from the messages shard's `stream_lifecycle`.
 pub fn host_marks(
     store: &Store,
     messages: &[String],
-    consumers: &BTreeSet<String>,
 ) -> Result<Vec<(bool, Vec<HostMark>)>> {
     let mut answers = Vec::with_capacity(messages.len());
     for message in messages {
@@ -375,7 +417,7 @@ pub fn host_marks(
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM message_index WHERE subject=?1)")?
             .query_row(/* sqlite-large-value: allow-for-now lv-h80d0240fd28e owner=fractal_store::store::message_marks TODO=trace-statement-and-value-representation */ [message], |row| row.get(0))?;
         if held {
-            let marks = connection
+            let marks: Vec<HostMark> = connection
                 .prepare_cached(
                     "SELECT kind, consumer, recorded_at_unix_ms, receipt FROM local_message_marks WHERE message=?1
                      UNION ALL SELECT 'message.staged', consumer, recorded_at_unix_ms, receipt
@@ -389,19 +431,15 @@ pub fn host_marks(
                         receipt: row.get(3)?,
                     })
                 })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|mark| consumers.contains(&mark.consumer))
-                .collect();
+                .collect::<rusqlite::Result<_>>()?;
             answers.push((true, marks));
             continue;
         }
         drop(connection);
         match super::messages_shard::lifecycle_marks(store, message)? {
             Some(records) => {
-                let marks = records
+                let marks: Vec<HostMark> = records
                     .into_iter()
-                    .filter(|(_, actor, _)| consumers.contains(actor))
                     .map(|(kind, consumer, recorded_at_unix_ms)| {
                         let receipt = super::messages_shard::lifecycle_receipt(
                             &store.origin,
@@ -422,6 +460,15 @@ pub fn host_marks(
             }
             None => answers.push((false, Vec::new())),
         }
+    }
+    // Authorize only consumers encountered in the requested messages, never the whole graph.
+    let consumers = answers
+        .iter()
+        .flat_map(|(_, marks)| marks.iter().map(|mark| mark.consumer.as_str()))
+        .collect::<BTreeSet<_>>();
+    let hosted = store.hosted_subjects(&consumers.into_iter().collect::<Vec<_>>(), store.origin())?;
+    for (_, marks) in &mut answers {
+        marks.retain(|mark| hosted.contains(&mark.consumer));
     }
     Ok(answers)
 }

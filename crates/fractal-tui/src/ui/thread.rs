@@ -2,10 +2,8 @@
 //! authoritative thread and records after checking the negotiated capability.
 
 use fractal_conversation_ui::doc::Target;
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
+use fractal_conversation_ui::text::{Line, Span};
+use ratatui::style::Style;
 
 use super::{composer, doc::DocExt, text, theme};
 

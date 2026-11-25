@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow exact person-device pairing grants with repeated --person-scope flags, including tag readers without terminal access",
+  "replay": {"status": "none", "detail": "No runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "changed", "detail": "Adds the optional CLI flag --person-scope using the existing person pairing scopes API; requires a daemon supporting explicit person scopes. Default, read-only, full-control and assistant grants are unchanged."},
+  "downtime": {"status": "none", "detail": "No daemon restart or service interruption required."},
+  "manual": {"status": "none", "detail": "No migration required. Operators may repeat --person-scope to select an exact grant when pairing a new device."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}

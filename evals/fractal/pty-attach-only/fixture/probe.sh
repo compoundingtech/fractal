@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(mktemp -d "${TMPDIR:-/tmp}/st3-attach-only.XXXXXX")"
+root="$(mktemp -d "${TMPDIR:-/tmp}/fractal-attach-only.XXXXXX")"
 candidate="attach-only-dead"
 control="legacy-dead"
 live="attach-only-live"

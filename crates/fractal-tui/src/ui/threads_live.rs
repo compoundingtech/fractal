@@ -11,7 +11,7 @@ use fractal_client::{
     ThreadTargetParameters, ThreadTimelineChange, ThreadTimelineEvent,
 };
 use fractal_feed::{THREAD_UPDATES_PAUSED, ThreadAccess, ThreadInterest, model::Model};
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 
 use super::{
     composer,

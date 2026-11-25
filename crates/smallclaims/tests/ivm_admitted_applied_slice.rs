@@ -40,6 +40,33 @@ const REFERENCE_BYTES: usize = 512;
 const JOURNAL_BYTES: u64 = PENDING_ROWS * REFERENCE_BYTES as u64;
 const TOTAL_ROWS: u64 = 4096;
 
+/// A loan-local veto subscribed through the shared resolution owner. The subscription
+/// lives with the connection; dropping this guard disarms it even on an early return
+/// or unwind, without removing the writer's native hook.
+struct CommitRefusal(Arc<AtomicBool>);
+
+impl CommitRefusal {
+    fn install(connection: &Connection, refused: Arc<AtomicBool>) -> Result<Self> {
+        let armed = Arc::new(AtomicBool::new(true));
+        let active = armed.clone();
+        smallclaims::sqlite::observe_transaction_resolution(connection, move || {
+            if active.load(Ordering::Acquire) {
+                refused.store(true, Ordering::Release);
+                true
+            } else {
+                false
+            }
+        }, || {})?;
+        Ok(Self(armed))
+    }
+}
+
+impl Drop for CommitRefusal {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 struct Ledger;
 impl Operator for Ledger {
     fn name(&self) -> &'static str {
@@ -890,16 +917,14 @@ fn page_outer_rollback_and_refused_commit_leave_output_and_coverage_atomic() -> 
     assert!(slice.ready_rows().is_err());
     {
         let mut writer = slice.store.connection.write_background();
-        // Fixture owns this otherwise unconfigured native commit hook; no production hook
-        // replacement is proposed. Remove it before releasing the same writer loan.
-        writer.commit_hook(Some(|| true));
+        let refusal = CommitRefusal::install(&writer, Arc::new(AtomicBool::new(false)))?;
         let result = (|| -> Result<()> {
             let tx = writer.transaction()?;
             slice.installer.publish_prepared(&tx, &page, 1)?;
             tx.commit()?;
             Ok(())
         })();
-        writer.commit_hook(None::<fn() -> bool>);
+        drop(refusal);
         assert!(result.is_err());
         assert!(
             writer.is_autocommit(),
@@ -1872,15 +1897,12 @@ fn applied_prefix_prune_rollback_and_refused_commit_preserve_exact_retention() -
                     }
                 },
             ));
-            if refuse_commit {
-                let refused = commit_refused.clone();
-                // SQLite nonzero commit-hook return converts COMMIT to ROLLBACK.
-                // The exact SQLITE_CONSTRAINT_COMMITHOOK code is checked below.
-                writer.commit_hook(Some(move || {
-                    refused.store(true, Ordering::Release);
-                    true
-                }));
-            }
+            let refusal = if refuse_commit {
+                // A hub subscriber retains SQLite's native veto/error semantics.
+                Some(CommitRefusal::install(&writer, commit_refused.clone())?)
+            } else {
+                None
+            };
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
                     let tx = writer.transaction()?;
@@ -1899,8 +1921,8 @@ fn applied_prefix_prune_rollback_and_refused_commit_preserve_exact_retention() -
                     }
                     Ok(())
                 }));
-            // Also remove both hooks on an unexpected panic before the loan can return.
-            writer.commit_hook(None::<fn() -> bool>);
+            // Disarm the veto and remove the row witness even on an unexpected panic.
+            drop(refusal);
             writer.update_hook(None::<fn(Action, &str, &str, i64)>);
             ensure!(writer.is_autocommit(), "fault prune left an active writer");
             match result {
@@ -2849,13 +2871,7 @@ fn production_journal_prune_refused_commit_preserves_both_consumers() -> Result<
             writer.is_autocommit(),
             "journal commit refusal inherited a transaction"
         );
-        // Private Plain fixture: no observer or existing commit-hook owner is installed.
-        // This fault injection is not an API for replacing a production callback owner.
-        let refused = commit_refused.clone();
-        writer.commit_hook(Some(move || {
-            refused.store(true, Ordering::Release);
-            true
-        }));
+        let refusal = CommitRefusal::install(&writer, commit_refused.clone())?;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
             let tx = writer.transaction()?;
             pair.slice.check(&tx)?;
@@ -2909,8 +2925,8 @@ fn production_journal_prune_refused_commit_preserves_both_consumers() -> Result<
             tx.commit()?;
             Ok(())
         }));
-        // Clear the hook before ANY result/error/panic classification or physical return.
-        writer.commit_hook(None::<fn() -> bool>);
+        // Disarm before ANY result/error/panic classification or physical return.
+        drop(refusal);
         ensure!(
             writer.is_autocommit(),
             "refused journal commit left an active writer"

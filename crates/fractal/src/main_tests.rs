@@ -1,4 +1,39 @@
 #[test]
+fn performance_renders_sqlite_cache_miss_bytes_beside_cpu() {
+    let row = serde_json::json!({
+        "count": 1, "total_ms": 2.0, "max_ms": 2.0, "cpu_ms": 1.0,
+        "sqlite_cache_miss_bytes": 12288, "mmap_major_faults": 7,
+        "kind": "/v1/example", "client": "example"
+    });
+    let report = serde_json::json!({
+        "window_seconds": 300,
+        "requests": [row.clone()], "queries": [row.clone()],
+        "clients": [row.clone()], "client_requests": [row],
+        "sqlite_cache_miss_bytes_note": "Excludes mmap reads.",
+        "mmap_major_faults_note": "Counts, not bytes."
+    });
+    let rendered = render_performance(&report);
+    assert!(rendered.contains("CPU ms · SQLite cache-miss bytes"));
+    assert!(rendered.contains("Excludes mmap reads."));
+    assert_eq!(rendered.matches("12288").count(), 4);
+    assert!(rendered.contains("mmap major faults"));
+    assert!(rendered.contains("Counts, not bytes."));
+    assert_eq!(rendered.matches("12288  7").count(), 4);
+}
+
+#[test]
+fn subject_activity_summary_is_explicit_and_conflicts_with_other_views() {
+    assert!(Cli::try_parse_from([
+        "fractal", "subject", "show", "agent/example", "--activity-summary", "--json", "--daemon-wait", "0",
+    ]).is_ok());
+    for flag in ["--kdl", "--references", "--source"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "subject", "show", "agent/example", "--activity-summary", flag,
+        ]).is_err());
+    }
+}
+
+#[test]
 fn series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets() {
     let cli = Cli::try_parse_from([
         "fractal", "series", "--objective", "factory/work-throughput", "--from", "1000", "--to", "4000",
@@ -481,34 +516,6 @@ fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
 }
 
 #[test]
-fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
-    let mut status = fractal_daemon::store::CheckpointStatusView {
-        node: "alder".into(),
-        newest_stable: None,
-        trimmed: None,
-        halted: false,
-        pending: None,
-        participants: ["alder".into(), "birch".into()].into(),
-        excused: Default::default(),
-        left: Default::default(),
-        machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
-        verification_attempt: None,
-    };
-    let output = render_checkpoint_status(&status);
-    assert!(output.contains("last daemon start (advertised build)"));
-    assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
-    assert!(output.contains("machine_version  birch: not advertised"));
-    status.pending = Some(serde_json::from_value(serde_json::json!({
-        "checkpoint": "checkpoint/test", "cut_unix_ms": 0, "due_at_unix_ms": 0,
-        "local_digest_state": "unavailable", "sealed": [], "disagreeing": {},
-        "unsealed": ["alder", "birch"], "verified": [], "verifications_agree": true,
-        "builds": {}
-    })).unwrap());
-    assert!(status.pending.as_ref().unwrap().terms.is_none());
-    assert!(render_checkpoint_status(&status).contains("local digest unavailable"));
-}
-
-#[test]
 fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
     let seats: Vec<String> = (0..120).map(|n| format!("agent/example/seat-{n}")).collect();
     let mut renewals_per_second = [0usize; 60];
@@ -610,6 +617,157 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let marked = with_device_presence(devices, Some(&found), now);
     assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
     assert_eq!(with_device_presence(devices, None, now), devices);
+}
+
+
+#[test]
+fn native_input_acceptance_uses_source_clock_and_replays_durable_first_timestamp() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume {
+        incarnation: "runtime-a".into(),
+        pending: PiFamilyReports {
+            input_source_dir: Some(root.path().into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut observer = None;
+    // Historical delivered/read frames have no native clock, so cannot become certificates.
+    accept_managed_channel_frame(&mut state, &mut observer,
+        r#"{"type":"delivered","meta":{"messageId":"message/example"}}"#, "agent/example").unwrap();
+    assert!(state.pending.input_acceptances.is_empty());
+    for timestamp in [123, 999] {
+        let frame = json!({"type":"delivered","meta":{"messageId":"message/example","inputIncarnation":"runtime-a"},
+            "acceptedAtUnixMs":timestamp}).to_string();
+        accept_managed_channel_frame(&mut state, &mut observer, &frame, "agent/example").unwrap();
+    }
+    let stale = json!({"type":"delivered","meta":{"messageId":"message/old","inputIncarnation":"runtime-b"},
+        "acceptedAtUnixMs":100}).to_string();
+    accept_managed_channel_frame(&mut state, &mut observer, &stale, "agent/example").unwrap();
+    assert!(!state.pending.input_acceptances.contains_key("message/old"));
+    assert_eq!(state.pending.input_acceptances["message/example"], 123);
+    let recovered = fractal_drivers::native_channel::input_acceptances(root.path()).unwrap();
+    assert_eq!(recovered["message/example"], 123);
+    let resumed: PiChannelResume =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(resumed.pending.input_acceptances, recovered);
+}
+
+#[test]
+fn omp_admission_fallback_is_content_free_fenced_and_once_per_batch_across_reexec() {
+    for reason in ["content-mismatch", "no-message-start", "timeout"] {
+        let mut state = PiChannelResume {
+            incarnation: "runtime-a".into(),
+            ..Default::default()
+        };
+        let mut observer = None;
+        let mut frame = json!({
+            "type": "admission_fallback", "reason": reason, "content": "PRIVATE PROMPT",
+            "meta": {"messageId": "message/first", "identity": "example",
+                "inputIncarnation": "runtime-a", "extra": "PRIVATE METADATA"},
+        });
+        assert!(accept_managed_channel_frame(
+            &mut state, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        assert_eq!(state.pending.admission_fallbacks.len(), 1);
+        assert_eq!(state.pending.admission_fallbacks["message/first"], reason);
+        let input = omp_channel_admission_fallback_claim(
+            "agent/example", &state.incarnation, "message/first", reason,
+        );
+        assert_eq!(input.subject, "agent/example");
+        assert_eq!(input.fields["incarnation_id"], "runtime-a");
+        assert_eq!(input.fields["message_id"], "message/first");
+        assert_eq!(input.fields["reason"], reason);
+        let saved = serde_json::to_string(&state).unwrap();
+        let claim = serde_json::to_string(&input).unwrap();
+        for serialized in [&saved, &claim] {
+            assert!(!serialized.contains("PRIVATE"));
+            assert!(!serialized.contains("\"content\""));
+        }
+        let mut restored: PiChannelResume = serde_json::from_str(&saved).unwrap();
+        assert!(!accept_managed_channel_frame(
+            &mut restored, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        // Publication removes only pending work, not the first-observation deduplication.
+        restored.pending.admission_fallbacks.clear();
+        frame["reason"] = json!("timeout");
+        assert!(!accept_managed_channel_frame(
+            &mut restored, &mut observer, &frame.to_string(), "agent/example",
+        ).unwrap());
+        assert!(restored.pending.admission_fallbacks.is_empty());
+        assert!(restored.pending.acknowledgements.is_empty());
+        assert!(!restored.first_idle_seen);
+    }
+}
+
+#[test]
+fn omp_admission_fallback_rejects_unknown_reason_and_foreign_or_missing_binding() {
+    let valid = json!({
+        "type": "admission_fallback", "reason": "timeout",
+        "meta": {"messageId": "message/first", "identity": "example",
+            "inputIncarnation": "runtime-a"},
+    });
+    for (path, invalid) in [
+        ("/reason", json!("private-unbounded-reason")),
+        ("/reason", Value::Null),
+        ("/meta/inputIncarnation", json!("runtime-b")),
+        ("/meta/inputIncarnation", Value::Null),
+        ("/meta/identity", json!("another-seat")),
+        ("/meta/identity", Value::Null),
+        ("/meta/messageId", json!("")),
+        ("/meta/messageId", Value::Null),
+    ] {
+        let mut state = PiChannelResume { incarnation: "runtime-a".into(), ..Default::default() };
+        let mut frame = valid.clone();
+        *frame.pointer_mut(path).unwrap() = invalid;
+        assert!(!accept_managed_channel_frame(
+            &mut state, &mut None, &frame.to_string(), "agent/example",
+        ).unwrap(), "{frame}");
+        assert!(state.pending.admission_fallbacks.is_empty());
+        assert!(state.admission_fallbacks_seen.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn omp_admission_fallback_outage_retains_pending_observation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume { incarnation: "runtime-a".into(), ..Default::default() };
+    let frame = json!({"type":"admission_fallback","reason":"timeout",
+        "meta":{"messageId":"message/first","identity":"example","inputIncarnation":"runtime-a"}});
+    assert!(accept_managed_channel_frame(
+        &mut state, &mut None, &frame.to_string(), "agent/example",
+    ).unwrap());
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(state.pending.publish(
+        &client, "agent/example", "omp", "runtime-a", "native",
+    ).await.is_err());
+    assert_eq!(state.pending.admission_fallbacks["message/first"], "timeout");
+}
+
+#[tokio::test]
+async fn native_acceptance_outage_retains_certificate_before_any_source_frontier_ack() {
+    let root = tempfile::tempdir().unwrap();
+    fractal_drivers::native_channel::record_input_attempt(
+        root.path(), "message/example", Some(100)).unwrap();
+    fractal_drivers::native_channel::record_input_acceptance(
+        root.path(), "message/example", 123).unwrap();
+    let fence = fractal_daemon::mailbox::Fence::new("agent/example", "runtime-a", "delivery");
+    let mut reports = PiFamilyReports {
+        fence: Some(fence),
+        input_source_dir: Some(root.path().into()),
+        input_source_ready: true,
+        input_acceptances: fractal_drivers::native_channel::input_acceptances(root.path()).unwrap(),
+        acknowledgements: BTreeSet::from(["message/example".into()]),
+        ..Default::default()
+    };
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(reports.publish(&client, "agent/example", "pi", "runtime-a", "native").await.is_err());
+    assert_eq!(reports.input_acceptances["message/example"], 123);
+    assert!(reports.acknowledgements.contains("message/example"),
+        "read/delivered cannot prune native proof before the acceptance POST is acknowledged");
+    let restored: PiFamilyReports =
+        serde_json::from_value(serde_json::to_value(reports).unwrap()).unwrap();
+    assert_eq!(restored.input_acceptances["message/example"], 123);
 }
 
 #[test]
@@ -1887,7 +2045,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         status_from: None,
         attachments: Vec::new(),
     };
-    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
+    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", "runtime-1", &[]);
     assert_eq!(omp["deliverAs"], "steer");
     assert_eq!(
         omp["content"],
@@ -2487,8 +2645,9 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
                     runtime_id: "worker",
                 }
             };
-            // Replay requires no backward staging or invented consumption receipt.
-            mailbox.pump(&client, &agent_dir, receipts).await.unwrap();
+            // Replay requires no backward staging or invented consumption receipt. The
+            // absent daemon cannot ACK a completeness frontier, but queued mail still replays.
+            assert!(mailbox.pump(&client, &agent_dir, receipts).await.is_err());
             let queued = fractal_drivers::push_mailbox::messages(
                 &agent_dir,
                 &agent_dir.join("resources/inbox"),
@@ -2687,6 +2846,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
         },
         loop_state: NativeLoopState {
             paths: None,
+            provider_started_at_ms: 10,
             mailbox_fence: None,
             ready: true,
             harness_record_started: true,
@@ -2757,6 +2917,26 @@ fn a_delivery_report_names_the_process_and_its_channel() {
 }
 
 #[test]
+fn agent_model_observation_survives_the_typed_client_contract() {
+    let mut agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
+        "kind":"agent", "id":"agent/worker", "revision":"one",
+        "updated_at":"2026-10-03T09:00:00Z", "name":"Worker",
+        "state":"running", "reachability":"local", "runtime_ids":[],
+        "declared_model":"anthropic/claude-opus-5-5", "live_model":"gpt-6.1-sol",
+        "model_drift": {
+            "state":"drifted", "drift_since":"2026-10-03T08:00:00Z",
+            "fallback_reason":"transient", "return_attempts":2
+        }
+    })).unwrap();
+    let line = agent_model_line(&agent);
+    assert!(line.contains("declared anthropic/claude-opus-5-5 · live gpt-6.1-sol · drifted"));
+    assert!(line.contains("since 2026-10-03T08:00:00Z · fallback transient · returns 2"));
+    assert!(render_client_agent(&agent, &[], 0).contains(&line));
+    agent.model_drift = None;
+    assert!(agent_model_line(&agent).ends_with("unknown · fallback unknown · returns unknown"));
+}
+
+#[test]
 fn agent_card_todo_preserves_snapshot_and_reports_active_blocked_empty_truncated_stale() {
     let mut agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
         "kind":"agent", "id":"agent/worker", "revision":"one",
@@ -2819,6 +2999,29 @@ fn agent_card_shows_the_member_reconcile_fault() {
     ));
 }
 
+#[test]
+fn agent_card_suspension_shows_cause_and_mode_with_legacy_defaults() {
+    for (metadata, expected) in [
+        (serde_json::json!({}), "manual · git"),
+        (serde_json::json!({"cause":"idle", "mode":"in-place"}), "idle · in-place"),
+        (serde_json::json!({"cause":"future", "mode":"future-mode"}), "future · future-mode"),
+    ] {
+        let mut suspension = serde_json::json!({
+            "action":"suspend", "phase":"suspended", "operation_id":"operation",
+            "updated_at":"2026-11-18T00:00:00Z", "blocking":[]
+        });
+        suspension.as_object_mut().unwrap().extend(metadata.as_object().unwrap().clone());
+        let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
+            "kind":"agent", "id":"agent/sample", "revision":"one", "name":"Sample",
+            "updated_at":"2026-11-18T00:00:00Z", "state":"suspended",
+            "reachability":"local", "runtime_ids":[], "suspension":suspension
+        })).unwrap();
+        assert!(render_client_agent(&agent, &[], 0).contains(
+            &format!("SUSPENSION   suspend suspended · {expected}\n")
+        ));
+    }
+}
+
 fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
     serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/garden/worker", "revision": "one",
@@ -2827,6 +3030,32 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
         "end_reason": end_reason
     }))
     .unwrap()
+}
+
+#[test]
+fn agent_card_residency_is_optional_and_names_policy_epoch_deadline_and_refusal() {
+    let mut agent = stopped_agent(serde_json::Value::Null);
+    assert!(!render_client_agent(&agent, &[], 0).contains("RESIDENCY"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "member".into(),
+        eligible_since: Some("2026-11-18T10:00:00Z".into()),
+        due_at: Some("2026-11-18T10:30:00Z".into()),
+        refusal_reason: None,
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    member\n"));
+    assert!(rendered.contains("  ELIGIBLE   2026-11-18T10:00:00Z\n"));
+    assert!(rendered.contains("  DUE        2026-11-18T10:30:00Z\n"));
+    assert!(!rendered.contains("  REFUSAL"));
+    agent.residency = Some(fractal_client::AgentResidency {
+        policy: "off".into(),
+        eligible_since: None,
+        due_at: None,
+        refusal_reason: Some("policy-off".into()),
+    });
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("RESIDENCY    off\n  REFUSAL    policy-off\n"));
+    assert!(!rendered.contains("  DUE"));
 }
 
 #[test]
@@ -2886,8 +3115,10 @@ fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
         render_client_agents(&page, false, false, "st agents ls"),
         "AGENTS  2\n\
          agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 model declared unknown · live unknown · unknown · fallback unknown · returns unknown\n\
          \x20 stopped by mission-run/garden/one as its run ended at 2026-10-22T09:00:00.000Z\n\
          agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 model declared unknown · live unknown · unknown · fallback unknown · returns unknown\n\
          \x20 stopped, with no recorded reason\n"
     );
     // A running agent prints no stop line, even with an end reason from an earlier incarnation.
@@ -2971,6 +3202,7 @@ fn agent_tree_nests_running_subagents_under_their_agent() {
              └─ crew\n\
              \x20  └─ worker  working · local\n\
              \x20     agent/crew/worker\n\
+             \x20     model declared unknown · live unknown · unknown · fallback unknown · returns unknown\n\
              \x20     ├─ map the code · Explore\n\
              \x20     └─ 019a-thread\n"
     );
@@ -5516,6 +5748,7 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                 &run_id,
                 mission,
                 &"a".repeat(64),
+                false,
                 Path::new("/work/demo"),
                 "agent/operator",
                 &BTreeMap::new(),
@@ -5531,6 +5764,67 @@ fn mission_start_bare_ids_are_scoped_to_each_mission() {
                     .contains_key(&format!("mission-run/{mission}/2026-10-07"))
             );
             assert!(!intent.mission_runs.contains_key("mission-run/2026-10-07"));
+        }
+    }
+}
+
+#[test]
+fn mission_start_preserves_explicit_revision_pin_intent() {
+    let revision = "a".repeat(64);
+    for follow_head in [false, true] {
+        let kdl = mission_run_intent(
+            "release/demo/pin-intent",
+            "release/demo",
+            &revision,
+            follow_head,
+            Path::new("/work/demo"),
+            "person/operator",
+            &BTreeMap::new(),
+            "run",
+            None,
+            None,
+            false,
+        );
+        let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+        let creation = intent.mission_runs["mission-run/release/demo/pin-intent"]
+            .creation.as_ref().unwrap();
+        assert_eq!(creation.revision, revision);
+        assert_eq!(creation.follow_head, follow_head);
+    }
+}
+
+#[test]
+fn mission_start_keeps_exact_declarations_for_older_daemons() {
+    let revision = "a".repeat(64);
+    for (health, supported) in [
+        (json!({}), false),
+        (json!({"capabilities": {}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 0}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 1}}), true),
+    ] {
+        for explicit_revision in [None, Some(revision.as_str())] {
+            let follow_head = mission_start_follows_head(explicit_revision, &health);
+            assert_eq!(follow_head, supported && explicit_revision.is_none());
+            let kdl = mission_run_intent(
+                "release/demo/skew",
+                "release/demo",
+                &revision,
+                follow_head,
+                Path::new("/work/demo"),
+                "person/operator",
+                &BTreeMap::new(),
+                "run",
+                None,
+                None,
+                false,
+            );
+            assert!(kdl.contains(&format!("mission \"mission/release/demo@{revision}\"")), "{kdl}");
+            assert_eq!(kdl.contains("follow-head"), follow_head, "{kdl}");
+            let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+            let creation = intent.mission_runs["mission-run/release/demo/skew"]
+                .creation.as_ref().unwrap();
+            assert_eq!(creation.revision, revision);
+            assert_eq!(creation.follow_head, follow_head);
         }
     }
 }
@@ -5627,6 +5921,7 @@ fn mission_start_after_names_the_run_to_wait_for() {
         "release/demo/2",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -5676,6 +5971,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         "release/demo/3",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -5709,6 +6005,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         "release/demo/4",
         "release/demo",
         &"a".repeat(64),
+        false,
         Path::new("/work/demo"),
         "person/operator",
         &BTreeMap::new(),
@@ -7696,6 +7993,72 @@ fn full_control_device_pairing_is_an_explicit_cli_choice() {
 }
 
 #[test]
+fn person_scope_pairing_parses_exact_scopes_and_conflicts() {
+    let base = ["fractal", "devices", "--as", "person/alex", "pair", "tag-reader"];
+    let scopes = [
+        "--person-scope", "read.projections",
+        "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ];
+    let cli = Cli::try_parse_from(base.into_iter().chain(scopes)).unwrap();
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::Pair { person_scopes, .. }), ..
+    }) = cli.command else {
+        panic!("expected a person pairing command")
+    };
+    assert_eq!(person_scopes, ["read.projections", "read.glasses", "read.arrangements"]);
+    for conflict in ["--read-only", "--full-control", "--assistant"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(scopes).chain([conflict])).is_err());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--person-scope"])).is_err());
+    for rejected in ["unknown.scope", "control.messages", "terminal.write"] {
+        let error = Cli::try_parse_from(base.into_iter().chain(["--person-scope", rejected])).err().unwrap();
+        assert!(error.to_string().contains(rejected), "{error}");
+        assert!(error.to_string().contains("limited pairing scopes"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn person_scope_pairing_sends_exact_request_and_preserves_daemon_error() {
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Some(sent)));
+    let app = axum::Router::new().route(
+        "/v1/client/pairings",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.lock().unwrap().take().unwrap().send(body).unwrap();
+                (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({
+                    "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                    "request_id": "request/pairing-test", "code": "validation",
+                    "message": "daemon scope validation detail", "retryable": false, "details": {}
+                })))
+            }
+        }),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("pairing.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let endpoint = Endpoint::Unix(socket);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cli = Cli::try_parse_from([
+        "fractal", "devices", "--as", "person/alex", "pair", "tag-reader",
+        "--person-scope", "read.projections", "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ]).unwrap();
+    let Command::Devices(args) = cli.command else { panic!("expected devices") };
+    let error = run_devices(endpoint, &Config::default(), args, true).await.unwrap_err();
+    assert!(error.to_string().contains("daemon scope validation detail"), "{error}");
+    let request: PersonPairingBegin = serde_json::from_value(received.await.unwrap()).unwrap();
+    assert_eq!(request.device_name, "tag-reader");
+    assert_eq!(request.person_id, "person/alex");
+    assert_eq!(request.scopes.unwrap(), ["read.projections", "read.glasses", "read.arrangements"]);
+    assert_eq!(request.full_control, None);
+    assert_eq!(request.fabric_gateway, None);
+    server.abort();
+}
+
+#[test]
 fn assistant_read_trust_cli_pins_explicit_keys_and_downward_budgets() {
     let cli = Cli::try_parse_from([
         "st3", "devices", "--as", "person/operator", "grant", "read-trust",
@@ -8157,6 +8520,22 @@ fn predecessor_layout_survives_resume_without_rewriting_catalogs() {
             .paths
             .is_none()
     );
+}
+
+#[test]
+fn native_provider_launch_boundary_survives_driver_reexec() {
+    let state = NativeLoopState {
+        provider_started_at_ms: 10,
+        ..NativeLoopState::default()
+    };
+    let mut encoded = serde_json::to_value(&state).unwrap();
+    let back: NativeLoopState = serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(back.provider_started_at_ms, 10);
+    // Older re-exec state already has an adopted ledger for the same incarnation. A missing
+    // launch boundary must not replace it with a later clock reading and expire live children.
+    encoded.as_object_mut().unwrap().remove("provider_started_at_ms");
+    let back: NativeLoopState = serde_json::from_value(encoded).unwrap();
+    assert_eq!(back.provider_started_at_ms, 0);
 }
 
 #[test]
@@ -9508,6 +9887,84 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
 }
 
 #[tokio::test]
+async fn mission_show_joins_only_the_run_revisions_source_provenance() {
+    use fractal_daemon::SeatsStoreCore as _;
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("publisher").unwrap());
+    let source = r#"version 2
+mission "source-bound" state="ready" {
+  provenance {
+    reason "Republished after reviewed merge."
+    source {
+      repository "https://github.com/example/factory"
+      commit "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      path "graph/demo/mission.ts"
+      renderer "graph-v1"
+    }
+    decision "https://github.com/example/factory/pull/42"
+  }
+  goal "Keep a source-bound schedule."
+  step "hold" { agentless }
+}"#;
+    let intent = fractal_daemon::parse_intent(source, store.origin()).unwrap();
+    store.apply_internal(&intent, "source-bound-publication").unwrap();
+    let mut run = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "source-bound".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("agent/original-owner".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "source-bound-run".into(),
+    }).unwrap();
+    let created = store.latest_claim(&run.subject, Some("mission-run.created")).unwrap().unwrap();
+    let admitted = created.body["fields"]["admission_publication"].as_str().unwrap().to_owned();
+    let newer = source.replace("Keep a source-bound schedule.", "Newer schedule.")
+        .replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .replace("/pull/42", "/pull/43");
+    let intent = fractal_daemon::parse_intent(&newer, store.origin()).unwrap();
+    store.apply_internal(&intent, "newer-publication").unwrap();
+    let (client, server) = serve_test_store(store, root.path(), "publisher").await;
+    let publication = load_run_publication(&client, &run).await.unwrap().unwrap();
+    assert_eq!(publication.claim_id, admitted);
+    assert_eq!(publication.revision, run.revision);
+    run.provenance = None; // An older daemon omitted the existing sidecar.
+    load_run_source_provenance(&client, &mut run).await.unwrap();
+    let provenance = run.provenance.take().unwrap();
+    assert_eq!(provenance.source.commit, "a".repeat(40));
+    assert_eq!(provenance.decision, vec!["https://github.com/example/factory/pull/42"]);
+    assert_eq!(run.requester, "agent/original-owner");
+    run.revision = "0".repeat(64);
+    load_run_source_provenance(&client, &mut run).await.unwrap();
+    assert!(run.provenance.is_none());
+    assert!(load_run_publication(&client, &run).await.unwrap().is_none());
+    server.abort();
+}
+
+#[test]
+fn mission_run_attribution_uses_indexed_receipts_and_follow_caches_the_result() {
+    let root = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("src");
+    let source = fs::read_to_string(root.join("main.rs")).unwrap();
+    let lookup = source.split_once("async fn load_run_publication(").unwrap().1
+        .split_once("async fn load_run_source_provenance(").unwrap().0;
+    assert!(lookup.contains("kind=mission-run.created&order=asc&limit=1"));
+    assert!(lookup.contains("admission_publication"));
+    assert!(lookup.contains("/v1/claims/by-id/"));
+    assert!(!lookup.contains("mission_publications("));
+    assert!(!lookup.contains("before_index"));
+    let follow = source.split_once("async fn follow_mission_run_to(").unwrap().1
+        .split_once("client.follow_recovered()").unwrap().0;
+    assert!(follow.contains("if !attribution.contains_key(&run.revision)"));
+    assert!(follow.contains("let (provenance, publication_note) = &attribution[&run.revision]"));
+    assert!(!follow.contains("mission_publications("));
+    let show_source = fs::read_to_string(root.join("launch_cli.rs")).unwrap();
+    let show = show_source.split_once("MissionViewCommand::Show(").unwrap().1
+        .split_once("print_mission_tree_continuation").unwrap().0;
+    assert!(show.contains("load_run_publication(client, &run)"));
+    assert!(!show.contains("mission_publications("));
+}
+
+#[tokio::test]
 async fn missions_start_names_a_replaced_or_missing_revision() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("single").unwrap());
@@ -9564,6 +10021,11 @@ async fn missions_start_names_a_replaced_or_missing_revision() {
 
     let publications = mission_publications(&client, "arrival").await.unwrap();
     assert_eq!(publications.len(), 2);
+    assert_eq!(publications[0].actor.as_deref(), Some("person/test"));
+    let publication_note = mission_publication_note(publications.first());
+    assert!(publication_note.starts_with("PUBLISHER person/test · single · "));
+    assert!(publication_note.contains(&format!("\nPUBLICATION {}\n", publications[0].claim_id)));
+    assert!(!publication_note.contains("REQUESTER"));
     assert!(
         started_revision_note("arrival", &second, &publications)
             .ends_with("on single. 1 older revision shares this mission name.")
@@ -10656,6 +11118,19 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
 }
 
 #[test]
+fn replication_status_names_stream_fallbacks_since_start_by_code() {
+    assert_eq!(render_stream_fallbacks(&BTreeMap::new()), "none since start");
+    let counts = BTreeMap::from([("internal".to_owned(), 1), ("graph-closed".to_owned(), 2)]);
+    assert_eq!(render_stream_fallbacks(&counts), "graph-closed=2 internal=1 since start");
+    // A daemon from before the count sends no field, which reads as unknown, not as none.
+    let earlier: ReplicationStatus = serde_json::from_value(serde_json::to_value(ReplicationStatus::default()).unwrap()).unwrap();
+    assert_eq!(earlier.stream_fallbacks, None);
+    let current = ReplicationStatus { stream_fallbacks: Some(BTreeMap::new()), ..ReplicationStatus::default() };
+    let value = serde_json::to_value(&current).unwrap();
+    assert_eq!(value["stream_fallbacks"], serde_json::json!({}));
+}
+
+#[test]
 fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
     for family in ["agents", "missions"] {
         let cli = Cli::try_parse_from([
@@ -10689,4 +11164,305 @@ fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
         }
         assert!(Cli::try_parse_from(["st", family, "rename-proof", "agent/example-old"]).is_err());
     }
+}
+
+/// A start after the last page of valid records' bytes was emptied, but before the pages they
+/// held went back, still gives them back.
+#[tokio::test]
+async fn a_start_between_emptying_and_giving_pages_back_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(false, false).await;
+}
+
+#[tokio::test]
+async fn a_start_during_giving_record_pages_back_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(true, false).await;
+}
+
+#[tokio::test]
+async fn a_start_after_a_record_page_reclamation_error_finishes_giving_them_back() {
+    assert_record_pages_resume_after_restart(false, true).await;
+}
+
+async fn assert_record_pages_resume_after_restart(reclaim_a_chunk: bool, fail_reclamation: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    {
+        let store = std::sync::Arc::new(Store::open(&path, "alder").unwrap());
+        // Records an older build kept with their bytes, emptied by this build's pass before a
+        // restart.
+        {
+            let connection = store.connection.write();
+            for n in 0..200 {
+                connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-hbac708a02bc1 owner=fractal::main_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw, state, updated_at_unix_ms)
+                     VALUES (?1, 'birch', ?2, 'envelope', 0, randomblob(9000), 'valid', '0')",
+                    rusqlite::params![format!("record/sample-{n}"), n],
+                ).unwrap();
+            }
+        }
+        while !store.release_valid_record_bytes().unwrap().done {}
+        if reclaim_a_chunk {
+            let released = store
+                .release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE)
+                .unwrap();
+            assert!(released > 0);
+            assert!(released <= smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE);
+        }
+        if fail_reclamation {
+            // A real SQLite write error, not a replacement reclamation implementation.
+            store.connection.write().execute_batch("PRAGMA query_only=ON").unwrap();
+            assert!(store
+                .release_free_pages_in(smallclaims::store::record_bytes::FREE_PAGES_PER_WRITE)
+                .is_err());
+            store.connection.write().execute_batch("PRAGMA query_only=OFF").unwrap();
+        }
+    }
+    let free = |path: &std::path::Path| -> u64 {
+        rusqlite::Connection::open(path).unwrap().query_row("PRAGMA freelist_count", [], |row| row.get(0)).unwrap()
+    };
+    assert!(free(&path) > 0, "the emptied bytes left free pages");
+    let store = std::sync::Arc::new(Store::open(&path, "alder").unwrap());
+    let page = store.release_valid_record_bytes().unwrap();
+    assert!(page.done);
+    assert_eq!(page.emptied, 0, "a restart must reclaim even without newly emptied records");
+    super::release_valid_record_bytes(store.clone(), 0).await;
+    drop(store);
+    assert_eq!(free(&path), 0, "the next start gave them back");
+}
+
+#[tokio::test]
+async fn omp_channel_readiness_publishes_only_durable_incarnation_edges() {
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use fractal_drivers::{harness_events, harness_state};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("amber").unwrap());
+    let lose_ack = Arc::new(AtomicBool::new(true));
+    let app = Router::new().route("/v1/claims", post({
+        let store = store.clone();
+        move |Json(claim): Json<ClaimInput>| {
+            let store = store.clone();
+            let lose_ack = lose_ack.clone();
+            async move {
+                let record = store.append_claim(&claim).unwrap();
+                if claim.kind == "harness.diagnostic" && lose_ack.swap(false, Ordering::SeqCst) {
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"acknowledgement lost"}))).into_response()
+                } else {
+                    Json(json!({"api_version":"st3.v1","value":record})).into_response()
+                }
+            }
+        }
+    })).route("/v1/harness-events", post({
+        let store = store.clone();
+        move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
+            let store = store.clone();
+            async move {
+                let record = store.append_claim(&request.claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
+    let subject = "agent/example/seat";
+    let diagnostic_count = || store.claims_for(subject, Some("harness.diagnostic")).unwrap().len();
+    let mut reason = 0;
+    for (runtime, owner, incarnation, states, expected) in [
+        ("runtime-a", "provider-a", "incarnation-a", vec![true; 32], 1),
+        ("runtime-a", "provider-a", "incarnation-a", vec![false, false], 2),
+        ("runtime-a", "provider-a", "incarnation-a", vec![true, true], 3),
+        ("runtime-a", "provider-a", "incarnation-b", vec![true, true], 4),
+        ("runtime-b", "provider-b", "incarnation-c", vec![true, true], 5),
+    ] {
+        harness_events::enable(root.path(), runtime).unwrap();
+        for ready in states {
+            reason += 1;
+            harness_events::write_snapshot(root.path(), "harness-state",
+                &serde_json::to_vec(&json!({"incarnation":owner,"reason":reason})).unwrap()).unwrap();
+            let event = harness_events::pending(root.path(), 1).unwrap().remove(0);
+            let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
+            observed.channel_ready = Some(ready);
+            // Vary activity independently of channel readiness, as ordinary native frames do.
+            observed.state = if reason % 2 == 0 { harness_state::Activity::Active } else { harness_state::Activity::Idle };
+            let publisher = ObservationClient {
+                client: &client,
+                source_runtime: Some(runtime),
+                event: Some((runtime, event.sequence, root.path(), None)),
+            };
+            if reason == 1 {
+                assert!(publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+                    Some(incarnation), &observed, &mut None).await.is_err());
+                assert_eq!(diagnostic_count(), 1, "the lost acknowledgement followed a committed edge");
+            }
+            publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+                Some(incarnation), &observed, &mut None).await.unwrap();
+            harness_events::acknowledge(root.path(), event.sequence).unwrap();
+        }
+        assert_eq!(diagnostic_count(), expected);
+    }
+    // Legacy/non-durable callers still publish both readiness and activity, and retries
+    // keep the original episode/fingerprint idempotency rather than requiring a spool.
+    let mut observed = harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
+    observed.channel_ready = Some(true);
+    observed.state = harness_state::Activity::Idle;
+    // The preceding durable fixture already published Idle for incarnation-c. Change
+    // activity evidence so this checks a new publication, not valid fingerprint deduplication.
+    observed.reason = Some("legacy non-durable activity".into());
+    let publisher = ObservationClient { client: &client, event: None, source_runtime: None };
+    let activity_count = store.claims_for(subject, Some("harness.observed")).unwrap().len();
+    let mut last_fingerprint = None;
+    for _ in 0..2 {
+        publish_harness_activity(&publisher, subject, "omp", "omp-channel",
+            Some("incarnation-c"), &observed, &mut last_fingerprint).await.unwrap();
+    }
+    assert_eq!(diagnostic_count(), 6);
+    assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().len(), activity_count + 1);
+    assert_eq!(store.claims_for(subject, Some("harness.observed")).unwrap().iter()
+        .filter(|claim| claim.body["fields"]["reason"] == "legacy non-durable activity"
+            && claim.body["fields"]["incarnation_id"] == "incarnation-c")
+        .count(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn omp_successor_drains_predecessor_readiness_and_preparation_failure() {
+    use axum::{Json, Router, routing::post};
+    use std::sync::Arc;
+    use fractal_drivers::{harness_events, harness_state};
+
+    let root = tempfile::tempdir().unwrap();
+    for (runtime, provider) in [("runtime-a", "provider-a"), ("runtime-b", "provider-b")] {
+        harness_events::enable(root.path(), runtime).unwrap();
+        let ownership = harness_state::claim(root.path(), "example/seat", "omp", provider).unwrap();
+        let mut writer = harness_state::Writer::new(root.path(), "example/seat", "omp", Some("omp-channel".into()))
+            .with_ownership(provider, ownership);
+        let mut observation = harness_state::Observation::new(
+            harness_state::Activity::Idle, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+        );
+        observation.channel_ready = Some(true);
+        writer.observe(observation).unwrap();
+    }
+    let store = Arc::new(Store::open_memory("amber").unwrap());
+    let app = Router::new().route("/v1/claims", post({
+        let store = store.clone();
+        move |Json(claim): Json<ClaimInput>| {
+            let store = store.clone();
+            async move {
+                let record = store.append_claim(&claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    })).route("/v1/harness-events", post({
+        let store = store.clone();
+        move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
+            let store = store.clone();
+            async move {
+                // The successor owns the publication envelope, even for predecessor events.
+                assert_eq!(request.runtime_incarnation, "runtime-b");
+                let record = store.append_claim(&request.claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
+    let subject = "agent/example/seat";
+    let mut observations = NativeObservations::start(root.path(), "runtime-b").unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    for runtime in ["runtime-a", "runtime-b"] {
+        assert!(diagnostics.iter().any(|claim|
+            claim.body["fields"]["incarnation_id"] == runtime && claim.body["fields"]["code"] == "omp-channel-ready"
+        ));
+        assert!(store.claims_for(subject, Some("harness.observed")).unwrap().iter()
+            .any(|claim| claim.body["fields"]["incarnation_id"] == runtime));
+    }
+    let connection = rusqlite::Connection::open(harness_events::database_path(root.path())).unwrap();
+    // Fail-open could otherwise mask incorrect provenance: both fences must be prepared.
+    assert_eq!(connection.query_row(
+        "SELECT count(*) FROM metadata WHERE key IN ('omp-channel-readiness:runtime-a','omp-channel-readiness:runtime-b')",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap(), 2);
+    // A real local preparation write failure must fail open, not park the outbox head.
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h2b538cb9a6cc owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER refuse_readiness BEFORE INSERT ON prepared
+         WHEN NEW.slot='omp-channel-readiness' BEGIN SELECT RAISE(ABORT,'readiness preparation refused'); END;",
+    ).unwrap();
+    let ownership = harness_state::claim(root.path(), "example/seat", "omp", "provider-next").unwrap();
+    let mut writer = harness_state::Writer::new(root.path(), "example/seat", "omp", Some("omp-channel".into()))
+        .with_ownership("provider-next", ownership);
+    let mut observation = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    observation.channel_ready = Some(false);
+    writer.observe(observation).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    assert!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().iter().any(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b" && claim.body["fields"]["code"] == "omp-channel-unready"
+    ));
+    assert!(store.claims_for(subject, Some("harness.observed")).unwrap().iter().any(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b" && claim.body["fields"]["state"] == "working"
+    ));
+    assert_eq!(connection.query_row(
+        "SELECT count(*) FROM metadata WHERE key='omp-channel-readiness:runtime-b'",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap(), 0, "fallback invalidates the stale ready fence");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4c38471e37f8 owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER refuse_readiness;").unwrap();
+    let mut recovered = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    recovered.channel_ready = Some(true);
+    writer.observe(recovered).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    let latest = diagnostics.iter().rev().find(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b"
+            && matches!(claim.body["fields"]["code"].as_str(), Some("omp-channel-ready" | "omp-channel-unready"))
+    ).unwrap();
+    assert_eq!(latest.body["fields"]["code"], "omp-channel-ready",
+        "preparation recovery must publish ready after the fallback unready edge");
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-ha9a8015b2338 owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER refuse_readiness BEFORE INSERT ON prepared
+         WHEN NEW.slot='omp-channel-readiness' BEGIN SELECT RAISE(ABORT,'readiness preparation refused'); END;
+         CREATE TRIGGER refuse_invalidation BEFORE DELETE ON metadata
+         WHEN OLD.key LIKE 'omp-channel-readiness:%' BEGIN SELECT RAISE(ABORT,'readiness invalidation refused'); END;",
+    ).unwrap();
+    let mut unready = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    unready.channel_ready = Some(false);
+    writer.observe(unready).unwrap();
+    let before = store.claims_for(subject, Some("harness.diagnostic")).unwrap().len();
+    assert!(observations.drain(&client, subject, "omp", &mut false).await.is_err());
+    assert!(!harness_events::pending(root.path(), 100).unwrap().is_empty(),
+        "failure to invalidate must retain the event for retry");
+    assert_eq!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().len(), before,
+        "no fallback edge may publish while the old fence remains");
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5f558c3b9bbd owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER refuse_readiness; DROP TRIGGER refuse_invalidation;").unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    assert_eq!(store.claims_for(subject, Some("harness.diagnostic")).unwrap().len(), before + 1);
+    let mut ready = harness_state::Observation::new(
+        harness_state::Activity::Active, harness_state::BlockedOn::None, harness_state::InputBuffer::Unknown,
+    );
+    ready.channel_ready = Some(true);
+    writer.observe(ready).unwrap();
+    observations.drain(&client, subject, "omp", &mut false).await.unwrap();
+    assert!(harness_events::pending(root.path(), 100).unwrap().is_empty());
+    let diagnostics = store.claims_for(subject, Some("harness.diagnostic")).unwrap();
+    assert_eq!(diagnostics.len(), before + 2, "the reverse edge must not be suppressed");
+    let latest = diagnostics.iter().rev().find(|claim|
+        claim.body["fields"]["incarnation_id"] == "runtime-b"
+            && matches!(claim.body["fields"]["code"].as_str(), Some("omp-channel-ready" | "omp-channel-unready"))
+    ).unwrap();
+    assert_eq!(latest.body["fields"]["code"], "omp-channel-ready");
+    server.abort();
 }

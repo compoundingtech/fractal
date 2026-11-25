@@ -11,7 +11,6 @@ fn independently_folded_faults(store: &Store, as_of: u128) -> Result<Vec<FaultVi
             .into_iter()
             .filter(|item| !item.person.starts_with("person/")),
     );
-    items.extend(store.checkpoint_attention_items(None, as_of)?);
     items.extend(store.signature_attention_items()?);
     let fallback = store.fleet_fault_agent()?;
     let dismissed = store.dismissed_faults()?;
@@ -232,7 +231,6 @@ fn reference_fault_snapshot(store: &Store, as_of: u128) -> Result<Vec<FaultView>
             .into_iter()
             .filter(|item| !item.person.starts_with("person/")),
     );
-    items.extend(store.checkpoint_attention_items(None, as_of)?);
     items.extend(store.signature_attention_items()?);
     let fallback = store.fleet_fault_agent()?;
     let dismissed = store.dismissed_faults()?;

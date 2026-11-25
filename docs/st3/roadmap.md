@@ -4,8 +4,11 @@ This file records accepted future work that is not built yet. Active fleet work 
 
 ## Agent continuity
 
+- [ ] Suspend a quiet seat that holds no work after a member-configured idle time, and resume it
+  on its exact session when a wake-class message arrives, as specified in [idle residency](idle-residency.md).
 - [ ] Suspend an idle seat automatically at a long graph wait or human gate, and resume it when the
-  graph makes its work ready again. Manual [suspend and resume](suspend.md) exist today.
+  graph makes its work ready again. Manual [suspend and resume](suspend.md) exist today. This
+  needs the parked-work lease contract in [idle residency DQ4](idle-residency.md#design-questions).
 
 ## User interfaces
 

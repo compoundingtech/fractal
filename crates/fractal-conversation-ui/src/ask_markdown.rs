@@ -36,7 +36,7 @@ fn inline_ask(mut text: &str, base: Style, theme: &Theme) -> Vec<Run> {
             runs.push(run(c.to_string(), base));
             consumed = 1 + c.len_utf8();
         } else if text.starts_with("![") {
-            // An image remains source, including its destination; never register a link.
+            // An image remains readable source; its visible HTTP(S) address is linkable.
             if let Some(end) = text.find(')') {
                 consumed = end + 1;
                 runs.push(run(&text[..consumed], base));
@@ -56,8 +56,9 @@ fn inline_ask(mut text: &str, base: Style, theme: &Theme) -> Vec<Run> {
                 let url = &target[..end];
                 consumed = 1 + label_end + 2 + end + 1;
                 if url.starts_with("https://") || url.starts_with("http://") {
-                    let style = link_style(base.fg(theme.blue).add_modifier(Modifier::UNDERLINED), url);
-                    runs.extend(inline_ask(&after[..label_end], style, theme));
+                    let style = base.fg(theme.blue).add_modifier(Modifier::UNDERLINED);
+                    let target: Arc<str> = Arc::from(url);
+                    runs.extend(inline_ask(&after[..label_end], style, theme).into_iter().map(|run| link(run.text, Arc::clone(&target), run.style)));
                 } else {
                     runs.push(run(&text[..consumed], base));
                 }
@@ -81,7 +82,7 @@ fn inline_ask(mut text: &str, base: Style, theme: &Theme) -> Vec<Run> {
         if consumed == 0 {
             let c = text.chars().next().unwrap_or_default();
             consumed = c.len_utf8();
-            if let Some(last) = runs.last_mut().filter(|last| last.style == base) {
+            if let Some(last) = runs.last_mut().filter(|last| last.style == base && last.link.is_none()) {
                 last.text.push(c);
             } else {
                 runs.push(run(c.to_string(), base));
@@ -116,7 +117,7 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
         if trimmed.starts_with("```") && (!fence || trimmed == "```") {
             flush(&mut paragraph, &mut lines);
             fence = !fence;
-            lines.push(Line::from(Span::styled(sanitize(line), theme.dim())));
+            lines.push(Line::from(Span::styled(sanitize(line), theme.dim())).decoration());
         } else if fence {
             // Layout expands tabs for terminal cells; the input/source is never rewritten.
             lines.push(Line::from(Span::styled(sanitize(line), base.fg(theme.subtext1))));
@@ -129,8 +130,8 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
         } else if let Some((marker, item)) = list_item(trimmed) {
             flush(&mut paragraph, &mut lines);
             let indent = " ".repeat(line.len() - trimmed.len());
-            let first = [run(format!("{indent}{marker}"), base.fg(theme.lavender))];
-            let rest = [run(format!("{indent}{}", " ".repeat(width_of(&marker))), base)];
+            let first = [decoration(indent.clone(), base.fg(theme.lavender)), run(marker.clone(), base.fg(theme.lavender))];
+            let rest = [decoration(format!("{indent}{}", " ".repeat(width_of(&marker))), base)];
             lines.extend(wrap(&inline_ask(item, base, theme), width, &first, &rest, None));
         } else {
             if !paragraph.is_empty() { paragraph.push(' '); }
@@ -172,7 +173,10 @@ mod tests {
                 let (lines, links) = super::super::ask_markdown_with_links(case["source"].as_str().unwrap(), width, Style::default(), &Theme::default());
                 assert!(!lines.is_empty());
                 assert!(links.iter().all(|link| link.url.starts_with("http://") || link.url.starts_with("https://")));
-                if case["name"] == "unsupported" { assert!(links.is_empty()); }
+                if case["name"] == "unsupported" {
+                    assert!(!links.is_empty(), "visible raw URLs retain their full targets");
+                    assert!(links.iter().all(|link| matches!(link.url.as_str(), "https://example.com/no-fetch.png" | "https://example.com/not-auto-linked")));
+                }
                 if let Some(expected) = case["expected_text"].as_str() {
                     assert_eq!(lines.iter().map(plain).collect::<String>(), expected);
                 }
@@ -189,6 +193,35 @@ mod tests {
         }
     }
     #[test]
+    fn styled_link_label_copies_one_target_across_styles_and_wrapping() {
+        let theme = Theme::default();
+        for width in [4, 100] {
+            let lines = markdown("[plain **bold** `code`](https://example.com)", width, Style::default(), &theme);
+            let selection = crate::Selection { pane: "test".into(), anchor: (0, 0), head: (lines.len() - 1, u16::MAX) };
+            assert_eq!(selection.text(&lines), "plain bold code");
+            assert_eq!(selection.text_with_link_targets(&lines), "plain bold code (https://example.com)");
+            let spans = lines.iter().flat_map(|line| &line.spans).filter(|span| span.link.is_some()).collect::<Vec<_>>();
+            let target = spans[0].link.as_ref().unwrap();
+            assert!(spans.iter().all(|span| Arc::ptr_eq(target, span.link.as_ref().unwrap())));
+            assert!(spans.iter().any(|span| span.style.add_modifier.contains(Modifier::BOLD)));
+            assert!(spans.iter().any(|span| span.style.fg == Some(theme.teal)));
+        }
+    }
+
+    #[test]
+    fn adjacent_styled_links_keep_separate_occurrences_even_with_equal_targets() {
+        for target in ["https://same", "https://other"] {
+            for width in [4, 100] {
+                let source = format!("[first **bold**](https://same)[second `code`]({target})");
+                let lines = markdown(&source, width, Style::default(), &Theme::default());
+                let selection = crate::Selection { pane: "test".into(), anchor: (0, 0), head: (lines.len() - 1, u16::MAX) };
+                assert_eq!(selection.text(&lines), "first boldsecond code");
+                assert_eq!(selection.text_with_link_targets(&lines), format!("first bold (https://same)second code ({target})"));
+            }
+        }
+    }
+
+    #[test]
     fn ask_profile_literals_emphasis_and_code() {
         let theme = Theme::default();
         let runs = inline_ask("**bold *italic* `literal *code*`** \\*escaped\\* *", Style::default(), &theme);
@@ -199,7 +232,7 @@ mod tests {
             assert!(inline_ask(source, Style::default(), &theme).iter().any(|run| run.text == "both" && run.style.add_modifier.contains(Modifier::BOLD | Modifier::ITALIC)));
         }
         let (_, links) = super::super::ask_markdown_with_links("![x](https://x) [no](javascript:alert) https://x", 100, Style::default(), &theme);
-        assert!(links.is_empty());
+        assert_eq!(links.iter().map(|link| link.url.as_str()).collect::<Vec<_>>(), ["https://x", "https://x"]);
         for text in ["| **literal** |", "<b>literal</b>", "# **literal**", "> literal", "- [x] task", "~~literal~~"] {
             assert_eq!(markdown(text, 100, Style::default(), &theme).iter().map(plain).collect::<String>(), text);
         }

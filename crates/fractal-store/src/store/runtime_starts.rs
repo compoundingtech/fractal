@@ -118,7 +118,7 @@ CREATE INDEX IF NOT EXISTS local_runtime_start_evidence_observation ON local_run
 }
 
 thread_local! {
-    pub static RUNTIME_OBSERVATION_CAPTURE: std::cell::RefCell<Option<(std::path::PathBuf,u64)>> = const { std::cell::RefCell::new(None) };
+    pub static RUNTIME_OBSERVATION_CAPTURE: std::cell::RefCell<Option<(std::path::PathBuf,u64,u64)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,6 +134,18 @@ pub struct RuntimeStartOperation {
     pub cleanup_verified: bool,
     pub dispatched: bool,
     pub receipted: bool,
+}
+
+impl RuntimeStartOperation {
+    /// Only an identity-bound dispatch fence can prove an abandoned worker never
+    /// entered its backend. Missing, legacy and future protocols remain unknown.
+    pub fn before_backend(&self) -> bool {
+        let marker = &self.body["backend_entry"];
+        marker["version"] == 1
+            && marker["operation"].as_str() == Some(self.id.as_str())
+            && marker["owner"].as_str() == Some(self.owner.as_str())
+            && marker["phase"] == "before-backend"
+    }
 }
 
 pub fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeStartOperation> {

@@ -18,7 +18,7 @@ import {
 import { objective, validName, type Objective, type ObjectiveInput } from './objective.ts'
 import { bundleProgram } from './program-bundler.ts'
 import { ProgramEntry } from './program-engine.ts'
-import { programInputNames, type InputSchema, type ProgramIntent } from './program.ts'
+import { programInputs, type InputSchema, type ProgramIntent } from './program.ts'
 import type { SubjectKind, SubjectRef } from './subject-ref.ts'
 export {
   defineAgent,
@@ -86,12 +86,13 @@ const scheduleMismatch: Record<'mission' | 'schedule', string> = {
   schedule: 'A schedule file must declare a mission with a schedule',
 }
 
-/** A fleet declares claim indicators named `NAMESPACE/NAME`; built-in telemetry is reserved. */
+/** Fleet declarations use namespaced claim, source-backed or native-binding objectives. */
 const declaredObjective = (id: string) =>
-  `A declared objective is an interval, count, ratio, gauge or native binding named NAMESPACE/NAME; objective/${id} is not`
+  `A declared objective is an interval, count, ratio, gauge, GitHub measurement or native binding named NAMESPACE/NAME; objective/${id} is not`
 
 const declarable = (kind: unknown): boolean =>
-  kind === 'interval' || kind === 'count' || kind === 'ratio' || kind === 'gauge' || kind === 'native'
+  kind === 'interval' || kind === 'count' || kind === 'ratio' || kind === 'gauge' ||
+  kind === 'native' || kind === 'github-merged-count' || kind === 'github-ready-to-merged'
 
 const isRef = (value: unknown): value is SubjectRef<SubjectKind> =>
   typeof value === 'object' && value !== null && '_tag' in value && value._tag === 'SubjectRef'
@@ -324,7 +325,7 @@ const programDeclaration = Effect.fnUntraced(function* ({
     })
   }
   const inputs = yield* Effect.try({
-    try: () => programInputNames(intent.input),
+    try: () => programInputs(intent.input),
     catch: (cause) => new SubjectTreeError({ path, message: 'Invalid program inputs', cause }),
   })
   if (programs.bundleDir === undefined) {
@@ -350,10 +351,17 @@ const programDeclaration = Effect.fnUntraced(function* ({
     state: 'ready',
     reportTo: intent.reportTo,
     goal: intent.goal,
+    ...(intent.resources === undefined ? {} : { resources: intent.resources }),
+    ...(intent.docs === undefined ? {} : { docs: intent.docs }),
+    ...('budget' in intent ? { budget: intent.budget } : {}),
+    ...('declaredPriority' in intent ? { declaredPriority: intent.declaredPriority } : {}),
+    ...('declaredLane' in intent ? { declaredLane: intent.declaredLane } : {}),
+    ...('declaredBudgets' in intent ? { declaredBudgets: intent.declaredBudgets } : {}),
+
     ...timeout,
     ...(intent.concurrentRuns === undefined ? {} : { concurrentRuns: intent.concurrentRuns }),
     ...(intent.authority === undefined ? {} : { authority: intent.authority }),
-    inputs: inputs.map((name) => ({ name, kind: 'text' })),
+    inputs,
     steps: [
       {
         id: 'program',

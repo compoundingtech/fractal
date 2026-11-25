@@ -21,37 +21,66 @@ pub struct SummaryRow {
     pub row: Value,
 }
 
-/// What every selection's summary shares: each mission (`id`, `system`, `active`), the working
-/// agents and the machine counts, computed at `cut` and the clock `evaluated_at_unix_ms`, with
-/// the roster publication the agents were counted from.
+/// Counts shared by every selection, evaluated at `cut` and the clock
+/// `evaluated_at_unix_ms`, with the presented roster the agents were counted from.
 #[derive(Clone, Debug)]
 pub struct SummaryShared {
     pub cut: u64,
     pub evaluated_at_unix_ms: u128,
     pub published_at_unix_ms: u128,
-    pub missions: Vec<(String, bool, bool)>,
+    pub active_missions: usize,
     pub working_agents: usize,
     pub machines: Value,
     pub agents_as_of: Option<Value>,
 }
 
-/// What the shared counts were computed from: the graph cut, the roster revision and the clock
-/// period they were evaluated in. Equal inputs compute nothing.
+/// Graph and semantic roster/peer inputs consumed by the shared count maintainer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SummaryInputs {
     pub cut: u64,
     pub roster: u64,
-    pub period: u128,
+    pub peers: Value,
 }
 
-/// The machines the shared counts were counted from and what they were read under: the graph
-/// cut, the clock period, the count of conflicting operations and the fleet's membership. Kept
-/// past their cut, the machines' hosts, states and transports still hold; their runtimes, work
-/// and update times may not, and the counts read none of those.
+/// Rebuild work, not publication attempts: unchanged source rows contribute no work.
+#[derive(Clone, Default)]
+pub struct SummaryWork {
+    pub mission_subject_rebuilds: u64,
+    pub agent_subject_rebuilds: u64,
+    pub machine_subject_rebuilds: u64,
+    pub attention_subject_rebuilds: u64,
+}
+
+#[derive(Clone)]
+pub struct SummaryMission {
+    pub evaluated_at: u128,
+    pub valid_until: Option<u128>,
+    pub active: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct SummarySources {
+    pub missions_cut: Option<u64>,
+    pub missions: BTreeMap<String, SummaryMission>,
+    pub active_missions: usize,
+    pub agents: BTreeMap<String, bool>,
+    pub machines: BTreeMap<String, (usize, Option<u128>)>,
+    pub attention: BTreeMap<String, (Option<String>, bool)>,
+    pub person_alerts: BTreeMap<String, usize>,
+    pub total_alerts: usize,
+    pub working_agents: usize,
+    pub machine_counts: [usize; 3],
+    pub valid_until: Option<u128>,
+    pub work: SummaryWork,
+}
+
+/// Cached machine membership and semantic peer evidence. Clock expiry is an exact
+/// reachability transition, never a periodic cache invalidation.
 #[derive(Clone)]
 pub struct SummaryMachines {
     pub cut: u64,
-    pub period: u128,
+    pub peers: Value,
+    pub valid_until: Option<u128>,
     pub conflicts: u64,
     pub fleet: smallclaims::fleet::FleetView,
     pub machines: Arc<Vec<Value>>,
@@ -73,6 +102,7 @@ pub struct Lists {
     pub selections: HashMap<Option<String>, Selection>,
     pub shared: Option<(Arc<SummaryShared>, SummaryInputs)>,
     pub machines: Option<SummaryMachines>,
+    pub sources: SummarySources,
 }
 
 #[derive(Default)]
@@ -86,14 +116,62 @@ pub struct SummaryList {
 }
 
 impl SummaryList {
+    /// Recompute shared inputs after graph-preserving history cleanup, keeping the rows
+    /// windows already serve. Fence in-flight computations just as a replacement does.
+    /// The attention owner's existing wake/roster notification schedules the next fold.
+    pub fn refold(&self) {
+        let mut lists = self.lists.lock().unwrap_or_else(PoisonError::into_inner);
+        self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
+        lists.shared = None;
+        lists.machines = None;
+        let work = std::mem::take(&mut lists.sources.work);
+        lists.sources = SummarySources { work, ..SummarySources::default() };
+    }
+
     pub fn forget(&self) {
         let mut lists = self.lists.lock().unwrap_or_else(PoisonError::into_inner);
         self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
         lists.shared = None;
         lists.machines = None;
+        let work = std::mem::take(&mut lists.sources.work);
+        lists.sources = SummarySources { work, ..SummarySources::default() };
         for selection in lists.selections.values_mut() {
             selection.row = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refold_fences_old_computations_and_keeps_rows_until_replacement() {
+        let list = SummaryList::default();
+        let row = json!({"id": "summary/current"});
+        {
+            let mut lists = list.lists.lock().unwrap();
+            lists.selections.insert(None, Selection {
+                read_at: 1,
+                row: Some(SummaryRow { cut: 1, published_at_unix_ms: 1, row: row.clone() }),
+                failed: false,
+            });
+            lists.shared = Some((Arc::new(SummaryShared {
+                cut: 1, evaluated_at_unix_ms: 1, published_at_unix_ms: 1,
+                active_missions: 0, working_agents: 0, machines: json!({}), agents_as_of: None,
+            }), SummaryInputs { cut: 1, roster: 1, peers: json!([]) }));
+        }
+        let generation = list.forgotten.load(AtomicOrdering::Acquire);
+        list.refold();
+        assert_eq!(list.forgotten.load(AtomicOrdering::Acquire), generation + 1);
+        {
+            let lists = list.lists.lock().unwrap();
+            assert!(lists.shared.is_none());
+            assert_eq!(lists.selections[&None].row.as_ref().unwrap().row, row);
+        }
+        list.forget();
+        assert!(list.lists.lock().unwrap().selections[&None].row.is_none(),
+            "actual projection replacement must still withdraw old rows");
     }
 }
 

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
 use anyhow::{Context as _, Result};
-use rusqlite::{Connection, OpenFlags, Transaction};
+use rusqlite::{Connection, OpenFlags, Transaction, ffi};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::read_budget::ReadBudget;
@@ -50,11 +50,15 @@ pub mod transport_bench {
 }
 
 pub(crate) mod writer_observer;
+mod commit_scope;
+pub use commit_scope::{WriterObserverStats, writer_observer_stats};
 pub use writer_observer::WriterObserver;
+pub use writer_observer::observe_transaction_resolution;
 
 use crate::store::current_index;
 
 pub mod telemetry;
+pub mod census_files;
 
 /// Read connections a store keeps between reads; more open while more reads run at once.
 /// Each requests `read_cache_kib()` KiB of pages. Opening a connection also parses the database schema
@@ -178,6 +182,7 @@ pub struct CommitObserver {
 
 struct CommitObserverCallback {
     state: Mutex<CommitObserverState>,
+    tables: Option<&'static [&'static str]>,
     completed: Condvar,
 }
 
@@ -219,9 +224,11 @@ struct CommitObservers {
 impl CommitObservers {
     fn register(
         self: &Arc<Self>,
+        tables: Option<&'static [&'static str]>,
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
         let callback = Arc::new(CommitObserverCallback {
+            tables,
             state: Mutex::new(CommitObserverState {
                 run: Some(Arc::new(callback)),
                 running: None,
@@ -240,7 +247,7 @@ impl CommitObservers {
         }
     }
 
-    fn notify(&self, connection: &Connection) {
+    fn notify(&self, connection: &Connection, changes: &commit_scope::Changes) {
         // The common case takes no lock and allocates nothing.
         if !self.active.load(Ordering::Acquire) {
             return;
@@ -252,6 +259,9 @@ impl CommitObservers {
             .clone();
         let current = std::thread::current().id();
         for callback in callbacks.iter() {
+            if callback.tables.is_some_and(|tables| !changes.matches(tables)) {
+                continue;
+            }
             let run = {
                 let mut state = callback
                     .state
@@ -265,6 +275,11 @@ impl CommitObservers {
                 run
             };
             let _invocation = CommitObserverInvocation { callback };
+            if callback.tables.is_some() {
+                commit_scope::SCOPED_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                commit_scope::GLOBAL_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            }
             run(connection);
         }
     }
@@ -379,6 +394,25 @@ pub fn restart_wal(connection: &Connection, busy: std::time::Duration) -> Result
     Ok(restarted? == 0)
 }
 
+type DeferredMaintenance = dyn Fn(&mut Connection, bool) -> Result<bool> + Send + Sync;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static DEFERRED_MAINTENANCE_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keep explicit transaction assertions deterministic while opening or stepping a test store.
+#[cfg(any(test, feature = "test-support"))]
+pub fn without_deferred_maintenance_for_test<T>(work: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DEFERRED_MAINTENANCE_DISABLED.with(|disabled| disabled.set(self.0));
+        }
+    }
+    let _restore = Restore(DEFERRED_MAINTENANCE_DISABLED.with(|disabled| disabled.replace(true)));
+    work()
+}
 /// The store's only write connection, owned by one writer thread. Writes queue in front of it in
 /// foreground arrival order: a batched write runs on the writer thread with the others queued behind it, each
 /// in a savepoint of one transaction that commits once for all of them, and its caller hears back
@@ -391,6 +425,7 @@ pub struct WriterConnection {
     observers: Arc<CommitObservers>,
     finalizers: Arc<TransactionFinalizers>,
     background: Arc<writer_queue::BackgroundAdmission>,
+    deferred: Arc<Mutex<Option<Arc<DeferredMaintenance>>>>,
     workers: Arc<Semaphore>,
     worker_queue: Arc<writer_admission::WorkerQueue>,
     handler_policy: Arc<Mutex<Option<Arc<writer_budget::OwnedHandlerPolicy>>>>,
@@ -409,6 +444,8 @@ pub enum WriterJob {
     Batched {
         run: Box<dyn FnOnce(&Transaction<'_>) -> bool + Send>,
         profile: Option<crate::profile::Op>,
+        /// Captured by `send` before this callback crosses to the writer thread.
+        charged: Option<crate::performance::Charged>,
         /// When profiling, when its caller began to wait and who held the writer then.
         wait: Option<crate::profile::WriterWait>,
         /// Who asked for this write, charged for the hold when it runs longest in its batch.
@@ -428,6 +465,7 @@ pub enum WriterJob {
         holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
+        deadline_unix_ms: Option<u128>,
     },
     /// Hands the connection to a caller until its guard gives it back.
     Lend {
@@ -437,6 +475,7 @@ pub enum WriterJob {
         holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
+        deadline_unix_ms: Option<u128>,
     },
 }
 
@@ -465,6 +504,26 @@ pub struct WriterGuard<'a> {
 }
 
 impl WriterConnection {
+    /// A read-only store has no writer connection, queue, or background thread.
+    pub(crate) fn read_only(committed_index: Arc<AtomicU64>) -> Self {
+        Self {
+            jobs: Mutex::new(None),
+            thread: Mutex::new(None),
+            committed_index,
+            observers: Arc::new(CommitObservers::default()),
+            finalizers: Arc::new(TransactionFinalizers::default()),
+            background: Arc::new(writer_queue::BackgroundAdmission::default()),
+            deferred: Arc::new(Mutex::new(None)),
+            workers: Arc::new(Semaphore::new(writer_admission::constructor_write_limit())),
+            worker_queue: writer_admission::WorkerQueue::new(),
+            handler_policy: Arc::new(Mutex::new(None)),
+            mutation_observer: None,
+            batches: Arc::new((AtomicU64::new(0), AtomicU64::new(0))),
+            fifo: crate::fifo::Queue::new(crate::fifo::Kind::Writer),
+            telemetry: None,
+        }
+    }
+
     pub fn new(connection: Connection, committed_index: Arc<AtomicU64>) -> Self {
         Self::new_inner(connection, committed_index, None, None)
             .expect("writer without an observer needs no schema check")
@@ -524,9 +583,10 @@ impl WriterConnection {
             policy.install(&connection)?;
         }
         let handler_policy = Arc::new(Mutex::new(policy.map(Arc::new)));
-        let mutation_observer = observer
-            .map(|observer| writer_observer::MutationState::new(&connection, observer))
-            .transpose()?;
+        let mutation_observer = Some(writer_observer::MutationState::new(
+            &connection,
+            observer.unwrap_or_else(|| Arc::new(writer_observer::NoPhysicalObserver)),
+        )?);
         let mutations = mutation_observer.clone();
         let (jobs, queue) = std::sync::mpsc::channel::<WriterJob>();
         let index = committed_index.clone();
@@ -538,6 +598,8 @@ impl WriterConnection {
         let finalized = finalizers.clone();
         let background = Arc::new(writer_queue::BackgroundAdmission::default());
         let background_queue = background.clone();
+        let deferred = Arc::new(Mutex::new(None));
+        let deferred_work = deferred.clone();
         let fifo = crate::fifo::Queue::new(crate::fifo::Kind::Writer);
         let observed_fifo = fifo.clone();
         let telemetry = telemetry::Writer::new(&connection);
@@ -551,12 +613,12 @@ impl WriterConnection {
                 let directory_admission = admitted;
                 write_queue(
                     connection,
-                    queue,
+                    (queue, background_queue),
                     &index,
                     &counted,
                     (&observed, &finalized, mutations.as_ref(), writer_telemetry.as_deref()),
-                    background_queue,
                     &observed_fifo,
+                    &deferred_work,
                 );
                 drop(directory_admission);
                 // A final observer can drop the store on this writer thread. Keep
@@ -572,6 +634,7 @@ impl WriterConnection {
             observers,
             finalizers,
             background,
+            deferred,
             workers: Arc::new(Semaphore::new(writer_admission::constructor_write_limit())),
             worker_queue: writer_admission::WorkerQueue::new(),
             handler_policy,
@@ -582,8 +645,9 @@ impl WriterConnection {
         })
     }
 
-    /// Observe every successfully committed batch and every returned lent writer, synchronously
-    /// after its committed index is updated and before its write can acknowledge success.
+    /// Observe boundaries containing committed DML/DDL, synchronously after the committed
+    /// index is updated and before the write can acknowledge success. Empty/read-only work
+    /// and rolled-back mutations do not evaluate callbacks; lost native coverage fails closed.
     /// A callback may read authority from this same connection, but must not write or acquire the
     /// writer. Dropping its own observer handle is safe and disables future invocations.
     /// Batched callbacks run on the writer thread; lent callbacks run on the returning thread.
@@ -600,7 +664,19 @@ impl WriterConnection {
         &self,
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
-        self.observers.register(callback)
+        self.observers.register(None, callback)
+    }
+
+    /// Observe committed mutations of declared main-database tables, including WITHOUT
+    /// ROWID tables. DDL and a native-hook coverage gap conservatively invalidate all
+    /// dependencies. Read-only loans, zero-row writes and rolled-back mutations do not
+    /// evaluate callbacks. Registration and handle lifetime match `observe_commits`.
+    pub fn observe_tables(
+        &self,
+        tables: &'static [&'static str],
+        callback: impl Fn(&Connection) + Send + Sync + 'static,
+    ) -> CommitObserver {
+        self.observers.register(Some(tables), callback)
     }
 
     /// Install exactly one transaction-owned adapter, explicitly and before attesting source
@@ -632,6 +708,40 @@ impl WriterConnection {
         self.finalizers.install_maintenance(callback)
     }
 
+    /// Install one bounded deferred-work owner. Pending reads committed state; advance runs
+    /// one bounded managed transaction. The existing writer thread owns
+    /// scheduling and cancellation, so no detached worker or Store ownership cycle is needed.
+    pub(crate) fn install_deferred_maintenance(
+        &self,
+        pending: impl Fn(&Connection) -> Result<bool> + Send + Sync + 'static,
+        advance: impl Fn(&Transaction<'_>) -> Result<bool> + Send + Sync + 'static,
+    ) {
+        if self.deferred.lock().unwrap_or_else(PoisonError::into_inner).is_some() {
+            return;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if DEFERRED_MAINTENANCE_DISABLED.with(std::cell::Cell::get) {
+            return;
+        }
+        let _writer = self.write_fence();
+        let mut slot = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.is_none() {
+            let finalizers = self.finalizers.clone();
+            *slot = Some(Arc::new(move |connection, run| {
+                if !run {
+                    return pending(connection);
+                }
+                let transaction = connection.transaction()?;
+                finalizers.prepare(/* sqlite-large-value: allow-for-now lv-hb58bf0cf3d7c owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ &transaction)?;
+                let transaction = WriterTransaction::new(transaction, finalizers.clone());
+                let more = advance(&transaction)?;
+                transaction.commit()?;
+                // Finalization can itself defer new work; do not trust only advance's result.
+                Ok(more || pending(connection)?)
+            }));
+        }
+    }
+
     /// Install one paired adapter. Prepare runs INSIDE the newly begun outer transaction
     /// before any managed source job/helper; finalize runs before its commit. An adapter can
     /// reject/fence preexisting raw capture and set/clear its transaction-owned scope marker.
@@ -658,7 +768,8 @@ impl WriterConnection {
 
     #[track_caller]
     pub fn send(&self, mut job: WriterJob) {
-        if let WriterJob::Batched { wait, .. } = &mut job {
+        if let WriterJob::Batched { wait, charged, .. } = &mut job {
+            *charged = crate::performance::current();
             *wait = crate::profile::WriterWait::with_writer_operation(wait.take());
         }
         if let (Some(writer), WriterJob::Batched { wait, .. }) = (&self.telemetry, &mut job) {
@@ -689,7 +800,8 @@ impl WriterConnection {
     /// A panic rolls back its open transaction while its guard returns the connection.
     #[track_caller]
     pub fn write(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Foreground)
+        self.lend_writer(writer_queue::LoanClass::Foreground, None)
+            .expect("unbounded writer admission cannot expire")
     }
 
     /// Borrow the same writer for one bounded maintenance/publication page. Pending foreground
@@ -699,16 +811,33 @@ impl WriterConnection {
     /// authority and prepared CAS evidence after acquisition. No operator work belongs here.
     #[track_caller]
     pub fn write_background(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Background)
+        self.lend_writer(writer_queue::LoanClass::Background, None)
+            .expect("unbounded writer admission cannot expire")
+    }
+
+    /// Refuse expired local replication work before lending the connection. A live
+    /// loan is never preempted: its transaction retains the normal commit/rollback boundary.
+    #[track_caller]
+    pub fn write_background_before(
+        &self,
+        deadline_unix_ms: Option<u128>,
+    ) -> Result<WriterGuard<'_>, crate::error::Error> {
+        self.lend_writer(writer_queue::LoanClass::Background, deadline_unix_ms)
     }
 
     #[track_caller]
     fn write_fence(&self) -> WriterGuard<'_> {
-        self.lend_writer(writer_queue::LoanClass::Fence)
+        self.lend_writer(writer_queue::LoanClass::Fence, None)
+            .expect("unbounded writer admission cannot expire")
     }
 
     #[track_caller]
-    fn lend_writer(&self, class: writer_queue::LoanClass) -> WriterGuard<'_> {
+    fn lend_writer(
+        &self,
+        class: writer_queue::LoanClass,
+        deadline_unix_ms: Option<u128>,
+    ) -> Result<WriterGuard<'_>, crate::error::Error> {
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
         debug_assert_no_pinned_read();
         let wait = crate::profile::writer_waiting();
         let holder = crate::windows::holds::Holder::current();
@@ -722,9 +851,9 @@ impl WriterConnection {
             "write.lend",
         );
         match class {
-            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin }),
+            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }),
             writer_queue::LoanClass::Background => {
-                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued, origin });
+                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms });
             }
             writer_queue::LoanClass::Fence => {
                 // Hold the admission lock while recording the barrier and enqueueing it.
@@ -736,7 +865,7 @@ impl WriterConnection {
                     .get()
                     .map_or(0, |queue| queue.watermark());
                 let job = if through == 0 {
-                    WriterJob::Lend { lent, returned, holder, enqueued, origin }
+                    WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }
                 } else {
                     WriterJob::FenceLend {
                         through,
@@ -745,6 +874,7 @@ impl WriterConnection {
                         holder,
                         enqueued,
                         origin,
+                        deadline_unix_ms,
                     }
                 };
                 self.fifo.send_at(enqueued, || jobs.as_ref()
@@ -753,15 +883,18 @@ impl WriterConnection {
                     .expect("the writer thread runs while the store is open");
             }
         }
-        let connection = lent_here
-            .recv()
-            .expect("the writer thread lends its connection");
+        let connection = lent_here.recv().map_err(|_| {
+            assert!(deadline_unix_ms.is_some(), "the writer thread lends its connection");
+            crate::error::Error::new("replication-overloaded", "the replication receive answer deadline elapsed before writer admission")
+        })?;
+        #[cfg(any(test, feature = "test-support"))]
+        work::record_writer_loan();
         drop(waiting);
         telemetry::acknowledged(enqueued.elapsed(), false);
         if let Some(operation) = &mut writer_operation {
             operation.acquired(enqueued.elapsed());
         }
-        WriterGuard {
+        let guard = WriterGuard {
             changes_at_lend: connection.total_changes(),
             connection: Some(connection),
             give_back,
@@ -774,7 +907,11 @@ impl WriterConnection {
             writer_operation,
             receive_hold: crate::receive_metrics::capture().as_ref().map(|context|
                 crate::receive_metrics::WriterSample::start(context, enqueued.elapsed())),
-        }
+        };
+        // The deadline may cross while the channel handoff runs. Return the untouched
+        // connection before opening any transaction in that case.
+        crate::replication::check_receive_deadline(deadline_unix_ms)?;
+        Ok(guard)
     }
 
     fn enqueue_background(&self, job: WriterJob) {
@@ -819,6 +956,7 @@ impl WriterConnection {
         // The job runs on the writer thread; what it wrote is handed back to this one.
         let capture = crate::touched::recording_wrote();
         let clock = crate::store::ClockContext::capture();
+        let stages = crate::windows::holds::BatchStages::capture();
         let wrote_rows = Mutex::new(Vec::new());
         let wrote = &wrote_rows;
         // Counts this caller until its write begins, or the writer drops it unrun.
@@ -828,6 +966,7 @@ impl WriterConnection {
             let before = tx.total_changes();
             let job = || {
                 let _clock = clock.enter();
+                let _stages = stages.enter();
                 job(tx)
             };
             let (result, written) = if capture {
@@ -859,6 +998,7 @@ impl WriterConnection {
         self.send(WriterJob::Batched {
             run,
             profile: crate::profile::current(),
+            charged: None,
             wait: crate::profile::writer_waiting(),
             holder: crate::windows::holds::Holder::current(),
             done,
@@ -919,20 +1059,75 @@ impl Drop for WriterConnection {
 /// transaction, and lend the connection to each lending write in its turn.
 fn write_queue(
     mut connection: Connection,
-    queue: std::sync::mpsc::Receiver<WriterJob>,
+    intake: (std::sync::mpsc::Receiver<WriterJob>, Arc<writer_queue::BackgroundAdmission>),
     committed_index: &AtomicU64,
     batches: &(AtomicU64, AtomicU64),
     callbacks: (&CommitObservers, &TransactionFinalizers, Option<&Arc<writer_observer::MutationState>>, Option<&telemetry::Writer>),
-    background: Arc<writer_queue::BackgroundAdmission>,
     fifo: &Arc<crate::fifo::Queue>,
+    deferred: &Mutex<Option<Arc<DeferredMaintenance>>>,
 ) {
+    let (queue, background) = intake;
     let mut admission = fifo.receiver(writer_queue::Admission::new(queue, background));
-    while let Some(job) = admission.next() {
+    let mut due = None;
+    loop {
+        // Check on startup and after every returned loan or committed batch, including local
+        // writes and raw transactions. Keep one deadline rather than enqueueing per write.
+        let work = deferred.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(work) = &work {
+            let run = due.is_some_and(|deadline| std::time::Instant::now() >= deadline);
+            if due.is_none() || run {
+                let started = std::time::Instant::now();
+                let _span = run.then(|| crate::profile::span("trim.rebuild_deferred"));
+                let holder = run.then(crate::windows::holds::Holder::current);
+                let _hold = holder.as_ref().map(|holder| {
+                    crate::windows::holds::WriterHold::start(
+                        crate::windows::holds::HoldKind::Lend,
+                        holder,
+                    )
+                });
+                let _holder = if run {
+                    callbacks.3.map(|writer| writer.holding(None))
+                } else {
+                    None
+                };
+                let pending = match work(&mut connection, run) {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        eprintln!("deferred runtime maintenance failed: {error:#}");
+                        true
+                    }
+                };
+                if run {
+                    publish_writer_boundary(&connection, committed_index, callbacks.0, callbacks.2);
+                }
+                // Rest outside every writer loan. Foreground dispatch continues during this
+                // interval; a busy queue cannot postpone a due maintenance turn forever.
+                due = pending.then(|| std::time::Instant::now()
+                    + started.elapsed().max(std::time::Duration::from_millis(50)));
+            }
+        }
+        let job = match due {
+            Some(deadline) => match admission.next_until(Some(deadline)) {
+                Ok(Some(job)) => job,
+                Ok(None) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            None => match admission.next() {
+                Some(job) => job,
+                None => break,
+            },
+        };
         match job {
-            WriterJob::Lend { lent, returned, holder, enqueued, origin }
-            | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, .. } => {
+            WriterJob::Lend { lent, returned, holder, enqueued, origin, deadline_unix_ms }
+            | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, deadline_unix_ms, .. } => {
                 fifo.dequeued_at(enqueued);
                 telemetry::queued(enqueued.elapsed(), origin.as_ref());
+                if crate::replication::check_receive_deadline(deadline_unix_ms).is_err() {
+                    // Dropping the unanswered loan tells its borrower to return overload.
+                    // No connection was handed out and no write transaction was opened.
+                    continue;
+                }
                 let _hold = crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Lend, &holder);
                 let _holder = callbacks.3.map(|writer| writer.holding(origin));
                 if let Err(std::sync::mpsc::SendError(back)) = lent.send(connection) {
@@ -1011,6 +1206,8 @@ fn run_write_batch(
     let prepare_started = std::time::Instant::now();
     let (transaction, mut failure) = {
         let _scope = crate::task_cpu::blocking_scope("writer.batch.setup");
+        let _performance = crate::performance::current().is_none()
+            .then(|| crate::performance::task_scope("writer.batch.setup"));
         {
             let (transaction, mut failure) =
                 match connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
@@ -1036,6 +1233,7 @@ fn run_write_batch(
         let WriterJob::Batched {
             run,
             profile,
+            charged,
             mut wait,
             holder,
             done,
@@ -1079,10 +1277,12 @@ fn run_write_batch(
                     crate::receive_metrics::WriterSample::start(context, enqueued.elapsed()));
                 hold.running(&holder);
                 // Include SQLite savepoint bookkeeping, not only the submitted callback.
-                // The captured profile remains current; nested CPU wrappers leave their CPU
-                // to this bounded aggregate job scope rather than counting it twice.
-                let savepoint = (|| {
+                // Restore the submitter before the optional aggregate CPU scope enters.
+                // Shared setup/commit work remains outside this per-caller charge.
+                let savepoint = crate::performance::with_charged(charged, || {
                     let _scope = crate::task_cpu::blocking_scope("writer.batch.job");
+                    let _performance = crate::performance::current().is_none()
+                        .then(|| crate::performance::task_scope("writer.batch.job"));
                     transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0699ddd36c05 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "SAVEPOINT batched_write")?;
                     if run(transaction) {
                         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h883bdee42fa8 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "RELEASE batched_write")
@@ -1090,7 +1290,7 @@ fn run_write_batch(
                         transaction
                             .execute_batch(/* sqlite-large-value: allow-for-now lv-h2013f7d4439f owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK TO batched_write; RELEASE batched_write")
                     }
-                })();
+                });
                 drop(receive_hold);
                 crate::profile::writer_released(acquired);
                 hold.ran(&holder, running.elapsed());
@@ -1136,6 +1336,8 @@ fn run_write_batch(
         // A lexical guard does not capture connection while transaction still borrows it.
         // Consume the transaction first, then borrow connection for postcommit observers.
         let _scope = crate::task_cpu::blocking_scope("writer.batch.commit");
+        let _performance = crate::performance::current().is_none()
+            .then(|| crate::performance::task_scope("writer.batch.commit"));
         let committed = match (transaction, failure) {
             (Some(transaction), None) => {
                 let finalize_started = attribution.as_ref().map(|_| std::time::Instant::now());
@@ -1170,15 +1372,7 @@ fn run_write_batch(
         }
         telemetry::METRICS.batch.record(started.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
         telemetry::METRICS.batch_size.record(answers.len() as u64, telemetry::SQLITE.as_slice());
-        if let Ok(index) = current_index(connection) {
-            committed_index.store(index, Ordering::Release);
-        }
-        if let Some(observer) = mutation_observer {
-            observer.resolved(connection);
-        }
-        if committed.is_ok() {
-            observers.notify(connection);
-        }
+        publish_writer_boundary(connection, committed_index, observers, mutation_observer);
         if let (Some(batch), Some(post_commit_started)) = (attribution, post_commit_started) {
             batch.finish(started.elapsed(), post_commit_started.elapsed(), op_count);
         }
@@ -1212,7 +1406,7 @@ impl WriterGuard<'_> {
     pub fn transaction(&mut self) -> Result<WriterTransaction<'_>> {
         let finalizers = self.finalizers.clone();
         let transaction = self.deref_mut().transaction()?;
-        finalizers.prepare(/* sqlite-large-value: allow-for-now lv-hb58bf0cf3d7c owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ &transaction)?;
+        finalizers.prepare(/* sqlite-large-value: allow-for-now lv-h9852919f257c owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ &transaction)?;
         Ok(WriterTransaction::new(transaction, finalizers))
     }
 
@@ -1222,7 +1416,7 @@ impl WriterGuard<'_> {
     ) -> Result<WriterTransaction<'_>> {
         let finalizers = self.finalizers.clone();
         let transaction = self.deref_mut().transaction_with_behavior(behavior)?;
-        finalizers.prepare(/* sqlite-large-value: allow-for-now lv-h9852919f257c owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ &transaction)?;
+        finalizers.prepare(/* sqlite-large-value: allow-for-now lv-hdd96ab3ef510 owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ &transaction)?;
         Ok(WriterTransaction::new(transaction, finalizers))
     }
 }
@@ -1250,13 +1444,7 @@ impl Drop for WriterGuard<'_> {
         let Some(connection) = self.connection.take() else {
             return;
         };
-        if let Ok(index) = current_index(&connection) {
-            self.committed_index.store(index, Ordering::Release);
-        }
-        if let Some(observer) = self.mutation_observer {
-            observer.resolved(&connection);
-        }
-        self.observers.notify(&connection);
+        publish_writer_boundary(&connection, self.committed_index, self.observers, self.mutation_observer);
         crate::touched::note_writes(
             connection
                 .total_changes()
@@ -1272,6 +1460,36 @@ impl Drop for WriterGuard<'_> {
     }
 }
 
+/// Native coverage publication is unconditional. Confirmed write commits also check the
+/// claims index: SQLite can advance AUTOINCREMENT without row hooks or total_changes.
+/// Read-only loans and rollbacks do not probe it; callbacks require committed changes.
+fn publish_writer_boundary(
+    connection: &Connection,
+    committed_index: &AtomicU64,
+    observers: &CommitObservers,
+    mutations: Option<&Arc<writer_observer::MutationState>>,
+) {
+    let Some(mutations) = mutations else { return; };
+    mutations.resolved(connection);
+    let mut changes = mutations.take_committed(connection);
+    if changes.changed() || changes.committed {
+        commit_scope::INDEX_REFRESHES.fetch_add(1, Ordering::Relaxed);
+        match current_index(connection) {
+            Ok(index) => {
+                if index != committed_index.load(Ordering::Acquire) {
+                    changes.index_changed();
+                }
+                committed_index.store(index, Ordering::Release);
+            }
+            Err(_) => changes.unknown = true,
+        }
+    }
+    commit_scope::boundary(&changes);
+    if changes.changed() {
+        observers.notify(connection, &changes);
+    }
+}
+
 /// Read connections, with separate admission and idle-retention ceilings. Top-level API
 /// workers enter admitted request scopes before acquiring a connection or other store locks.
 /// Cross-pool nested scopes never wait for admission, like legacy raw `get`/`try_get`:
@@ -1284,6 +1502,7 @@ pub struct ReadPool {
     pub returned: Condvar,
     pub path: PathBuf,
     pub shared_memory: bool,
+    immutable: bool,
     counts: Arc<ReaderCounts>,
     admission: Arc<Semaphore>,
     diagnostic_id: u64,
@@ -1354,9 +1573,9 @@ pub struct ReadGuard<'a> {
     pub connection: Option<ReadConnection>,
     /// The connection `Store::read_snapshot` pinned for this thread, shared by every read in it.
     pub pinned: Option<Rc<ReadConnection>>,
-    /// Declared last, so it ends after the connection is returned. `None` for a read inside a
-    /// pinned snapshot, which `Store::read_snapshot` already registers.
-    _live: Option<LiveReadToken>,
+    /// Declared last, so it ends after the connection is returned. Borrowing an existing
+    /// snapshot or request loan creates no second physical-loan token.
+    pub(crate) _live: Option<LiveReadToken>,
 }
 
 thread_local! {
@@ -1482,6 +1701,9 @@ pub struct PinnedRead<'a> {
     pub registered: bool,
     /// Times the read transaction until it ends, and names who held one past its target.
     pub transaction: Option<crate::windows::holds::ReadHold>,
+    /// An owned checkout follows its connection through pin cleanup. Borrowed request
+    /// readers retain their token in the enclosing loan instead.
+    pub(crate) _live: Option<LiveReadToken>,
 }
 
 impl Drop for PinnedRead<'_> {
@@ -1508,19 +1730,25 @@ impl Drop for PinnedRead<'_> {
 
 impl ReadPool {
     pub fn new(path: &Path, shared_memory: bool) -> Result<Self> {
-        Self::new_with(path, shared_memory, None,
+        Self::new_with(path, shared_memory, false, None,
+            #[cfg(any(test, feature = "test-support"))] None)
+    }
+
+    /// Readers of a cleanly stopped offline source never create or update WAL/SHM files.
+    pub(crate) fn new_immutable(path: &Path) -> Result<Self> {
+        Self::new_with(path, false, true, None,
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
     pub(crate) fn new_admitted(admitted: Arc<crate::store::AdmittedStore>) -> Result<Self> {
         let path = admitted.database_path().to_path_buf();
-        Self::new_with(&path, false, Some(admitted),
+        Self::new_with(&path, false, false, Some(admitted),
             #[cfg(any(test, feature = "test-support"))] None)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_temporary(path: &Path, directory: Option<Arc<tempfile::TempDir>>) -> Result<Self> {
-        Self::new_with(path, false, None, directory)
+        Self::new_with(path, false, false, None, directory)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1539,6 +1767,7 @@ impl ReadPool {
     fn new_with(
         path: &Path,
         shared_memory: bool,
+        immutable: bool,
         admitted: Option<Arc<crate::store::AdmittedStore>>,
         #[cfg(any(test, feature = "test-support"))]
         temporary_directory: Option<Arc<tempfile::TempDir>>,
@@ -1548,6 +1777,7 @@ impl ReadPool {
             returned: Condvar::new(),
             path: path.to_path_buf(),
             shared_memory,
+            immutable,
             counts: Arc::new(ReaderCounts::default()),
             admission: Arc::new(Semaphore::new(constructor_read_limit())),
             diagnostic_id: read_lifetime::next_pool_id(),
@@ -1582,7 +1812,11 @@ impl ReadPool {
 
     fn open_connection(&self) -> Result<ReadConnection> {
         let connection = if let Some(admitted) = &self.admitted {
-            configure_open_read_connection(admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)?)?
+            let connection = admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            crate::store::blob_file::attach_reader(&connection, admitted.database_path(), false)?;
+            configure_open_read_connection(connection)?
+        } else if self.immutable {
+            open_immutable_read_connection(&self.path)?
         } else {
             open_read_connection(&self.path, self.shared_memory)?
         };
@@ -1857,7 +2091,7 @@ impl ReadPool {
                     connection
                 }
                 Err(error) => {
-                    eprintln!("st3: open another read connection: {error:#}; waiting for one");
+                    eprintln!("fractal: open another read connection: {error:#}; waiting for one");
                     let wait_started = std::time::Instant::now();
                     let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
                     loop {
@@ -1966,10 +2200,14 @@ pub static SQLITE_COMMITS: AtomicU64 = AtomicU64::new(0);
 pub static SQLITE_COMMIT_NANOS: AtomicU64 = AtomicU64::new(0);
 
 pub fn record_sqlite_time(statement: &str, duration: std::time::Duration) {
+    record_sqlite_time_with_reads(statement, duration, 0);
+}
+
+fn record_sqlite_time_with_reads(statement: &str, duration: std::time::Duration, bytes: u64) {
     #[cfg(any(test, feature = "test-support"))]
     STATEMENTS_RUN.with(|run| run.set(run.get() + 1));
     crate::profile::sql(statement, duration);
-    crate::performance::record_query(statement, duration);
+    crate::performance::record_query_with_reads(statement, duration, bytes);
     crate::windows::record_store(crate::windows::StoreWork::Statement, duration);
     #[cfg(any(test, feature = "test-support"))]
     histogram::record(statement, duration);
@@ -1983,9 +2221,66 @@ pub fn record_sqlite_time(statement: &str, duration: std::time::Duration) {
 /// Record every statement `connection` runs: its time in the profile, and with `test-support`,
 /// its work in [`work`].
 pub fn observe(connection: &mut Connection) {
-    #[cfg(any(test, feature = "test-support"))]
-    work::count(connection);
-    connection.profile(Some(record_sqlite_time));
+    census_files::register(connection);
+    let page_size = performance_page_size(connection);
+    // The context is an integer, not an allocated pointer. SQLite retains it unchanged.
+    // SAFETY: SQLite owns the live statement passed to this synchronous callback.
+    unsafe {
+        ffi::sqlite3_trace_v2(
+            connection.handle(),
+            (ffi::SQLITE_TRACE_STMT | ffi::SQLITE_TRACE_PROFILE) as std::ffi::c_uint,
+            Some(performance_trace),
+            page_size as *mut std::ffi::c_void,
+        );
+    }
+}
+
+fn performance_page_size(connection: &Connection) -> usize {
+    connection.pragma_query_value(None, "page_size", |row| row.get(0))
+        .expect("SQLite exposes the main database page size")
+}
+
+/// One O(1) counter read/reset per completed statement, without allocation or locking.
+/// Nested statements/triggers consume the shared counter only once.
+/// This measures SQLite pager misses, not physical disk reads; mmap bypasses it.
+unsafe fn performance_reads(database: *mut ffi::sqlite3, page_size: usize) -> u64 {
+    let mut misses = 0;
+    let mut highwater = 0;
+    // SAFETY: the trace callback supplies its live database; both outputs are valid.
+    let status = unsafe {
+        ffi::sqlite3_db_status(database, ffi::SQLITE_DBSTATUS_CACHE_MISS, &mut misses, &mut highwater, 1)
+    };
+    let bytes = if status == ffi::SQLITE_OK {
+        (misses.max(0) as u64).saturating_mul(page_size as u64)
+    } else {
+        0
+    };
+    crate::performance::sqlite_reads(bytes);
+    bytes
+}
+
+unsafe extern "C" fn performance_trace(
+    event: std::ffi::c_uint,
+    context: *mut std::ffi::c_void,
+    statement: *mut std::ffi::c_void,
+    detail: *mut std::ffi::c_void,
+) -> std::ffi::c_int {
+    // SAFETY: SQLite supplies live pointers for this synchronous callback. Never
+    // unwind through C. The context carries only the page-size integer.
+    let _ = std::panic::catch_unwind(|| unsafe {
+        #[cfg(any(test, feature = "test-support"))]
+        work::traced(event, std::ptr::null_mut(), statement, detail);
+        let statement = statement.cast::<ffi::sqlite3_stmt>();
+        if event == ffi::SQLITE_TRACE_PROFILE as std::ffi::c_uint {
+            let bytes = performance_reads(ffi::sqlite3_db_handle(statement), context as usize);
+            let sql = ffi::sqlite3_sql(statement);
+            if !sql.is_null() {
+                let sql = std::ffi::CStr::from_ptr(sql).to_string_lossy();
+                record_sqlite_time_with_reads(&sql, std::time::Duration::from_nanos(*detail.cast::<u64>()), bytes);
+            }
+        }
+    });
+    0
 }
 
 /// Every statement this process ran since the last [`histogram::take`], by normalized text, so a
@@ -2046,7 +2341,9 @@ pub mod work {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, PoisonError};
 
-    use rusqlite::{Connection, ffi};
+    #[cfg(test)]
+    use rusqlite::Connection;
+    use rusqlite::ffi;
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct SqliteWork {
@@ -2082,9 +2379,55 @@ pub mod work {
     static AUTOINDEX_ROWS: AtomicU64 = AtomicU64::new(0);
 
     thread_local! {
+        static WRITER_LOANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static THREAD_WORK: std::cell::Cell<SqliteWork> = const { std::cell::Cell::new(SqliteWork {
             statements:0,vm_steps:0,fullscan_steps:0,sorts:0,autoindex_rows:0,
         }) };
+    }
+
+    thread_local! {
+        /// The capture this thread started, if any. `traced` copies a statement's expanded
+        /// SQL into it, so no per-statement allocation happens unless a capture is running.
+        static CAPTURED_SQL: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The expanded SQL of every statement this thread starts while the guard lives, with the
+    /// same thread attribution as [`SqliteWorkScope`]: writer loans and readers this thread
+    /// runs are captured, and other threads' work is not. Layered into `traced`, it keeps
+    /// working under the native mutation dispatcher, which installs and reinstalls that one
+    /// callback; a raw `Connection::trace` would be clobbered by it.
+    pub struct SqlCapture {
+        buffer: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        previous: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    }
+
+    impl SqlCapture {
+        pub fn start() -> Self {
+            let buffer = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let previous = CAPTURED_SQL
+                .with(|capture| capture.borrow_mut().replace(std::rc::Rc::clone(&buffer)));
+            Self { buffer, previous }
+        }
+
+        /// The statements captured so far, emptying the buffer and leaving the capture running.
+        pub fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.buffer.borrow_mut())
+        }
+    }
+
+    impl Drop for SqlCapture {
+        fn drop(&mut self) {
+            CAPTURED_SQL.with(|capture| {
+                let mut capture = capture.borrow_mut();
+                if capture
+                    .as_ref()
+                    .is_some_and(|active| std::rc::Rc::ptr_eq(active, &self.buffer))
+                {
+                    *capture = self.previous.take();
+                }
+            });
+        }
     }
 
     /// Completed traced statements on this thread within one explicit scope. It counts every
@@ -2110,6 +2453,16 @@ pub mod work {
         }
     }
 
+    /// Writer loans acquired by this caller thread, including loans that execute no SQL.
+    /// Snapshot outside setup and verification queries to measure only the operation.
+    pub fn writer_loans() -> u64 {
+        WRITER_LOANS.with(std::cell::Cell::get)
+    }
+
+    pub(super) fn record_writer_loan() {
+        WRITER_LOANS.with(|count| count.set(count.get() + 1));
+    }
+
     /// Everything counted so far, in every connection of this process.
     pub fn total() -> SqliteWork {
         SqliteWork {
@@ -2121,6 +2474,7 @@ pub mod work {
         }
     }
 
+    #[cfg(test)]
     /// Count `connection`'s statements. SQLite reports each one when it starts and when it
     /// finishes, also when a trigger or a foreign-key check did the work inside it.
     pub(super) fn count(connection: &Connection) {
@@ -2147,7 +2501,7 @@ pub mod work {
     /// its runs until someone resets them, and tests read them too, so this never resets them.
     static STARTED: Mutex<BTreeMap<usize, [u64; 4]>> = Mutex::new(BTreeMap::new());
 
-    unsafe extern "C" fn traced(
+    pub(super) unsafe extern "C" fn traced(
         event: c_uint,
         _context: *mut c_void,
         statement: *mut c_void,
@@ -2160,6 +2514,18 @@ pub mod work {
         let now = COUNTERS.map(|counter| u64::try_from(read(counter)).unwrap_or(0));
         let mut started = STARTED.lock().unwrap_or_else(PoisonError::into_inner);
         if event == ffi::SQLITE_TRACE_STMT as c_uint {
+            if let Some(captured) = CAPTURED_SQL.with(|capture| capture.borrow().as_ref().map(std::rc::Rc::clone)) {
+                // SQLITE_TRACE_STMT detail contains unexpanded SQL (or a trigger
+                // comment). Expand the live statement explicitly for EXPLAIN fixtures.
+                // SAFETY: SQLite owns the live statement; its allocated expansion is
+                // copied while valid and released with SQLite's matching allocator.
+                let raw = unsafe { ffi::sqlite3_expanded_sql(statement) };
+                if !raw.is_null() {
+                    let sql = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+                    unsafe { ffi::sqlite3_free(raw.cast()) };
+                    captured.borrow_mut().push(sql);
+                }
+            }
             // A trigger's start reports the statement again; the first start counts.
             started.entry(key).or_insert(now);
             return 0;
@@ -2247,12 +2613,19 @@ pub mod work {
                 statement.query_row([],|row|row.get::<_,u64>(0)).unwrap();
                 capture.store(statement.get_status(rusqlite::StatementStatus::VmStep) as u64,Ordering::Relaxed);
             });
+            // The native contract publishes nothing for an unchanged loan, so the fixture
+            // commits an actual mutation; the loan's whole return, including the observer
+            // the dispatcher publishes at guard return, stays inside the one scope.
             let scope = SqliteWorkScope::start();
-            drop(writer.write());
+            let guard = writer.write();
+            guard
+                .execute("INSERT INTO claims(store_index) VALUES (1)", [])
+                .unwrap();
+            drop(guard);
             let work = scope.finish();
             assert_eq!(
-                work.statements, 2,
-                "committed index read plus returned-guard observer"
+                work.statements, 3,
+                "the committed mutation, its index read and the returned-guard observer"
             );
             assert!(observed_vm.load(Ordering::Relaxed) > 0);
             assert!(work.vm_steps > observed_vm.load(Ordering::Relaxed));
@@ -2303,7 +2676,55 @@ pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connecti
     };
     let connection = Connection::open_with_flags(path, flags)
         .with_context(|| format!("open st read connection {}", path.display()))?;
+    crate::store::blob_file::attach_reader(&connection, path, false)?;
     configure_open_read_connection(connection)
+}
+
+/// Encode a native filename, not a caller-supplied SQLite URI. In particular, `?`, `#`
+/// and `%` in source paths must not become URI options or change the opened database.
+pub(crate) fn immutable_database_uri(path: &Path) -> Result<String> {
+    let mut uri = String::from("file:");
+    use std::fmt::Write as _;
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'/' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(char::from(byte));
+            }
+            _ => write!(uri, "%{byte:02X}")?,
+        }
+    }
+    uri.push_str("?mode=ro&immutable=1");
+    Ok(uri)
+}
+
+/// Immutable SQLite ignores WAL, so refuse any nonempty WAL before opening the file.
+/// This is an offline contract: the caller must keep the source stopped throughout export.
+pub(crate) fn open_immutable_read_connection(path: &Path) -> Result<Connection> {
+    let path = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve offline backup database {}", path.display()))?;
+    require_checkpointed_backup_database(&path)?;
+    let uri = immutable_database_uri(&path)?;
+    let connection = Connection::open_with_flags(
+        uri, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    ).with_context(|| format!("open immutable backup read connection {}", path.display()))?;
+    crate::store::blob_file::attach_reader(&connection, &path, true)?;
+    configure_open_read_connection(connection)
+}
+
+pub(crate) fn require_checkpointed_backup_database(path: &Path) -> Result<()> {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let wal = PathBuf::from(wal);
+    match std::fs::metadata(&wal) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.len() == 0,
+            "read-only backup refuses nonempty WAL {}; source must be cleanly stopped and checkpointed before exporting",
+            wal.display(),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspect offline backup WAL {}", wal.display())),
+    }
+    Ok(())
 }
 
 fn configure_open_read_connection(mut connection: Connection) -> Result<Connection> {
@@ -2359,6 +2780,7 @@ mod tests {
                     true
                 }),
                 profile: None,
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
@@ -2423,6 +2845,7 @@ mod tests {
                     true
                 }),
                 profile: None,
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
@@ -2729,6 +3152,7 @@ mod tests {
                     index == 0 // The second job rolls back only its own savepoint.
                 }),
                 profile: Some(operation.clone()),
+                charged: None,
                 wait: None,
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
@@ -2826,15 +3250,17 @@ mod tests {
                     true
                 }),
                 profile: None, wait: None, holder: crate::windows::holds::Holder::current(), enqueued, done,
+                charged: None,
             }).map_err(Box::new)).unwrap();
             answers.push(answer);
         }
         let observed = fifo.clone();
         let thread = std::thread::spawn(move || {
-            write_queue(writer, receiver, &AtomicU64::new(0),
+            write_queue(writer, (receiver, Arc::new(writer_queue::BackgroundAdmission::default())), &AtomicU64::new(0),
                 &(AtomicU64::new(0), AtomicU64::new(0)),
                 (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
-                Arc::new(writer_queue::BackgroundAdmission::default()), &observed);
+                &observed,
+                &Mutex::new(None));
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while fifo.depth_for_test() == 2 && std::time::Instant::now() < deadline {
@@ -2958,6 +3384,7 @@ mod tests {
         let pool = ReadPool::new(&path, false).unwrap();
         let mut guard = pool.get();
         let connection = Rc::new(guard.connection.take().unwrap());
+        let live = guard._live.take();
         drop(guard);
         let escaped = connection.clone();
         drop(PinnedRead {
@@ -2965,6 +3392,7 @@ mod tests {
             connection: Some(connection),
             registered: false,
             transaction: None,
+            _live: live,
         });
         assert_eq!((pool.usage().open, pool.usage().idle), (1, 0));
         drop(escaped);
@@ -3027,6 +3455,7 @@ mod commit_observer_tests {
                 true
             }),
             profile: None,
+            charged: None,
             wait: None,
             holder: crate::windows::holds::Holder::current(),
             done,
@@ -3439,5 +3868,92 @@ mod read_cancellation_tests {
             assert!(pool.get().is_autocommit());
         })).unwrap();
         assert_eq!(pool.usage().idle, 1);
+    }
+}
+
+#[cfg(test)]
+mod deferred_maintenance_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn writer() -> WriterConnection {
+        WriterConnection::new(
+            Connection::open_in_memory().unwrap(),
+            Arc::new(AtomicU64::new(0)),
+        )
+    }
+
+    #[test]
+    fn startup_backlog_is_paced_and_releases_writer_between_chunks() {
+        let writer = writer();
+        let remaining = Arc::new(AtomicU64::new(3));
+        let pending = remaining.clone();
+        let advancing = remaining.clone();
+        let (done, completed) = std::sync::mpsc::channel();
+        writer.install_deferred_maintenance(
+            move |_| Ok(pending.load(Ordering::Acquire) != 0),
+            move |_| {
+                let left = advancing.fetch_sub(1, Ordering::AcqRel) - 1;
+                done.send(left).unwrap();
+                Ok(left != 0)
+            },
+        );
+        assert_eq!(completed.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+        // A foreground loan remains available while the same backlog is still pending.
+        drop(writer.write());
+        assert_eq!(completed.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+        assert_eq!(completed.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        drop(writer);
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn returned_local_loans_and_batches_wake_idle_deferred_work() {
+        let writer = writer();
+        let pending = Arc::new(AtomicBool::new(false));
+        let checking = pending.clone();
+        let advancing = pending.clone();
+        let (done, completed) = std::sync::mpsc::channel();
+        writer.install_deferred_maintenance(
+            move |_| Ok(checking.load(Ordering::Acquire)),
+            move |_| {
+                advancing.store(false, Ordering::Release);
+                done.send(()).unwrap();
+                Ok(false)
+            },
+        );
+        {
+            let _loan = writer.write();
+            pending.store(true, Ordering::Release);
+        }
+        completed.recv_timeout(Duration::from_secs(5)).unwrap();
+        writer.batched(|_| {
+            pending.store(true, Ordering::Release);
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+        completed.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn continuous_backlog_does_not_block_callers_or_leak_worker_on_drop() {
+        let writer = writer();
+        let lifetime = Arc::new(());
+        let weak = Arc::downgrade(&lifetime);
+        let (done, completed) = std::sync::mpsc::channel();
+        writer.install_deferred_maintenance(
+            |_| Ok(true),
+            move |_| {
+                let _keep_alive = &lifetime;
+                let _ = done.send(());
+                Ok(true)
+            },
+        );
+        // Installation returns even though no drain could ever reach an empty queue.
+        completed.recv_timeout(Duration::from_secs(5)).unwrap();
+        for _ in 0..32 {
+            drop(writer.write());
+        }
+        drop(writer);
+        assert!(weak.upgrade().is_none());
     }
 }

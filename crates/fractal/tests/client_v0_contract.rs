@@ -3287,6 +3287,24 @@ async fn read_only_pairing_reads_projections_and_arrangements_but_is_denied_acti
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{why}: {body}");
     }
 
+    // A tag-reader requests no terminal capability, unlike the --read-only preset.
+    let tag_reader_scopes = serde_json::json!(["read.projections", "read.glasses", "read.arrangements"]);
+    let (status, challenge) = client_post_json_person(
+        local.clone(), "/v1/client/pairings", "person/ada", begin(tag_reader_scopes.clone()),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{challenge}");
+    let pairing = challenge["value"]["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let (status, paired) = client_post_json(
+        gateway.clone(), &format!("/v1/client/pairings/{pairing}/complete"),
+        serde_json::json!({
+            "api_version": "st3.client.v0",
+            "code": challenge["value"]["code"],
+            "device_public_key": "tag-reader-test-display-key-00000000000000000"
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{paired}");
+    assert_eq!(paired["value"]["scopes"], tag_reader_scopes);
+
     let (status, challenge) = client_post_json_person(
         local.clone(),
         "/v1/client/pairings",

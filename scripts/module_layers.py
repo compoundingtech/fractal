@@ -419,7 +419,7 @@ def reverse_closure(edges, start):
 
 
 def modules_of_paths(root, paths):
-    """Modules named by changed paths, and the paths that belong to no st3 module."""
+    """Modules named by changed paths, and the paths that belong to no Fractal module."""
     found, other = set(), []
     for path in paths:
         for directory in SOURCE_DIRS:

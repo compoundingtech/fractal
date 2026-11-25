@@ -20,6 +20,12 @@ pub struct State {
     accepted: BTreeSet<String>,
     #[serde(default)]
     receipt_records: BTreeMap<String, Option<crate::conversation_delivery::NativeReceipt>>,
+    #[serde(default)]
+    input_acceptances: BTreeMap<String, fractal_drivers::delivery_ledger::InputAcceptance>,
+    #[serde(default)]
+    attempt_incarnations: BTreeMap<String, String>,
+    #[serde(default)]
+    attempt_started_at: BTreeMap<String, u64>,
     lines: fractal_drivers::reexec::LineBuffer,
 }
 #[derive(Default, Deserialize, Serialize)]
@@ -31,6 +37,12 @@ pub struct Handoffs {
     accepted: BTreeSet<String>,
     #[serde(default)]
     receipt_records: BTreeMap<String, Option<crate::conversation_delivery::NativeReceipt>>,
+    #[serde(default)]
+    input_acceptances: BTreeMap<String, fractal_drivers::delivery_ledger::InputAcceptance>,
+    #[serde(default)]
+    attempt_incarnations: BTreeMap<String, String>,
+    #[serde(default)]
+    attempt_started_at: BTreeMap<String, u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -80,12 +92,19 @@ pub async fn run(
         // before any new offer; absence of proof gets a typed diagnostic, never an
         // unconditional replay of instructions whose consumption is uncertain.
         let ledger = ledger.unwrap_or_default();
+        let attempt_incarnations = ledger.attempted.iter().map(|message| (
+            message.clone(), ledger.attempt_incarnations.get(message)
+                .cloned().unwrap_or_else(|| ledger.incarnation.clone()),
+        )).collect();
         State {
             fence: Fence::new(subject, "", "delivery"),
             attempted: ledger.attempted,
             confirmed: ledger.confirmed,
             accepted: ledger.accepted,
             receipt_records: ledger.receipt_records,
+            input_acceptances: ledger.input_acceptances,
+            attempt_incarnations,
+            attempt_started_at: ledger.attempt_started_at,
             ..State::default()
         }
     };
@@ -211,6 +230,7 @@ pub async fn run(
                     "ready":state.initialized,
                     "reason":legacy.then_some("legacy ownership: unprotected until next natural restart")}));
                 if state.initialized && replayed {
+                    let source_cut = u64::try_from(chrono::Utc::now().timestamp_millis())?;
                     // The stream grants eligibility only to live mail. Retained handoffs can
                     // still acquire missing receipts from native proof, without another offer.
                     let live: BTreeSet<_> = messages.iter().filter(|message| matches!(message.status.as_str(), "sent" | "staged" | "delivered"))
@@ -319,6 +339,7 @@ pub async fn run(
                                 retries.remove("transcript");
                                 for record in records {
                                     for (message, envelope) in &content {
+                                        dirty |= record_input_acceptance(&mut state, &record, message, envelope);
                                         if native_receipt(&record, envelope) {
                                             // Freeze the exact receipt payload before its first POST;
                                             // a lost ACK retries identical metadata after reexec too.
@@ -368,6 +389,9 @@ pub async fn run(
                         // Persist the handoff before stdout. A broken pipe cannot authorize
                         // repeating an uncertain notification. Restart first checks native proof.
                         state.attempted.insert(message.subject.clone());
+                        state.attempt_incarnations.insert(message.subject.clone(), state.fence.incarnation.clone());
+                        state.attempt_started_at.insert(message.subject.clone(),
+                            u64::try_from(chrono::Utc::now().timestamp_millis())?);
                         save_handoffs(&ledger_path, &state)?;
                         unconfirmed_since.insert(message.subject.clone(), Instant::now());
                         write(&mut stdout, &json!({"jsonrpc":"2.0","method":"notifications/claude/channel",
@@ -382,6 +406,17 @@ pub async fn run(
                         let key = format!("receipt:{message}");
                         if !retry_ready(&retries, &key) { continue; }
                         let result = async {
+                            if let Some(acceptance) = state.input_acceptances.get(&message)
+                                && acceptance.incarnation == state.fence.incarnation
+                            {
+                                let mut request = serde_json::to_value(&state.fence)?;
+                                request["message"] = json!(message);
+                                request["lifecycle"] = json!("accepted");
+                                request["input_acceptance"] = json!({
+                                    "accepted_at_unix_ms": acceptance.accepted_at_unix_ms,
+                                });
+                                let _: ClaimRecord = client.post("/v1/mailbox/receipts", &request).await?;
+                            }
                             receipt(client, &state.fence, &message, "delivered").await?;
                             if state.confirmed.contains(&message) {
                                 receipt_with_record(client, &state.fence, &message, "read",
@@ -409,6 +444,28 @@ pub async fn run(
                         }
                     }
                     if dirty { save_handoffs(&ledger_path, &state)?; }
+                    if retry_ready(&retries, "acceptance-frontier") {
+                        let code = "claude-acceptance-frontier-unsettled";
+                        let key = format!("{code}:{}:{}:acceptance-frontier", state.fence.subject, state.fence.incarnation);
+                        let failure = match publish_acceptance_frontier(client, &state, source_cut).await {
+                            Ok(()) => {
+                                retries.remove("acceptance-frontier");
+                                None
+                            },
+                            Err(error) => {
+                                retry_failed(&mut retries, "acceptance-frontier");
+                                Some(format!("Native input acceptance coverage could not be published; retaining unresolved handoff bounds and retrying publication with backoff up to 30s: {error:#}"))
+                            }
+                        };
+                        // As with consumption receipts, daemon outages are protocol-visible
+                        // waiting diagnostics, not output in the person's Claude terminal.
+                        // Keep the first failed payload and drain it even if coverage recovers
+                        // before the daemon can acknowledge the diagnostic.
+                        if failure.is_some() || diagnostics.get(&key).is_some_and(|report| !report.recorded) {
+                            diagnostic(client, &state.fence, "acceptance-frontier", code,
+                                failure.as_deref().unwrap_or_default(), &mut diagnostics).await;
+                        }
+                    }
                 }
                 if let Some(binary) = watch.as_mut().and_then(|watch| tokio::task::block_in_place(|| watch.ready())) {
                     if let Some(reader) = reader.take() { tokio::task::block_in_place(|| reader.stop()); }
@@ -710,6 +767,9 @@ fn save_handoffs(path: &Path, state: &State) -> Result<()> {
             confirmed: state.confirmed.clone(),
             accepted: state.accepted.clone(),
             receipt_records: state.receipt_records.clone(),
+            input_acceptances: state.input_acceptances.clone(),
+            attempt_incarnations: state.attempt_incarnations.clone(),
+            attempt_started_at: state.attempt_started_at.clone(),
         },
     )?;
     file.flush()?;
@@ -787,6 +847,73 @@ impl Transcript {
         Ok(records)
     }
 }
+fn input_acceptance_frontier(state: &State, cut: u64) -> Option<u64> {
+    let mut through = cut;
+    for message in &state.attempted {
+        let incarnation = state.attempt_incarnations.get(message)?;
+        if state.input_acceptances.get(message)
+            .is_some_and(|receipt| receipt.incarnation == *incarnation)
+            && (incarnation == &state.fence.incarnation
+                || (!state.accepted.contains(message) && !state.confirmed.contains(message)))
+        { continue; }
+        through = through.min(state.attempt_started_at.get(message)?.saturating_sub(1));
+    }
+    Some(through)
+}
+
+async fn publish_acceptance_frontier(client: &Client, state: &State, cut: u64) -> Result<()> {
+    let Some(through) = input_acceptance_frontier(state, cut) else { return Ok(()) };
+    // Drain durable certificates still awaiting their receipt ACK, including retained mail.
+    // Entries removed from accepted/confirmed already crossed that same POST barrier.
+    for (message, receipt) in &state.input_acceptances {
+        if receipt.incarnation != state.fence.incarnation { continue; }
+        if !state.accepted.contains(message) && !state.confirmed.contains(message) { continue; }
+        let mut request = serde_json::to_value(&state.fence)?;
+        request["message"] = json!(message);
+        request["lifecycle"] = json!("accepted");
+        request["input_acceptance"] = json!({"accepted_at_unix_ms":receipt.accepted_at_unix_ms});
+        let _: ClaimRecord = client.post("/v1/mailbox/receipts", &request).await?;
+    }
+    let mut request = serde_json::to_value(&state.fence)?;
+    request["observed_through_unix_ms"] = json!(through);
+    let _: Value = client.post("/v1/mailbox/acceptance-frontier", &request).await?;
+    Ok(())
+}
+
+fn record_input_acceptance(state: &mut State, record: &Value, message: &str, envelope: &str) -> bool {
+    if !(native_acceptance(record, envelope) || native_receipt(record, envelope)) {
+        return false;
+    }
+    let Some(timestamp) = native_acceptance_timestamp(record) else { return false };
+    let Some(incarnation) = state.attempt_incarnations.get(message) else { return false };
+    let receipt = fractal_drivers::delivery_ledger::InputAcceptance {
+        incarnation: incarnation.clone(), accepted_at_unix_ms: timestamp,
+    };
+    match state.input_acceptances.entry(message.to_owned()) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(receipt);
+            true
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            if timestamp < entry.get().accepted_at_unix_ms {
+                entry.insert(receipt);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// The native record's own clock survives transcript replay and channel restart. Missing
+/// source clocks are unknown, never replaced with the time a receipt pump happened to run.
+fn native_acceptance_timestamp(record: &Value) -> Option<u64> {
+    let timestamp = record["timestamp"].as_str()?;
+    chrono::DateTime::parse_from_rfc3339(timestamp).ok()
+        .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
+        .filter(|timestamp| *timestamp > 0)
+}
+
 fn native_acceptance(record: &Value, envelope: &str) -> bool {
     record["type"] == "queue-operation"
         && record["operation"] == "enqueue"
@@ -1625,6 +1752,75 @@ mod tests {
         bytes.resize(TRANSCRIPT_WINDOW + 4, b' ');
         std::fs::write(&path, &bytes).unwrap();
         assert_eq!(Transcript::default().appended(&path).unwrap(), [record]);
+    }
+
+    #[test]
+    fn claude_replacement_frontier_keeps_old_unresolved_or_unacknowledged_handoffs() {
+        let mut state = State {
+            fence: Fence::new("agent/fixture", "runtime-2", "delivery"),
+            ..Default::default()
+        };
+        state.attempted.insert("message/old".into());
+        state.attempt_incarnations.insert("message/old".into(), "runtime-1".into());
+        assert_eq!(input_acceptance_frontier(&state, 300), None);
+        state.attempt_started_at.insert("message/old".into(), 100);
+        assert_eq!(input_acceptance_frontier(&state, 300), Some(99));
+        let record = json!({"type":"queue-operation","operation":"enqueue",
+            "content":"SIGNAL","timestamp":"2026-11-18T00:00:00.123Z"});
+        record_input_acceptance(&mut state, &record, "message/old", "SIGNAL");
+        state.accepted.insert("message/old".into());
+        assert_eq!(input_acceptance_frontier(&state, 300), Some(99),
+            "a stranded old certificate cannot be POSTed under the replacement fence");
+        state.accepted.remove("message/old");
+        assert_eq!(input_acceptance_frontier(&state, 300), Some(300),
+            "the original receipt ACK resolves source uncertainty");
+    }
+
+    #[test]
+    fn claude_frontier_stops_before_unresolved_native_enqueue_after_restart() {
+        let mut state = State {
+            fence: Fence::new("agent/fixture", "runtime-1", "delivery"),
+            ..Default::default()
+        };
+        assert_eq!(input_acceptance_frontier(&state, 200), Some(200));
+        state.attempted.insert("message/fixture".into());
+        state.attempt_incarnations.insert("message/fixture".into(), "runtime-1".into());
+        assert_eq!(input_acceptance_frontier(&state, 200), None);
+        state.attempt_started_at.insert("message/fixture".into(), 100);
+        let resumed: State = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(input_acceptance_frontier(&resumed, 200), Some(99));
+        let record = json!({"type":"queue-operation","operation":"enqueue",
+            "content":"SIGNAL","timestamp":"2026-11-18T00:00:00.123Z"});
+        assert!(record_input_acceptance(&mut state, &record, "message/fixture", "SIGNAL"));
+        assert_eq!(input_acceptance_frontier(&state, 200), Some(200));
+    }
+
+    #[test]
+    fn claude_input_acceptance_keeps_native_first_clock_and_original_incarnation_on_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native-channel-handoffs.json");
+        let mut state = State {
+            fence: Fence::new("agent/fixture", "runtime-1", "delivery"),
+            ..Default::default()
+        };
+        state.attempted.insert("message/fixture".into());
+        state.attempt_incarnations.insert("message/fixture".into(), "runtime-1".into());
+        let envelope = "GENERIC SIGNAL";
+        let mut record = json!({"type":"queue-operation","operation":"enqueue",
+            "content":envelope,"timestamp":"2026-11-18T00:00:00.123Z"});
+        assert!(record_input_acceptance(&mut state, &record, "message/fixture", envelope));
+        let first = state.input_acceptances["message/fixture"].clone();
+        record["timestamp"] = json!("2026-11-18T00:00:01Z");
+        assert!(!record_input_acceptance(&mut state, &record, "message/fixture", envelope));
+        assert!(!record_input_acceptance(&mut state, &record, "message/fixture", "OTHER SIGNAL"));
+        record.as_object_mut().unwrap().remove("timestamp");
+        assert!(!record_input_acceptance(&mut state, &record, "message/fixture", envelope));
+        save_handoffs(&path, &state).unwrap();
+        let ledger: Handoffs = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(ledger.input_acceptances["message/fixture"], first);
+        assert_eq!(first.incarnation, "runtime-1");
+        assert_eq!(first.accepted_at_unix_ms, 1_794_960_000_123);
+        assert!(ledger.confirmed.is_empty(), "acceptance must not invent model consumption");
     }
 
     #[test]

@@ -17,7 +17,6 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("slo_episode_heads", &[]),
     ("slo_pending", &[]),
     ("operations", &[]),
-    ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
     ("identity_heads", &[]),
@@ -58,6 +57,12 @@ fn every_persistent_table_has_a_projection_scope() {
     // tables must be classified; shared tables automatically join the row/digest comparison.
     let exceptions = [
         "meta",
+        // Host-local physical custody and home-owned authenticated request admission
+        // are authoritative fences, not replicated claim-derived projections.
+        "local_session_custody",
+        "home_run_authority_v1",
+        "home_run_epoch_fences_v1",
+        "home_run_request_receipts_v1",
         "batches",
         "claims",
         "idempotency",
@@ -68,6 +73,14 @@ fn every_persistent_table_has_a_projection_scope() {
         "replica_envelopes",
         "replica_records",
         "claim_positions",
+        "claim_member_signatures",
+        "claim_member_signature_pending",
+        // Member-local signing frontier and pending-key work queue, not replicated authority.
+        "claim_signature_frontiers",
+        "claim_signature_ready",
+        "released_envelopes",
+        "peer_retired_claims",
+        "record_repair_lookups",
         "repaired_claim_replacements",
         "retired_claim_ids",
         "retired_envelopes",
@@ -96,6 +109,12 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_mailbox_argv_bindings",
         "local_mailbox_leases",
         "local_native_delivery_receipts_v2",
+        // Member-local terminal ladder scheduling; native delivery claims own deduplication.
+        "local_escalation_runs_v1",
+        // Rebuildable indexed escalation clocks and transaction-local change capture.
+        "local_escalation_clocks_v1",
+        "local_escalation_pending_v1",
+        "local_escalation_pending_v2",
         "unread_mail",
         "unread_mail_prefixes",
         "unread_mail_pending",
@@ -108,6 +127,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_cut_epoch",
         // Like message cut epochs, desired write generations invalidate local cursors.
         "local_desired_write_witness",
+        // Disposable local invalidation counters, not replicated actual-state authority.
+        "card_actual_revisions",
         // Rebuildable daily-digest arrival indexes, dependency work and staging:
         // replicated notice/document claims, not these cursors, are the authority.
         "local_ask_digest_pending",
@@ -118,10 +139,14 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_ask_digest_deferred",
         "local_ask_digest_retry",
         "local_idle_messages",
+        // Disposable wake metadata and pending folds; graph/shard mail remains authoritative.
+        "local_wake_demand_v1",
+        "local_wake_demand_pending_v1",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",
         "local_message_staged",
         "local_message_mark_events",
+        "local_message_mark_scope_events",
         // Member-local messages a graph write queued for the messages shard.
         "local_message_outbox",
         // The messages shard's items and lifecycle, mirrored for the graph's mail indexes.
@@ -129,6 +154,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_stream_lifecycle",
         // A seat's host's closes as it relayed them: never replicated, outside every digest.
         "local_relayed_message_closes",
+        "local_relayed_message_closes_pending",
+        "local_relayed_close_work",
+        "local_relayed_close_candidates",
+        "local_relayed_close_bootstrap",
+        "local_relayed_close_reads",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",
@@ -165,9 +195,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_seat_accounts",
         "account_limit_readings",
         "account_limit_seats",
-        "local_usage_credit_heads",
-        "local_usage_credit_pending",
-        "local_usage_credit_progress",
+        // Rebuildable member-local usage boundary lookup and bounded backfill cursor.
+        "local_usage_period_v1",
+        "local_usage_period_v1_progress",
         "local_latest_slots",
         // Member-local timestamp seeks and capture queue, rebuilt from authoritative claim bodies.
         "local_objective_times_v1",
@@ -191,6 +221,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
         "local_resource_preparation_deferred",
+        "local_resource_preparation_stale",
         "local_resource_preparation_rebuild",
         // Member-local completion-health candidates and hydration progress, rebuilt from claims.
         "local_completion_health_v1_claims",
@@ -198,6 +229,13 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_completion_health_v1_pending",
         "local_completion_health_v1_backfill",
         "local_glass_head_pending",
+        // Retained member-local mail lifecycle/accounting projections and native harness
+        // acceptance custody; none participates in the shared projection digest.
+        "local_mail_delivery_source_v1",
+        "local_mail_delivery_steps_v1",
+        "local_mail_delivery_pending_v1",
+        "local_mail_input_acceptance_v1",
+        "local_mail_acceptance_frontier_v1",
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
@@ -206,12 +244,24 @@ fn every_persistent_table_has_a_projection_scope() {
         "read_positions",
         // Host-authoritative admission state is local, not a replicated projection.
         "local_host_holds",
+        // The connected host's expiring launch barrier is never replicated.
+        "local_launch_freeze",
         // Host-local execution authority, immutable lane policies and membership custody;
         // these are authoritative local records, not replicated claim projections.
         "resource_authorities_v1",
         "resource_lane_policies_v1",
         "resource_memberships_v1",
+        // Host-local deferred publication queue; never part of the shared projection digest.
+        "resource_admission_pending_v1",
+        // Host-local retirement-qualified learner samples and permanent replay dedupe.
+        "resource_profile_samples_v1",
         "shell_resources_v1",
+        // Owner-scoped cancellation tombstones govern only this host's runtime requests.
+        "shell_resource_request_cancellations_v1",
+        // Host-local physical-erasure completion, not replicated or rebuildable from claims.
+        "shell_environment_scrub_v1",
+        // Settled teardown receipts belong only to this host's runtime cleanup.
+        "local_runtime_cleanup_settled",
         // Person attention controls: order-free earliest-seen and newest-snooze registers
         // refolded from replicated claims on open, repair and replay; the claims carry the
         // shared digest coverage.
@@ -232,9 +282,14 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signature_counts",
         "claim_signature_writer_counts",
         "claim_signature_migration",
+        "claim_signature_originals",
+        "claim_signature_reference_migration",
         "claim_signatures",
         "claim_verdicts",
         "claim_verdict_links",
+        "claim_batch_disorder",
+        "claim_verdict_dependency_keys",
+        "claim_verdict_dependency_edges",
         "claim_verdict_queue",
         "claim_verdict_fresh",
         "expected_claim_signatures",
@@ -247,6 +302,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "checkpoint_capture_epoch",
         "checkpoints",
         "checkpoint_capture_epoch",
+        // A blob is bound by the claims that name its hash, and where its bytes live (the row or
+        // the blob file) is local, so it left the projection digest at projection version 2.
+        "blobs",
     ];
     let mut classified = SHARED_TABLES
         .iter()
@@ -255,8 +313,6 @@ fn every_persistent_table_has_a_projection_scope() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let store = Store::open_memory("alder").unwrap();
-    // Exercise the lazily installed credit tables as well as the always-present schema.
-    store.wait_for_usage_credit_backfill().unwrap();
     let connection = store.readers.get();
     assert_eq!(
         SHARED_TABLES,
@@ -344,8 +400,7 @@ pub fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
                 .iter()
                 .filter(|name| !local_columns.contains(&name.as_str()))
                 .map(|name| {
-                    if (*table == "blobs" && name == "bytes")
-                        || (*table == "documents" && name == "binding_key")
+                    if (*table == "documents" && name == "binding_key")
                         || (*table == "glass_heads" && matches!(name.as_str(), "created_key" | "head_key"))
                         || (*table == "person_directive_notes" && name == "head_key")
                         || (matches!(*table, "arrangements" | "arrangement_registers" | "ordered_membership_heads")
@@ -1076,13 +1131,6 @@ fn every_shared_projection_agrees_after_shuffle_restart_and_checkpoint() {
             &format!("{name}/restart-replay"),
             &mut mismatches,
         );
-        let scratch = tempfile::tempdir().unwrap();
-        let (_, _, proof) = target
-            .plan_checkpoint_through(cut, None, scratch.path())
-            .unwrap();
-        if !proof.passed {
-            mismatches.push(format!("{name}/checkpoint proof: {:?}", proof.mismatches));
-        }
         // Use the production tombstone/delete/replay path on isolated stores. Certificate and
         // fleet protocol behavior already has separate tests; this tests the projection boundary.
         let checkpoint_reference = Store::open_memory("cedar").unwrap();

@@ -52,6 +52,7 @@ import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { NativeDetailsSource } from './nativeDetailsSource.ts'
 import type { ObjectivesSource } from './objectivesSource.ts'
+import type { RootDetailSource } from './rootDetail.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
 
 /** Fixed recovery copy for a rejected browser credential; never expose the server's diagnostic. */
@@ -378,6 +379,8 @@ export interface DataSource {
   readonly subjectReads: SubjectReads
   /** Visible Details uses shared native getter facts; no private harness decoding. */
   readonly nativeDetails?: NativeDetailsSource
+  /** Descendant-inclusive spend of a native root, from the web server's relay; absent means Details reads none. */
+  readonly rootDetail?: RootDetailSource
   /** Objectives, budgets and their history from this member's native served model. */
   readonly objectives?: ObjectivesSource
   readonly connection: Atom.Atom<ConnectionState>

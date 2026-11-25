@@ -13,7 +13,7 @@ use fractal_client::{
     AvailabilityPresence, AvailabilitySet, AvailabilityStatus, AvailabilityStatusChange, AvailabilityStatusSource, Client,
     ClientError, DirectiveNote, DirectiveNoteSet, ErrorCode, PersonAvailability,
 };
-use ratatui::text::{Line, Span};
+use fractal_conversation_ui::text::{Line, Span};
 use std::collections::VecDeque;
 use std::fmt::Display;
 
@@ -533,23 +533,25 @@ impl Availability {
 /// `label   value · details`, the value wrapped under itself.
 fn row(doc: &mut Doc, label: &str, value: &str, style: ratatui::style::Style, details: &str, width: usize) {
     let runs = [text::run(text::sanitize(value), style), text::run(details.to_owned(), theme::dim())];
+    let (first, rest) = text::field_prefixes(label, LABEL, theme::dim());
     doc.lines(text::wrap(
         &runs,
         width,
-        &[text::run(format!("{label:<LABEL$}"), theme::dim())],
-        &[text::run(" ".repeat(LABEL), theme::dim())],
+        &first,
+        &rest,
         None,
     ));
 }
 
 /// A box being typed in, with the cursor at its end.
 fn input(doc: &mut Doc, label: &str, typed: &str, width: usize) {
-    let runs = [text::run(text::sanitize(typed), theme::text()), text::run("█", theme::fg(theme::ACCENT))];
+    let runs = [text::run(text::sanitize(typed), theme::text()), text::decoration("█", theme::fg(theme::ACCENT))];
+    let (first, rest) = text::field_prefixes(label, LABEL, theme::dim());
     doc.lines(text::wrap(
         &runs,
         width,
-        &[text::run(format!("{label:<LABEL$}"), theme::dim())],
-        &[text::run(" ".repeat(LABEL), theme::dim())],
+        &first,
+        &rest,
         None,
     ));
 }

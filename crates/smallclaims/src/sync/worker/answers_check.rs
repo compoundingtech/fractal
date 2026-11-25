@@ -95,19 +95,19 @@ pub(super) async fn check_answers<B: Backend>(
     let mut step = compare_answers(http, backend, node, peer, auth, fleet, cut, settled).await;
     // One line per peer and cut for each outcome, so an operator can confirm the check ran.
     match &step {
-        Ok(Step::Unsupported) => eprintln!("st3: {} keeps no answers; not compared at {cut}", peer.name),
+        Ok(Step::Unsupported) => eprintln!("fractal: {} keeps no answers; not compared at {cut}", peer.name),
         Ok(Step::Differ) if !settled => eprintln!(
-            "st3: answers at {cut} differ from {}'s; comparing again until the difference settles",
+            "fractal: answers at {cut} differ from {}'s; comparing again until the difference settles",
             peer.name
         ),
         _ => {}
     }
     if let Ok(Step::Found(check)) = &step {
         if check.differences.is_empty() {
-            eprintln!("st3: answers at {cut} agree with {}'s", peer.name);
+            eprintln!("fractal: answers at {cut} agree with {}'s", peer.name);
         } else {
             eprintln!(
-                "st3: answers at {cut} differ from {}'s in {}",
+                "fractal: answers at {cut} differ from {}'s in {}",
                 peer.name,
                 check.differences.iter().map(|report| report.kind.as_str()).collect::<Vec<_>>().join(", ")
             );
@@ -129,7 +129,7 @@ pub(super) async fn check_answers<B: Backend>(
             check.next = now + worker_interval(RECHECK);
         }
         Err(error) => {
-            eprintln!("st3: comparing answers with {} failed: {error:#}", peer.name);
+            eprintln!("fractal: comparing answers with {} failed: {error:#}", peer.name);
             check.next = now + worker_interval(RECHECK);
         }
     }
@@ -351,7 +351,7 @@ mod tests {
     }
 
     use crate::claim::ClaimInput;
-    use crate::replication::ReplicationInventory;
+    use crate::replication::{ReceiveOptions, ReplicationInventory};
     use crate::store::Store;
     use crate::sync::Local;
 
@@ -362,6 +362,13 @@ mod tests {
     struct Answering(Local<Store>, Option<Arc<crate::answers::AnswersCache>>);
 
     impl Backend for Answering {
+        async fn wait_revision(
+            &self,
+            request: crate::sync::revision::RevisionRequest,
+        ) -> Result<crate::sync::revision::StoreRevision> {
+            self.0.wait_revision(request).await
+        }
+
         async fn export(
             &self,
             fleet_id: &str,
@@ -377,22 +384,9 @@ mod tests {
             peer: &str,
             fleet_id: &str,
             exchange: &crate::replication::ReplicationExchange,
-            round_trip: Option<Duration>,
-            carrier: crate::replication::ReplicationCarrier,
+            options: ReceiveOptions<'_>,
         ) -> Result<crate::replication::ReplicationReceiveResponse> {
-            self.0.receive(peer, fleet_id, exchange, round_trip, carrier).await
-        }
-
-        async fn checkpoint_manifest(&self, request: &CheckpointManifestRequest) -> Result<CheckpointManifestPage> {
-            self.0.checkpoint_manifest(request).await
-        }
-
-        async fn checkpoint_need(&self) -> Result<Option<crate::store::CheckpointManifestNeed>> {
-            self.0.checkpoint_need().await
-        }
-
-        async fn adopt_checkpoint(&self, manifest: &CheckpointManifest) -> Result<Vec<crate::store::CheckpointAction>> {
-            self.0.adopt_checkpoint(manifest).await
+            self.0.receive(peer, fleet_id, exchange, options).await
         }
 
         async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {

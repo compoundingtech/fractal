@@ -328,11 +328,11 @@ pub fn protect_servers(observations: &[PtyObservation]) {
         for (key, runtime_id, pid, work_unit) in pending {
             match protect_server(&runtime_id, pid, &work_unit) {
                 Ok(ServerPlacement::Moved(unit)) => {
-                    eprintln!("st3: PTY server {pid} of {runtime_id} runs in {unit}");
+                    eprintln!("fractal: PTY server {pid} of {runtime_id} runs in {unit}");
                 }
                 Ok(_) => {}
                 Err(error) => eprintln!(
-                    "st3: WARN PTY server {pid} of {runtime_id} still shares its harness's scope: {error:#}"
+                    "fractal: WARN PTY server {pid} of {runtime_id} still shares its harness's scope: {error:#}"
                 ),
             }
             SETTLED
@@ -414,7 +414,7 @@ fn placement_report(observations: &[PtyObservation]) -> (&'static str, String) {
                 )
             }
         }
-        crate::Isolation::Detached | crate::Isolation::DegradedDetached => (
+        crate::Isolation::Detached | crate::Isolation::DegradedDetached | crate::Isolation::DarwinSlot { .. } => (
             "warn",
             "without systemd user scopes, PTY servers share CPU and IO with their harnesses".into(),
         ),

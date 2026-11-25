@@ -11,15 +11,8 @@ use super::*;
 use crate::store::attention_list::{AttentionDelta, AttentionFleet, AttentionPublication};
 use crate::store::owner_lists::OwnerView;
 use std::collections::HashMap;
-
-/// The shortest pause between two refreshes. A refresh also pauses as long as it took, so the
-/// refresher never takes more than about half a core. Windows never wait for it: a summary
-/// selection a window waits for is computed during the pause, once.
-const ATTENTION_LIST_REFRESH_PAUSE: Duration = Duration::from_secs(1);
-
-/// How often the rows are evaluated again with no claim: eligibility and grace periods read the
-/// clock. The same period collection windows used to reread attention on.
-const ATTENTION_LIST_CLOCK: Duration = Duration::from_secs(30);
+use fractal_store::store::attention_list::AttentionPresentationDependencies;
+use std::cell::RefCell;
 
 /// How long after a window last read attention or a summary the refresher keeps folding
 /// attention for new commits. Their windows reread at least every clock period while they are
@@ -28,11 +21,9 @@ const ATTENTION_LIST_CLOCK: Duration = Duration::from_secs(30);
 const ATTENTION_LIST_IDLE: Duration = Duration::from_secs(600);
 
 /// Keep attention, every person's glasses and arrangements, and the summary rows windows read
-/// published off the request path. As the daemon starts it folds them once; after that it
-/// refreshes, at most once a second and attention only while windows read it, when a commit lands, a roster is published, the clock
-/// passes attention's period, or a window asks. A refresh folds attention again only when
-/// something attention reads changed (see `Store::attention_list_delta`) and reads again only
-/// the people whose glasses or arrangements changed; otherwise each view keeps its rows.
+/// published off the request path. After the initial publication, demand-gated source changes,
+/// roster changes, prompt evidence and exact eligibility deadlines drive maintenance.
+/// Only changed sources and the rows whose recorded fleet dependencies changed are rebuilt.
 pub fn start_attention_list(state: &AppState) {
     // An escape hatch while the published list is new: windows then fold attention as before.
     if std::env::var_os("ST3_ATTENTION_LIST").is_some_and(|value| value == "off") {
@@ -45,6 +36,7 @@ pub fn start_attention_list(state: &AppState) {
     let state = state.clone();
     let mut changed = state.event_notify.subscribe();
     let mut roster = state.store.subscribe_agent_roster();
+    let mut presented_roster = state.store.subscribe_agents_publication_changes();
     let prompts = Arc::new(std::sync::Mutex::new(super::prompt_card::PromptWatch::new(Arc::clone(&wake))));
     tokio::spawn(crate::task_cpu::account("publication.attention", async move {
         // However this task ends, its views stop being served: windows read for themselves.
@@ -57,7 +49,6 @@ pub fn start_attention_list(state: &AppState) {
         let _stopped = Stopped(store.clone());
         let idle = ATTENTION_LIST_IDLE.as_millis() as u64;
         loop {
-            let started = tokio::time::Instant::now();
             let reader = store.clone();
             let summary_state = state.clone();
             // Attention folds only while windows read it (they reread it every clock period),
@@ -66,7 +57,7 @@ pub fn start_attention_list(state: &AppState) {
             // again; the next window to read it wakes this task.
             let attention = store.attention_list_read_within(idle) || store.attention_list_starting();
             // A prompt card's conversation changed: present the prompts again.
-            let prompts_changed = watching(&prompts).take_changed();
+            let (prompts_changed, changed_prompt_seats) = prompt_changes(&prompts, attention);
             let watch = Arc::clone(&prompts);
             // One view at a time: attention, every person's glasses and arrangements, then the
             // summary rows windows read. One view's failure leaves the others refreshing. A
@@ -76,7 +67,7 @@ pub fn start_attention_list(state: &AppState) {
                 // A pairing completed or revoked since the last pass changes which windows a
                 // session may hold; their windows reread to recheck it, as before.
                 if let Err(error) = reader.recheck_pairings() {
-                    eprintln!("st3: pairing recheck for published views failed: {error:#}");
+                    eprintln!("fractal: pairing recheck for published views failed: {error:#}");
                 }
                 let mut results = Vec::new();
                 let waiting = |results: &mut Vec<_>, starting: bool| {
@@ -86,23 +77,36 @@ pub fn start_attention_list(state: &AppState) {
                 };
                 waiting(&mut results, false);
                 results.push(("attention", crate::performance::task("attention/refresh", || {
-                    if !attention {
+                    if !attention || !(reader.attention_list_read_within(idle) || reader.attention_list_starting()) {
+                        if prompts_changed {
+                            watching(&watch).keep_changed();
+                        }
                         return Ok(());
                     }
                     // A prompt card reads its seat's conversation on this node, following it
                     // from before the read; one another member keeps, its follower read last.
                     let pending = |seat: &str| {
+                        reader.note_attention_list_fold("card/prompt");
+                        watching(&watch).forget_seat(seat);
                         super::prompt_card::seat_pending_calls(&summary_state, seat, |conversation| {
-                            watching(&watch).follow_conversation(conversation)
+                            watching(&watch).follow_seat_conversation(seat, conversation)
                         })
                     };
                     watching(&watch).begin();
-                    if refresh_attention_list_reading(
+                    if refresh_attention_list_reading_seats(
                         &reader,
                         |previous| attention_fleet(&reader, previous),
                         Some(&pending),
                         prompts_changed,
+                        changed_prompt_seats.as_ref(),
                     )? {
+                        if let Some(publication) = reader.newest_attention_list().1 {
+                            for row in publication.rows.iter().filter(|row| row["attention_kind"] == "harness-prompt") {
+                                if let Some(seat) = row["source_id"].as_str() {
+                                    watching(&watch).retain_seat(seat);
+                                }
+                            }
+                        }
                         watching(&watch).finish();
                     }
                     Ok(())
@@ -128,6 +132,8 @@ pub fn start_attention_list(state: &AppState) {
                 results
             }))
             .await;
+            let mut attention_clock = false;
+            let mut summary_clock = false;
             match refreshed {
                 Ok(results) => {
                     if prompts_changed
@@ -136,8 +142,13 @@ pub fn start_attention_list(state: &AppState) {
                         watching(&prompts).keep_changed();
                     }
                     for (view, result) in results {
+                        match view {
+                            "attention" => attention_clock = result.is_ok(),
+                            "summary" => summary_clock = result.is_ok(),
+                            _ => {}
+                        }
                         if let Err(error) = &result {
-                            eprintln!("st3: {view} view refresh failed: {error:#}");
+                            eprintln!("fractal: {view} view refresh failed: {error:#}");
                         }
                         store.note_view_refreshed(view, result.is_ok());
                     }
@@ -147,78 +158,23 @@ pub fn start_attention_list(state: &AppState) {
                     if prompts_changed {
                         watching(&prompts).keep_changed();
                     }
-                    eprintln!("st3: published view refresh stopped: {error}");
+                    eprintln!("fractal: published view refresh stopped: {error}");
                     for view in crate::store::attention_list::PUBLISHED_VIEWS {
                         store.note_view_refreshed(view, false);
                     }
                 }
             }
-            // The pause bounds this task's work, but a window waiting for a summary selection
-            // does not wait through it: each wake computes the selections waiting then.
-            let pause = tokio::time::Instant::now() + started.elapsed().max(ATTENTION_LIST_REFRESH_PAUSE);
-            let mut woken = false;
-            let mut roster_arrived = false;
-            loop {
-                let summary_state = state.clone();
-                let refreshed = if roster_arrived {
-                    // A complete roster arrived while no summary could be counted: count every
-                    // selection now, not after the pause.
-                    roster_arrived = false;
-                    tokio::task::spawn_blocking(move || crate::task_cpu::blocking("publication.summary", || {
-                        Some(crate::performance::task("summary/refresh", || {
-                            super::client_v0::summary::refresh_published(
-                                &summary_state,
-                                ATTENTION_LIST_IDLE.as_millis() as u64,
-                                false,
-                            )
-                        }))
-                    }))
-                    .await
-                } else if store.summary_selection_waiting() {
-                    tokio::task::spawn_blocking(move || crate::task_cpu::blocking("publication.summary", || refresh_waiting_summary(&summary_state, false))).await
-                } else {
-                    Ok(None)
-                };
-                match refreshed {
-                    Ok(None) => {}
-                    Ok(Some(result)) => {
-                        if let Err(error) = &result {
-                            eprintln!("st3: summary view refresh failed: {error:#}");
-                        }
-                        store.note_view_refreshed("summary", result.is_ok());
-                    }
-                    Err(error) => {
-                        eprintln!("st3: summary view refresh stopped: {error}");
-                        store.note_view_refreshed("summary", false);
-                    }
-                }
-                tokio::select! {
-                    () = tokio::time::sleep_until(pause) => break,
-                    () = wake.notified() => woken = true,
-                    // With no shared counts (as the daemon starts, or after views are
-                    // forgotten) every summary waits for the complete roster they count agents
-                    // from. Its publication is all they wait for, so it ends their wait.
-                    result = roster.changed(), if store.summary_shared().is_none() => {
-                        if result.is_err() {
-                            return;
-                        }
-                        roster_arrived = true;
-                    }
-                }
-            }
-            // A window asked during the pause: refresh again at once.
-            if woken {
-                continue;
-            }
-            // Attention is evaluated again when its clock period ends or a claim it read
-            // becomes eligible, counted from when it was evaluated, not from this wait.
-            let due = store
-                .attention_list_due_at(ATTENTION_LIST_CLOCK.as_millis())
-                .map_or(ATTENTION_LIST_CLOCK, |due| {
-                    Duration::from_millis(due.saturating_sub(client_now_ms()) as u64)
-                });
-            // A glasses or arrangements window rereads only when its view publishes, so every
-            // commit is weighed; with nothing changed that is a few indexed reads.
+            // A clock wake represents an actual eligibility transition, never a periodic
+            // re-evaluation. Without demand even those transitions wait for the next reader.
+            let due = store.attention_list_read_within(idle).then(|| {
+                [
+                    attention_clock.then(|| store.attention_list_due_at()).flatten(),
+                    summary_clock.then(|| store.summary_valid_until(idle)).flatten(),
+                ]
+                    .into_iter()
+                    .flatten()
+                    .min()
+            }).flatten();
             tokio::select! {
                 () = wake.notified() => {}
                 result = changed.changed() => {
@@ -226,13 +182,24 @@ pub fn start_attention_list(state: &AppState) {
                         return;
                     }
                 }
-                // The summary counts working agents from the published roster.
                 result = roster.changed() => {
                     if result.is_err() {
                         return;
                     }
                 }
-                () = tokio::time::sleep(due) => {}
+                result = presented_roster.changed() => {
+                    if result.is_err() {
+                        return;
+                    }
+                }
+                () = async {
+                    match due {
+                        Some(due) => tokio::time::sleep(Duration::from_millis(
+                            due.saturating_sub(client_now_ms()).min(u64::MAX as u128) as u64,
+                        )).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
             }
         }
     }));
@@ -243,6 +210,17 @@ fn watching(
     prompts: &std::sync::Mutex<super::prompt_card::PromptWatch>,
 ) -> std::sync::MutexGuard<'_, super::prompt_card::PromptWatch> {
     prompts.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Idle publication owners must leave prompt evidence pending for the next reader.
+fn prompt_changes(
+    prompts: &std::sync::Mutex<super::prompt_card::PromptWatch>,
+    demanded: bool,
+) -> (bool, Option<BTreeSet<String>>) {
+    let watch = watching(prompts);
+    let changed = demanded && watch.take_changed();
+    let seats = changed.then(|| watch.take_changed_seats()).flatten();
+    (changed, seats)
 }
 
 /// Publish the summary selections windows are waiting for, if any: a window that opens a new
@@ -290,9 +268,18 @@ fn refresh_attention_list_reading(
     pending: Option<super::prompt_card::PendingCalls>,
     prompts_changed: bool,
 ) -> anyhow::Result<bool> {
+    refresh_attention_list_reading_seats(store, fleet, pending, prompts_changed, None)
+}
+
+fn refresh_attention_list_reading_seats(
+    store: &Store,
+    fleet: impl FnOnce(Option<&Arc<AttentionFleet>>) -> Option<Arc<AttentionFleet>>,
+    pending: Option<super::prompt_card::PendingCalls>,
+    prompts_changed: bool,
+    changed_prompt_seats: Option<&BTreeSet<String>>,
+) -> anyhow::Result<bool> {
     let prompts_changed = prompts_changed && pending.is_some();
     let (generation, previous) = store.newest_attention_list();
-    let clock = ATTENTION_LIST_CLOCK.as_millis();
     // Read before the snapshot: a roster published in between presents again at the next wake.
     let fleet = fleet(
         previous
@@ -304,74 +291,90 @@ fn refresh_attention_list_reading(
         .is_none_or(|previous| previous.fleet.as_deref() != fleet.as_deref());
     store.read_snapshot(|index| {
         let now = client_now_ms();
-        let mut presented = false;
-        let (cause, due) = match &previous {
-            None => (Some("first".to_owned()), None),
-            Some(previous)
-                if now < previous.evaluated_at_unix_ms
-                    || now - previous.evaluated_at_unix_ms >= clock =>
-            {
-                (Some("clock".to_owned()), None)
+        let mut subjects = Some(BTreeSet::new());
+        let mut kinds = BTreeSet::new();
+        let mut refresh_sources = previous.as_ref().is_none_or(|previous| {
+            previous.source_snapshot.is_none()
+                || now < previous.evaluated_at_unix_ms
+                || previous.due_at_unix_ms.is_some_and(|due| now >= due)
+        });
+        match &previous {
+            None => {
+                store.note_attention_list_fold("first");
+                subjects = None;
             }
-            Some(previous) if previous.due_at_unix_ms.is_some_and(|due| now >= due) => {
-                (Some("due".to_owned()), None)
+            Some(previous) if now < previous.evaluated_at_unix_ms => {
+                store.note_attention_list_fold("clock reversed");
+                subjects = None;
             }
-            Some(previous) => match store.attention_list_delta(previous, index, now)? {
-                AttentionDelta::Unchanged(None)
-                    if previous.cut == index && !fleet_changed && !prompts_changed =>
-                {
-                    return Ok(false);
+            Some(previous) => match store.attention_list_delta(previous, index)? {
+                AttentionDelta::Unchanged => {
+                    if previous.due_at_unix_ms.is_some_and(|due| now >= due) {
+                        store.note_attention_list_fold("due");
+                    }
                 }
-                AttentionDelta::Unchanged(due) => (None, due),
-                AttentionDelta::Refold(cause) => (Some(cause), None),
+                AttentionDelta::Subjects { subjects: changed, kinds: changed_kinds } => {
+                    store.note_attention_list_fold(changed_kinds.iter().next().map(String::as_str).unwrap_or("subjects"));
+                    subjects = Some(changed);
+                    kinds = changed_kinds;
+                    refresh_sources = true;
+                }
+                AttentionDelta::Refold(cause) => {
+                    store.note_attention_list_fold(&cause);
+                    subjects = None;
+                    refresh_sources = true;
+                }
             },
-        };
+        }
+        if !refresh_sources && !fleet_changed && !prompts_changed
+            && previous.as_ref().is_some_and(|previous| previous.cut == index) {
+            return Ok(false);
+        }
         let projection = store.attention_projection_frontier()?;
         let ask_deadline_policy =
             crate::store::person_work::ask_deadline_policy(&store.readers.get())?;
-        let (rows, evaluated_at_unix_ms, due_at_unix_ms, future_after) = match (cause, &previous) {
-            (None, Some(previous)) => {
-                // Still pending future acceptance times stand beside the new ones.
-                let due = [previous.due_at_unix_ms, due].into_iter().flatten().min();
-                let future_after = due.and(previous.future_after.or(Some(previous.cut)));
-                let rows = if fleet_changed || prompts_changed {
-                    let mut rows = (*previous.rows).clone();
-                    if fleet_changed {
-                        present_attention(store, &mut rows, fleet.as_deref())?;
-                    }
-                    presented = present_prompts(&mut rows, pending);
-                    if rows == *previous.rows {
-                        Arc::clone(&previous.rows)
-                    } else {
-                        Arc::new(rows)
-                    }
-                } else {
-                    Arc::clone(&previous.rows)
-                };
-                (rows, previous.evaluated_at_unix_ms, due, future_after)
+        let mut presentation_dependencies = BTreeMap::new();
+        let source_snapshot = if refresh_sources {
+            let snapshot = store.attention_source_snapshot(
+                previous.as_ref().and_then(|previous| previous.source_snapshot.as_deref()),
+                subjects.as_ref(),
+                &kinds,
+                now,
+            )?;
+            for _ in 0..snapshot.refolded_subjects {
+                store.note_attention_list_fold("source/subject");
             }
-            (cause, _) => {
-                store.note_attention_list_fold(cause.as_deref().unwrap_or("first"));
-                let mut rows = client_attention_resources_at(store, None, false, now)?;
-                present_attention(store, &mut rows, fleet.as_deref())?;
-                presented = present_prompts(&mut rows, pending);
-                let rows = match &previous {
-                    Some(previous) if *previous.rows == rows => Arc::clone(&previous.rows),
-                    _ => Arc::new(rows),
-                };
-                // Claims dated after `now` were folded as not yet eligible: those since the
-                // previous cut, and earlier ones still pending. Evaluate again when the first
-                // of them is.
-                let start = previous
-                    .as_ref()
-                    .map(|previous| previous.future_after.unwrap_or(previous.cut).min(previous.cut));
-                let due = match start {
-                    Some(start) if start < index => store.attention_future_since(start, index, now)?,
-                    _ => None,
-                };
-                (rows, now, due, due.and(start))
+            for _ in 0..snapshot.refolded_groups {
+                store.note_attention_list_fold("source/group");
             }
+            Some(Arc::new(snapshot))
+        } else {
+            previous.as_ref().and_then(|previous| previous.source_snapshot.clone())
         };
+        let presented;
+        let rows = if refresh_sources || fleet_changed || prompts_changed {
+            let mut rows = if refresh_sources {
+                attention_resource_rows(store, source_snapshot.as_deref().unwrap(), previous.as_deref(), subjects.as_ref())?
+            } else {
+                (*previous.as_ref().unwrap().rows).clone()
+            };
+            present_changed_rows(store, &mut rows, fleet.as_deref(), previous.as_deref(), subjects.as_ref(), &mut presentation_dependencies)?;
+            let unchanged = BTreeSet::new();
+            let dirty = if prompts_changed { changed_prompt_seats } else { Some(&unchanged) };
+            presented = present_prompts_for_seats(&mut rows, pending, dirty);
+            match &previous {
+                Some(previous) if *previous.rows == rows => Arc::clone(&previous.rows),
+                _ => Arc::new(rows),
+            }
+        } else {
+            presented = false;
+            presentation_dependencies = previous.as_ref().unwrap().presentation_dependencies.clone();
+            Arc::clone(&previous.as_ref().unwrap().rows)
+        };
+        let evaluated_at_unix_ms = now;
+        let due_at_unix_ms = source_snapshot.as_ref()
+            .and_then(|snapshot| snapshot.valid_until)
+            .filter(|due| *due > now);
         let changed = previous
             .as_ref()
             .is_none_or(|previous| !Arc::ptr_eq(&previous.rows, &rows));
@@ -388,21 +391,21 @@ fn refresh_attention_list_reading(
                 projection,
                 evaluated_at_unix_ms,
                 due_at_unix_ms,
-                future_after,
                 published_at_unix_ms,
                 rows,
                 fleet,
                 owners,
                 ask_deadline_policy,
+                source_snapshot,
+                presentation_dependencies,
             },
             changed,
         );
-        // While windows read attention it publishes at least once a clock period. A previous
-        // publication older than two was from before the refresher followed commits again: its
-        // commits waited for a reader, not for a fold, and are not a freshness sample.
-        if let Some(previous) = previous.as_ref().filter(|previous| {
-            published_at_unix_ms.saturating_sub(previous.published_at_unix_ms) <= 2 * clock
-        }) {
+        // Only active readers define a publication-latency sample; an idle view deliberately
+        // waits for demand instead of keeping its cut warm.
+        if let Some(previous) = previous.as_ref().filter(|_| store.attention_list_read_within(
+            ATTENTION_LIST_IDLE.as_millis() as u64,
+        )) {
             super::record_publish_latency(
                 store,
                 "attention",
@@ -415,6 +418,40 @@ fn refresh_attention_list_reading(
     })
 }
 
+/// Convert only changed source items. Unchanged items retain both resource enrichment and
+/// presentation; controls on a changed subject still pass through the normal overlay.
+fn attention_resource_rows(
+    store: &Store,
+    snapshot: &fractal_store::store::attention_snapshot::AttentionSourceSnapshot,
+    previous: Option<&AttentionPublication>,
+    changed: Option<&BTreeSet<String>>,
+) -> anyhow::Result<Vec<Value>> {
+    let old_items: HashMap<_, _> = previous
+        .and_then(|previous| previous.source_snapshot.as_ref())
+        .into_iter()
+        .flat_map(|snapshot| snapshot.items.iter())
+        .map(|item| ((item.subject.as_str(), item.person.as_str(), item.episode.as_str()), item))
+        .collect();
+    let old_rows: HashMap<_, _> = previous.into_iter()
+        .flat_map(|previous| previous.rows.iter())
+        .filter_map(|row| row["id"].as_str().map(|id| (id, row)))
+        .collect();
+    let mut rows = Vec::with_capacity(snapshot.items.len());
+    for item in &snapshot.items {
+        let key = (item.subject.as_str(), item.person.as_str(), item.episode.as_str());
+        let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
+        let reusable = changed.is_some_and(|changed| !changed.contains(&item.subject))
+            && old_items.get(&key).is_some_and(|before| *before == item);
+        if reusable && let Some(row) = old_rows.get(id.as_str()) {
+            rows.push((*row).clone());
+        } else {
+            store.note_attention_list_fold("card/resource");
+            rows.extend(client_attention_resources_from_items(store, vec![item.clone()])?);
+        }
+    }
+    Ok(rows)
+}
+
 /// The newest published agents roster as the attention presentation reads it, reusing
 /// `previous` while no roster has been published since, and while none is available (its cache
 /// cleared, or no roster refresher), so rows keep their agents until the next roster. None
@@ -424,13 +461,76 @@ pub fn attention_fleet(
     previous: Option<&Arc<AttentionFleet>>,
 ) -> Option<Arc<AttentionFleet>> {
     let revision = store.agent_roster_revision();
-    if let Some(previous) = previous.filter(|previous| previous.revision == revision) {
+    if let Some(previous) = previous.filter(|previous| previous.observed_revision() == revision) {
         return Some(Arc::clone(previous));
     }
     let Some((_, cards, _)) = store.published_agent_roster(u64::MAX, false) else {
         return previous.cloned();
     };
-    Some(Arc::new(AttentionFleet::from_cards(revision, &cards)))
+    let (fleet, changed) = match previous {
+        Some(previous) => AttentionFleet::updated(previous, revision, &cards),
+        None => (Arc::new(AttentionFleet::from_cards(revision, &cards)), cards.len()),
+    };
+    for _ in 0..changed {
+        store.note_attention_list_fold("fleet/agent");
+    }
+    Some(fleet)
+}
+
+/// Reuse a row's complete presentation unless its source or an exact fleet lookup changed.
+/// Rich launch/revision previews are built only for affected cards.
+fn present_changed_rows(
+    store: &Store,
+    rows: &mut [Value],
+    fleet: Option<&AttentionFleet>,
+    previous: Option<&AttentionPublication>,
+    dirty_subjects: Option<&BTreeSet<String>>,
+    dependencies: &mut BTreeMap<String, AttentionPresentationDependencies>,
+) -> anyhow::Result<()> {
+    let empty = AttentionFleet::default();
+    let before_fleet = previous.and_then(|previous| previous.fleet.as_deref()).unwrap_or(&empty);
+    let after_fleet = fleet.unwrap_or(&empty);
+    let previous_rows: HashMap<_, _> = previous.into_iter()
+        .flat_map(|previous| previous.rows.iter())
+        .filter_map(|row| row["id"].as_str().map(|id| (id, row)))
+        .collect();
+    for row in rows {
+        let reused = row["id"].as_str().and_then(|id| {
+            let dirty = dirty_subjects.is_none_or(|dirty| {
+                ["source_id", "launch_id", "variant_id", "mission_id", "mission_run_id", "step_run_id"]
+                    .iter()
+                    .filter_map(|field| row[*field].as_str())
+                    .any(|subject| dirty.contains(subject))
+            });
+            if dirty {
+                return None;
+            }
+            let before = previous_rows.get(id)?;
+            let inputs = previous?.presentation_dependencies.get(id)?;
+            let same_source = row.as_object()?.iter()
+                .all(|(key, value)| key == "presentation" || before.get(key) == Some(value))
+                && before.as_object()?.keys()
+                    .all(|key| key == "presentation" || row.get(key).is_some());
+            (same_source && !inputs.changed(before_fleet, after_fleet))
+                .then(|| ((*before)["presentation"].clone(), inputs.clone()))
+        });
+        if let Some((presentation, inputs)) = reused {
+            let id = row["id"].as_str().unwrap().to_owned();
+            row["presentation"] = presentation;
+            dependencies.insert(id, inputs);
+        } else {
+            present_rows(store, std::slice::from_mut(row), fleet, dependencies)?;
+            // A roster label change does not invalidate transcript evidence for the same call.
+            if let Some(before) = row["id"].as_str().and_then(|id| previous_rows.get(id))
+                && row["attention_kind"] == "harness-prompt"
+                && row["source_id"] == before["source_id"]
+                && row["action_parameters"] == before["action_parameters"]
+                && let Some(prompt) = before["presentation"].get("prompt") {
+                row["presentation"]["prompt"] = prompt.clone();
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What the attention presentation reads beside a row: the fleet, and the paths of the steps
@@ -438,16 +538,20 @@ pub fn attention_fleet(
 struct Known<'a> {
     fleet: &'a AttentionFleet,
     paths: &'a HashMap<String, String>,
+    dependencies: RefCell<AttentionPresentationDependencies>,
 }
 
 impl fractal_ui_model::attention::Fleet for Known<'_> {
     fn agent_label(&self, agent: &str) -> Option<String> {
+        self.dependencies.borrow_mut().labels.insert(agent.to_owned());
         self.fleet.agent_label(agent)
     }
     fn claimant(&self, step: &str) -> Option<String> {
+        self.dependencies.borrow_mut().claimants.insert(step.to_owned());
         self.fleet.claimant(step)
     }
     fn working_in(&self, mission: &str) -> Option<String> {
+        self.dependencies.borrow_mut().working.insert(mission.to_owned());
         self.fleet.working_in(mission)
     }
     fn step_path(&self, step: &str) -> Option<String> {
@@ -464,13 +568,22 @@ pub fn present_attention(
     rows: &mut [Value],
     fleet: Option<&AttentionFleet>,
 ) -> anyhow::Result<()> {
-    crate::performance::task("attention/present", || present_rows(store, rows, fleet))
+    present_rows(store, rows, fleet, &mut BTreeMap::new())
 }
 
 /// Give each prompt card's presentation its prompt: the call it asks about, while `pending` reads
 /// it without a result in its seat's conversation. Returns whether it read any: without
 /// `pending` a card carries no prompt.
+#[cfg(test)]
 fn present_prompts(rows: &mut [Value], pending: Option<super::prompt_card::PendingCalls>) -> bool {
+    present_prompts_for_seats(rows, pending, None)
+}
+
+fn present_prompts_for_seats(
+    rows: &mut [Value],
+    pending: Option<super::prompt_card::PendingCalls>,
+    dirty: Option<&BTreeSet<String>>,
+) -> bool {
     let Some(pending) = pending else {
         return false;
     };
@@ -478,6 +591,10 @@ fn present_prompts(rows: &mut [Value], pending: Option<super::prompt_card::Pendi
         .iter_mut()
         .filter(|row| row["attention_kind"] == "harness-prompt" && row["presentation"].is_object())
     {
+        let changed = dirty.is_none_or(|dirty| row["source_id"].as_str().is_some_and(|seat| dirty.contains(seat)));
+        if !changed && row["presentation"].get("prompt").is_some() {
+            continue;
+        }
         let seat = row["source_id"].as_str().map(str::to_owned);
         let calls = || match seat {
             Some(seat) => pending(&seat),
@@ -492,6 +609,7 @@ fn present_rows(
     store: &Store,
     rows: &mut [Value],
     fleet: Option<&AttentionFleet>,
+    dependencies: &mut BTreeMap<String, AttentionPresentationDependencies>,
 ) -> anyhow::Result<()> {
     let none = AttentionFleet::default();
     let mut paths = HashMap::new();
@@ -505,15 +623,17 @@ fn present_rows(
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!("st3: WARN attention cannot read the path of {step}: {error:#}")
+                eprintln!("fractal: WARN attention cannot read the path of {step}: {error:#}")
             }
         }
     }
     let known = Known {
         fleet: fleet.unwrap_or(&none),
         paths: &paths,
+        dependencies: RefCell::default(),
     };
     for row in rows {
+        store.note_attention_list_fold("card/present");
         match fractal_ui_model::attention::Facts::deserialize(&*row) {
             Ok(facts) => {
                 let mut presentation =
@@ -525,7 +645,7 @@ fn present_rows(
                         Ok(Some(revision)) => presentation["revision"] = revision,
                         Ok(None) => {}
                         Err(error) => eprintln!(
-                            "st3: WARN attention {} names no revision changes: {error:#}",
+                            "fractal: WARN attention {} names no revision changes: {error:#}",
                             row["id"]
                         ),
                     }
@@ -533,20 +653,23 @@ fn present_rows(
                 // A launch card previews its newest variant's mission, or says why it cannot.
                 if facts.attention_kind == "launch-approval" {
                     match super::launch_card::launch_card(store, row, |agent| {
-                        known.fleet.agent_label(agent)
+                        fractal_ui_model::attention::Fleet::agent_label(&known, agent)
                     }) {
                         Ok(Some(launch)) => presentation["launch"] = launch,
                         Ok(None) => {}
                         Err(error) => eprintln!(
-                            "st3: WARN attention {} has no launch preview: {error:#}",
+                            "fractal: WARN attention {} has no launch preview: {error:#}",
                             row["id"]
                         ),
                     }
                 }
                 row["presentation"] = presentation;
+                if let Some(id) = row["id"].as_str() {
+                    dependencies.insert(id.to_owned(), known.dependencies.take());
+                }
             }
             Err(error) => eprintln!(
-                "st3: WARN attention {} has no presentation: {error}",
+                "fractal: WARN attention {} has no presentation: {error}",
                 row["id"]
             ),
         }
@@ -665,6 +788,125 @@ mod tests {
     use super::*;
 
     #[test]
+    fn idle_attention_leaves_prompt_changes_for_returning_demand() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let prompts = std::sync::Mutex::new(super::super::prompt_card::PromptWatch::new(wake));
+        watching(&prompts).keep_changed();
+        assert!(!prompt_changes(&prompts, false).0, "idle demand does not consume changes");
+        assert!(prompt_changes(&prompts, true).0, "the next reader receives the pending change");
+        assert!(!prompt_changes(&prompts, true).0, "a successful observation consumes it once");
+    }
+
+    #[test]
+    fn one_agent_change_presents_one_card_and_unrelated_commit_presents_none() {
+        let store = Store::open_memory("node").unwrap();
+        store.start_attention_list_refresher().unwrap();
+        refresh_attention_list(&store).unwrap();
+        let (generation, initial) = store.newest_attention_list();
+        let initial = initial.unwrap();
+        let cards = vec![
+            json!({"id":"agent/example/oak","name":"Oak"}),
+            json!({"id":"agent/example/elm","name":"Elm"}),
+        ];
+        let before = Arc::new(AttentionFleet::from_cards(1, &cards));
+        let mut rows = vec![
+            json!({"id":"attention/oak","attention_kind":"agent-request","source_id":"ask/oak","requester_id":"agent/example/oak"}),
+            json!({"id":"attention/elm","attention_kind":"agent-request","source_id":"ask/elm","requester_id":"agent/example/elm"}),
+        ];
+        let mut dependencies = BTreeMap::new();
+        present_changed_rows(&store, &mut rows, Some(&before), None, None, &mut dependencies).unwrap();
+        store.publish_attention_list(generation, AttentionPublication {
+            cut: initial.cut,
+            projection: initial.projection.clone(),
+            evaluated_at_unix_ms: initial.evaluated_at_unix_ms,
+            due_at_unix_ms: None,
+            published_at_unix_ms: initial.published_at_unix_ms,
+            owners: AttentionPublication::index_owners(&rows),
+            rows: Arc::new(rows),
+            fleet: Some(before),
+            source_snapshot: initial.source_snapshot.clone(),
+            presentation_dependencies: dependencies,
+            ask_deadline_policy: initial.ask_deadline_policy,
+        }, true);
+        let count = || store.attention_list_folds().get("card/present").copied().unwrap_or(0);
+        let baseline = count();
+        let mut changed = cards;
+        changed[0]["name"] = json!("Oak changed");
+        let after = Arc::new(AttentionFleet::from_cards(2, &changed));
+        refresh_attention_list_with(&store, |_| Some(Arc::clone(&after))).unwrap();
+        assert_eq!(count() - baseline, 1, "only the card reading the changed agent");
+        let publication = store.newest_attention_list().1.unwrap();
+        assert_eq!(publication.rows[0]["presentation"]["raised_by"]["label"], "Oak changed");
+        assert_eq!(publication.rows[1]["presentation"]["raised_by"]["label"], "Elm");
+        store.append_claim(&ClaimInput {
+            subject: "step-run/unrelated/step".into(),
+            kind: "work.renewed".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let baseline = count();
+        refresh_attention_list_with(&store, |_| Some(after)).unwrap();
+        assert_eq!(count(), baseline, "an unrelated commit rebuilds no card");
+    }
+
+    #[test]
+    fn unread_backlog_preserves_complete_attention_and_still_finds_relevant_claims() {
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = Clock;
+        smallclaims::store::set_thread_clock(Some(client_now_ms()));
+        let store = Store::open_memory("node").unwrap();
+        store.start_attention_list_refresher().unwrap();
+        refresh_attention_list(&store).unwrap();
+        let first = store.newest_attention_list().1.unwrap();
+        // More than the delta limit of permanently unread lease-renewal claims.
+        // Do not force a fleet fold or hide the relevant claim after the backlog.
+        for number in 0..10_001 {
+            store.append_claim(&ClaimInput {
+                subject: format!("step-run/noise-{number}/step"),
+                kind: "work.renewed".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
+        let index = store.index().unwrap();
+        assert_eq!(index - first.cut, 10_001, "exercise the raw-span guard boundary");
+        assert_eq!(
+            store.attention_list_delta(&first, index).unwrap(),
+            AttentionDelta::Unchanged,
+            "permanently unread traffic creates no card eligibility deadline",
+        );
+        refresh_attention_list(&store).unwrap();
+        let published = store.newest_attention_list().1.unwrap();
+        assert_eq!(published.cut, index);
+        assert!(Arc::ptr_eq(&first.rows, &published.rows));
+
+        store.append_claim(&ClaimInput {
+            subject: "custom/test/relevant".into(),
+            kind: "custom.test.changed".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert!(matches!(
+            store.attention_list_delta(&first, store.index().unwrap()).unwrap(),
+            AttentionDelta::Subjects { .. },
+        ));
+    }
+
+    #[test]
     fn a_prompt_card_reads_its_seat_and_no_other_card_reads_one() {
         let mut rows = vec![
             json!({
@@ -698,6 +940,14 @@ mod tests {
         assert!(rows[1]["presentation"].get("prompt").is_none());
         assert_eq!(rows[2]["presentation"]["prompt"]["unknown_reason"], "the seat runs elsewhere");
         assert_eq!(rows[3]["presentation"]["prompt"], json!({"calls": [], "answers": [], "allow": false}));
+
+        read.lock().unwrap().clear();
+        let dirty = BTreeSet::from(["agent/example/oak".to_owned()]);
+        assert!(present_prompts_for_seats(&mut rows, Some(&pending), Some(&dirty)));
+        assert_eq!(*read.lock().unwrap(), ["agent/example/oak"], "one changed transcript reads one prompt");
+        read.lock().unwrap().clear();
+        assert!(present_prompts_for_seats(&mut rows, Some(&pending), Some(&BTreeSet::new())));
+        assert!(read.lock().unwrap().is_empty(), "unchanged prompt evidence does no source reads");
 
         // Without a reader, as in a fold that is not the refresher's, a card carries no prompt.
         let mut rows = vec![json!({"attention_kind": "harness-prompt", "source_id": "agent/example/oak", "presentation": {}})];
@@ -904,12 +1154,13 @@ mod tests {
                 projection: first.projection.clone(),
                 evaluated_at_unix_ms: first.evaluated_at_unix_ms,
                 due_at_unix_ms: first.due_at_unix_ms,
-                future_after: first.future_after,
                 published_at_unix_ms: first.published_at_unix_ms,
                 owners: AttentionPublication::index_owners(&rows),
                 rows: Arc::new(rows),
                 fleet: first.fleet.clone(),
                 ask_deadline_policy: first.ask_deadline_policy,
+                source_snapshot: first.source_snapshot.clone(),
+                presentation_dependencies: first.presentation_dependencies.clone(),
             },
             true,
         );

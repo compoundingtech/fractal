@@ -154,7 +154,7 @@ async fn retained_history_and_pairing_survive_upgrade(previous_storage_version: 
     };
     node.binary = PathBuf::from(st3());
     node.start().await;
-    assert_eq!(database_schema(&database), 23);
+    assert_eq!(database_schema(&database), 28);
     let _: Value = ClientV0::unix_gateway(node.socket(), &credential)
         .get("/v1/client/capabilities")
         .await
@@ -195,12 +195,12 @@ async fn retained_history_and_pairing_survive_upgrade(previous_storage_version: 
     }
     node.binary = old;
     assert!(
-        !node.start_with_schema_refusal(Some(23)).await,
+        !node.start_with_schema_refusal(Some(28)).await,
         "the previous reader must refuse this upgraded store"
     );
     assert_eq!(
         database_schema(&database),
-        23,
+        28,
         "old-reader refusal must not alter the upgraded header"
     );
     node.binary = PathBuf::from(st3());
