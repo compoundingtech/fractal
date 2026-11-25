@@ -79,6 +79,8 @@ pub struct SeatChecks<'a> {
     store: &'a Store,
     previous: &'a AttentionPublication,
     seat_items: Option<BTreeSet<String>>,
+    #[cfg(test)]
+    seat_item_scans: usize,
     needs_login: HashMap<String, bool>,
     retiring: HashMap<String, bool>,
     subjects: BTreeSet<String>,
@@ -91,6 +93,8 @@ impl<'a> SeatChecks<'a> {
             store,
             previous,
             seat_items: None,
+            #[cfg(test)]
+            seat_item_scans: 0,
             needs_login: HashMap::new(),
             retiring: HashMap::new(),
             subjects: BTreeSet::new(),
@@ -98,13 +102,20 @@ impl<'a> SeatChecks<'a> {
         }
     }
 
-    /// Whether the previous rows hold a login or prompt item for `seat`: any claim about it can
-    /// change that item, its episode or its removal. Such an item names its seat as its source
-    /// and lists every seat it covers in its targets, so a seat sharing another's login counts.
+    /// Runtime-derived candidates count before admission too: a runtime change must invalidate
+    /// a future prompt before its clock boundary. Targets include seats sharing a login.
     fn has_seat_item(&mut self, seat: &str) -> bool {
         let previous = self.previous;
         self.seat_items
-            .get_or_insert_with(|| item_seats(&previous.rows))
+            .get_or_insert_with(|| {
+                #[cfg(test)]
+                { self.seat_item_scans += 1; }
+                let mut seats = item_seats(&previous.rows);
+                if let Some(source) = previous.source_snapshot.as_deref() {
+                    seats.extend(source.candidate_seats().map(str::to_owned));
+                }
+                seats
+            })
             .contains(seat)
     }
 
