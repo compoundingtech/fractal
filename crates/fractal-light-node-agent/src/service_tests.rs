@@ -38,6 +38,48 @@ fn loaded_job_requires_exact_program_arguments_plist_and_valid_pid() {
 }
 
 #[test]
+fn every_existing_full_node_label_blocks_direct_cli_activation() {
+    for label in ["org.nix-community.home.smalltalk", "com.compoundingtech.st3",
+        "com.compoundingtech.fractal", "com.compoundingtech.fractal.apply"] {
+        assert!(full_node_present(&format!("gui/501 = {{\n services = {{\n 123 0 \"{label}\"\n }}\n}}")));
+    }
+    assert!(!full_node_present(&format!("services = {{\n 123 0 {LABEL}\n}}")));
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_lifecycle_transactions_cannot_delete_or_unload_a_successor() {
+    let root = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(root.path()).unwrap();
+    let path = home.join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
+    let old = render_plist(Path::new("/opt/old-agent"), Path::new("/private/old.json")).unwrap();
+    let new = render_plist(Path::new("/opt/new-agent"), Path::new("/private/new.json")).unwrap();
+    let old_lock = lifecycle_lock(&path).unwrap();
+    install_plist(&path, &old).unwrap();
+    // A real second opener cannot reach its first ownership observation while
+    // the old transaction spans validation, launchctl work and filesystem work.
+    let other = path.clone();
+    assert!(std::thread::spawn(move || lifecycle_lock(&other).is_err()).join().unwrap());
+    assert!(existing_plist(&path, &old).unwrap());
+    std::fs::remove_file(&path).unwrap();
+    drop(old_lock);
+    let successor = lifecycle_lock(&path).unwrap();
+    install_plist(&path, &new).unwrap();
+    let other = path.clone();
+    assert!(std::thread::spawn(move || lifecycle_lock(&other).is_err()).join().unwrap());
+    drop(successor);
+    // An old invocation that starts after replacement can acquire the same
+    // retained lock, but its exact ownership fences reject both unlink and
+    // fixed-target bootout before either effect. No fake launchctl is used.
+    let _old_retry = lifecycle_lock(&path).unwrap();
+    assert!(existing_plist(&path, &old).is_err());
+    let loaded = format!("path = {}\nprogram = /opt/new-agent\narguments = {{\n/opt/new-agent\n--config\n/private/new.json\n}}\npid = 123\n", path.display());
+    assert!(validate_loaded_job(&loaded, Path::new("/opt/old-agent"),
+        Path::new("/private/old.json"), &path).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), new);
+}
+
+#[test]
 fn performance_requires_real_cpu_accounting_and_loaded_identity() {
     let meter = crate::performance::Meter::new().unwrap();
     let mut value = meter.snapshot().unwrap();

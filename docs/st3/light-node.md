@@ -302,6 +302,10 @@ owned login definition, never native records or the durable journal. Repeating
 unchanged install/start does not restart an existing matching process. A foreign
 or mismatched definition/job is a refusal, not an instruction to replace or kill
 it. A full-node conflict must be fenced separately, never automatically stopped.
+Every mutating lifecycle operation holds the same private per-user lock across
+ownership observations, launchd calls and plist changes. A concurrent operation
+is refused before entering that transaction. The lock inode is retained even
+after uninstall so an old invocation cannot bypass a successor's ownership lock.
 
 Darwin health checks the matching loaded job and its private performance identity;
 a loaded plist alone is not readiness. Local process health is distinct from home

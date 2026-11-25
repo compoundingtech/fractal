@@ -138,8 +138,15 @@ fn existing_plist(path: &Path, expected: &str) -> Result<bool> {
 }
 
 #[cfg(all(unix, any(target_os = "macos", test)))]
-fn install_plist(path: &Path, expected: &str) -> Result<()> {
-    use std::{io::Write as _, os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _}};
+fn prepare_service_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    for ancestor in path.ancestors().skip(1) {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => trusted_directory(ancestor, false)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+    }
     let directory = path.parent().context("plist directory missing")?;
     let library = directory.parent().context("Library directory missing")?;
     for parent in [library, directory] {
@@ -149,6 +156,27 @@ fn install_plist(path: &Path, expected: &str) -> Result<()> {
         }
         trusted_directory(parent, true)?;
     }
+    Ok(())
+}
+
+/// One fixed lock inode serializes the entire lifecycle ownership transaction,
+/// including old-binary uninstall against new-binary install. Never unlink it:
+/// a successor opening a different inode would evade an incumbent's lock.
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn lifecycle_lock(plist: &Path) -> Result<std::fs::File> {
+    prepare_service_directory(plist)?;
+    let path = plist.parent().context("plist directory missing")?
+        .join(format!(".{LABEL}.lifecycle.lock"));
+    let lock = crate::config::private_state_file(&path)?;
+    lock.try_lock().context("another lifecycle operation owns this GUI service; ownership is unchanged")?;
+    Ok(lock)
+}
+
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn install_plist(path: &Path, expected: &str) -> Result<()> {
+    use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
+    prepare_service_directory(path)?;
+    let directory = path.parent().context("plist directory missing")?;
     if existing_plist(path, expected)? { return Ok(()); }
     let temporary = directory.join(format!(".{LABEL}.{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
@@ -196,6 +224,19 @@ pub fn validate_loaded_job(text: &str, executable: &Path, config: &Path, plist: 
         && arguments == [executable, "--config", config], "loaded launchd job does not match this exact agent executable/configuration/plist");
     ensure!(pid != Some(0), "invalid launchd PID");
     Ok(pid)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn full_node_label(label: &str) -> bool {
+    label == "org.nix-community.home.smalltalk"
+        || label.starts_with("com.compoundingtech.st3")
+        || label == "com.compoundingtech.fractal"
+        || label.starts_with("com.compoundingtech.fractal.")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn full_node_present(domain_output: &str) -> bool {
+    domain_output.split_whitespace().any(|word| full_node_label(word.trim_matches('"')))
 }
 
 #[cfg(target_os = "macos")]
@@ -289,6 +330,11 @@ mod darwin {
         let executable = std::env::current_exe()?;
         let plist = plist_path()?;
         let expected = render_plist(&executable, config_path)?;
+        // Hold before the first ownership observation through the final
+        // launchctl/filesystem mutation. A health read may race a transition
+        // and report unavailable, but cannot mutate an owner.
+        let _lifecycle_lock = if operation == Operation::Health { None }
+            else { Some(lifecycle_lock(&plist)?) };
         let domain = format!("gui/{}", uid());
         let target = format!("{domain}/{LABEL}");
         let (available, domain_output, error) = launchctl(&["print", &domain]).await?;
@@ -298,10 +344,8 @@ mod darwin {
         let loaded = checked_loaded(&target, &executable, config_path, &plist).await?;
         ensure!(loaded.is_none() || installed, "loaded job lacks the exact owned installed plist");
         if matches!(operation, Operation::Install | Operation::Start | Operation::Restart) {
-            ensure!(!domain_output.split_whitespace().any(|word| {
-                let label = word.trim_matches('"');
-                label.starts_with("com.compoundingtech.st3") || label == "com.compoundingtech.fractal" || label.starts_with("com.compoundingtech.fractal.")
-            }), "full-node service is present in the GUI domain; native custody ownership is unknown, refusing activation");
+            ensure!(!full_node_present(&domain_output),
+                "full-node service is present in the GUI domain; native custody ownership is unknown, refusing activation");
         }
         match operation {
             Operation::Install => { install_plist(&plist, &expected)?; },
@@ -319,7 +363,7 @@ mod darwin {
                 if loaded.is_some() { bootout(&target).await?; }
                 if operation == Operation::Uninstall && installed {
                     // Fence again after launchd returned; never remove a substituted foreign plist.
-                    existing_plist(&plist, &expected)?;
+                    ensure!(existing_plist(&plist, &expected)?, "owned service plist disappeared during uninstall");
                     std::fs::remove_file(&plist)?;
                     std::fs::File::open(plist.parent().context("plist directory missing")?)?.sync_all()?;
                 }
