@@ -5935,6 +5935,20 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
     let Command::Driver(args) = &cli.command else {
         return Ok(None);
     };
+    // Finite execs have already passed host admission and the private payload gate.
+    // Its minted generation is physical provenance; waiting for a graph projection
+    // here deadlocks graph-free seats before their payload can run. Never use an
+    // inherited ST3_INCARNATION (which can describe the launching parent).
+    if args.driver == "exec"
+        && let Some(generation) = std::env::var_os(fractal_runtime::payload_receipt::GENERATION_ENV)
+    {
+        // SAFETY: bootstrap is single-threaded, before the lookup or CLI runtime.
+        unsafe { std::env::remove_var(fractal_runtime::payload_receipt::GENERATION_ENV); }
+        let generation = generation.into_string()
+            .map_err(|_| anyhow::anyhow!("finite exec generation is not UTF-8"))?;
+        anyhow::ensure!(!generation.is_empty(), "finite exec generation is empty");
+        return Ok(Some(generation));
+    }
     let subject = args.subject.clone().or_else(|| {
         (args.driver != "claude-mcp")
             .then(|| args.identity.as_deref().map(normalize_agent_subject))
