@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document the fenced whole-Mac light-node cutover, rollback and settled CPU acceptance runbook",
+  "replay": {"status": "none", "detail": "Documentation only; durable replay and custody behavior are unchanged."},
+  "schema": {"status": "none", "detail": "No protocol, storage or configuration changes."},
+  "rules": {"status": "none", "detail": "No planner, executor or publication authority changes."},
+  "compatibility": {"status": "none", "detail": "No deployment, caller routing or service activation is performed."},
+  "downtime": {"status": "none", "detail": "This PR describes a separately approved cutover window; it does not execute one."},
+  "manual": {"status": "none", "detail": "No operator action is required by this documentation change; the runbook explicitly gates future execution on supported tooling and approvals."},
+  "recovery": {"status": "none", "detail": "Documents epoch-fenced rollback with a current authoritative graph decision cut, without implementing or exercising migration."}
+}
