@@ -517,6 +517,7 @@ printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
       FRACTAL_ISOLATION_WORKSPACE: '${{ github.workspace }}',
       FRACTAL_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
       FRACTAL_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
+      CI_TEST_CLI_BINARY: '${{ env.CI_TEST_CLI_BINARY }}',
       ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
       ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
       ST_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',

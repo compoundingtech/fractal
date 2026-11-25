@@ -367,9 +367,23 @@ pub trait RuntimeStartsStore {
     fn try_runtime_start_lock(&self, subject: &str) -> Result<Option<RuntimeStartLock>>;
     fn runtime_start_for(&self, subject: &str) -> Result<Option<RuntimeStartOperation>>;
     fn pending_runtime_starts(&self) -> Result<Vec<RuntimeStartOperation>>;
+    /// Remote physical custody shares this journal, but never consults or finalizes the fleet graph.
+    fn remote_runtime_start(&self, id: &str) -> Result<Option<RuntimeStartOperation>>;
+    fn admit_remote_runtime_start(&self, operation: &RuntimeStartOperation, limit: usize) -> Result<bool>;
+    fn enter_remote_runtime_start(&self, id: &str, owner: &str) -> Result<()>;
+    fn finish_remote_runtime_start(&self, id: &str, result: &Value) -> Result<()>;
+    fn revoke_remote_runtime_start(&self, id: &str, reason: &str) -> Result<()>;
+    /// Retain physical closure independently of local session finalization.
+    fn verify_remote_runtime_start_cleanup(&self, id: &str) -> Result<()>;
+    /// Called only after physical closure and all resource/local session finalization.
+    fn settle_remote_runtime_start(&self, id: &str) -> Result<()>;
+    /// Immutable `(operation_id, member)` envelopes remain held until positive
+    /// physical cleanup, including after graph adoption, daemon loss, or missing registry evidence.
+    fn unretired_native_start_members(&self) -> Result<Vec<(String, crate::model::MemberSpec)>>;
     /// Point-read the exact admitted request snapshot at the physical boundary.
     /// Trim pins do not authorize launching after a repair or source retraction.
     fn runtime_start_request_retained(&self, expected: &ClaimRecord) -> Result<bool>;
+    fn retained_runtime_start_request(&self, id: &str) -> Result<Option<ClaimRecord>>;
     fn admit_runtime_start(
             &self,
             operation: &mut RuntimeStartOperation,
@@ -432,6 +446,98 @@ impl RuntimeStartsStore for Store {
             previous,
             _thread: std::marker::PhantomData,
         })
+    }
+
+    fn retained_runtime_start_request(&self, id: &str) -> Result<Option<ClaimRecord>> {
+        retained_runtime_start_request(&self.readers.get(), self.origin(), id)
+    }
+
+    fn remote_runtime_start(&self, id: &str) -> Result<Option<RuntimeStartOperation>> {
+        self.readers.get().query_row(
+            "SELECT * FROM local_runtime_starts WHERE id=?1 AND json_extract(body,'$.remote_start') IS NOT NULL",
+            [id], read).optional().map_err(Into::into)
+    }
+
+    fn unretired_native_start_members(&self) -> Result<Vec<(String, crate::model::MemberSpec)>> {
+        let connection = self.readers.get();
+        let mut query = connection.prepare(
+            "SELECT id,COALESCE(json_extract(body,'$.remote_start.member'),json_extract(body,'$.member'))
+             FROM local_runtime_starts WHERE cleanup_verified=0 ORDER BY id")?;
+        let members = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .map(|row| {
+                let (operation, member) = row?;
+                Ok((operation, serde_json::from_str(&member)?))
+            }).collect::<Result<Vec<_>>>()?;
+        Ok(members)
+    }
+
+    fn admit_remote_runtime_start(&self, operation: &RuntimeStartOperation, limit: usize) -> Result<bool> {
+        anyhow::ensure!(!operation.body["remote_start"].is_null(), "remote start authorization is missing");
+        let mut connection = self.connection.write();
+        let tx = Connection::transaction(&mut connection)?;
+        if let Some(prior) = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1",
+            [&operation.id], read).optional()? {
+            anyhow::ensure!(prior.subject == operation.subject && prior.body == operation.body,
+                "remote start operation identity was reused");
+            return Ok(true);
+        }
+        let busy: bool = tx.query_row(
+            /* sqlite-large-value: allow-for-now lv-h983d9fe42c24 owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND ({PENDING}))"),
+            [&operation.subject], |row| row.get(0))?;
+        let running: usize = tx.query_row(
+            "SELECT count(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1",
+            [], |row| row.get(0))?;
+        if busy || running >= limit { return Ok(false); }
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h0c6f5dec022e owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_runtime_starts(id,subject,owner,body) VALUES(?1,?2,?3,?4)",
+            params![operation.id, operation.subject, operation.owner, serde_json::to_string(&operation.body)?])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn enter_remote_runtime_start(&self, id: &str, owner: &str) -> Result<()> {
+        let changed = self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hb0bc33cd4512 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1,
+             body=json_set(body,'$.backend_entry',json_object('version',1,'operation',id,'owner',owner,'phase','backend-entering'))
+             WHERE id=?1 AND owner=?2 AND dispatched=0 AND finished=0 AND revoked_by IS NULL
+               AND json_extract(body,'$.remote_start') IS NOT NULL",
+            params![id, owner])?;
+        anyhow::ensure!(changed == 1, "remote runtime backend entry fence was rejected");
+        Ok(())
+    }
+
+    fn finish_remote_runtime_start(&self, id: &str, result: &Value) -> Result<()> {
+        // No claim receipt or managed graph finalizer may run on a graph-free seat.
+        // The session journal owns the remote receipt; this is the native producer proof.
+        let changed = self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h8fde99d5cd81 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,result=?2,
+             cleanup_verified=CASE WHEN json_extract(?2,'$.producer_closed')=1 THEN 1 ELSE cleanup_verified END
+             WHERE id=?1 AND json_extract(body,'$.remote_start') IS NOT NULL",
+            params![id, serde_json::to_string(result)?])?;
+        anyhow::ensure!(changed == 1, "remote native operation is missing");
+        Ok(())
+    }
+
+    fn revoke_remote_runtime_start(&self, id: &str, reason: &str) -> Result<()> {
+        self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h002e9cac6381 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,?2)
+             WHERE id=?1 AND json_extract(body,'$.remote_start') IS NOT NULL", params![id, reason])?;
+        Ok(())
+    }
+
+    fn verify_remote_runtime_start_cleanup(&self, id: &str) -> Result<()> {
+        let changed = self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h3598f60bbf2a owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1
+             WHERE id=?1 AND json_extract(body,'$.remote_start') IS NOT NULL", [id])?;
+        anyhow::ensure!(changed == 1, "remote native producer custody is missing");
+        Ok(())
+    }
+
+    fn settle_remote_runtime_start(&self, id: &str) -> Result<()> {
+        let changed = self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h88be0a550570 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,applied=1,cleanup_verified=1
+             WHERE id=?1 AND json_extract(body,'$.remote_start') IS NOT NULL", [id])?;
+        anyhow::ensure!(changed == 1, "remote native producer custody is missing");
+        Ok(())
     }
 
     fn append_reconciled_runtime_observation(

@@ -34,6 +34,20 @@ pub(crate) fn resolve(
     }
 }
 
+// Library fixtures cannot use Cargo's package-local CARGO_BIN_EXE_* constants.
+// The archive consumer supplies the same authenticated standalone CLI that the
+// gateway VM uses; local native acceptance must supply its own exact-source build.
+#[allow(dead_code)]
+pub(crate) fn built_cli_binary() -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("CI_TEST_CLI_BINARY")
+            .expect("native CLI fixtures require CI_TEST_CLI_BINARY naming the exact-source built fractal executable"),
+    );
+    assert!(path.is_absolute(), "CI_TEST_CLI_BINARY must be an absolute built executable path");
+    assert!(path.is_file(), "CI_TEST_CLI_BINARY must name the built real CLI");
+    path
+}
+
 #[allow(unused_macros)]
 macro_rules! test_env {
     ($name:expr) => {
