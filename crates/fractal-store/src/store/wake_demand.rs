@@ -1,6 +1,7 @@
-//! Disposable v1 wake metadata. No bodies, replicated state, or suspend/wake side effects.
-//! A zero-row result is evidence only at its reported, caught-up source frontier.
+//! Disposable wake projection and durable acceptance-time wake audit outbox.
+//! Audit capture is independent of pending/delivery state and survives projection rebuilds.
 use super::*;
+use crate::model::MemberSpec;
 
 const TABLE: &str = "local_wake_demand_v1";
 const QUEUE: &str = "local_wake_demand_pending_v1";
@@ -8,6 +9,7 @@ const COMPLETE: &str = "local_wake_demand_v1_complete";
 const AFTER: &str = "local_wake_demand_v1_after";
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
+    create_audit_capture(connection, "NEW.store_index", false)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3eddd3ad87ca owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ "
         CREATE TABLE IF NOT EXISTS local_wake_demand_v1 (
             subject TEXT PRIMARY KEY, recipient TEXT NOT NULL, class INTEGER NOT NULL,
@@ -207,5 +209,242 @@ impl Store {
             mirrored_lifecycle, source,
             caught_up: !dirty && source.is_some_and(|(sent, lifecycle)| mirrored_sent >= sent && mirrored_lifecycle >= lifecycle),
         } })
+    }
+}
+
+/// This ledger is not a projection: never rebuild it from old claims. Missing history is
+/// unknown, and a restart must not manufacture acceptance-time suspension observations.
+pub(super) fn create_audit_capture(connection: &Connection, graph_cut: &str, temporary: bool) -> Result<()> {
+    // Native capture calls a current-writer scalar. Never persist that dependency into
+    // a database an older runtime must still be able to accept replicated messages into.
+    let temporary = if temporary { "TEMP" } else { "" };
+    connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h614b7a067991 owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ "
+        CREATE TABLE IF NOT EXISTS local_residency_wake_capture (
+            message TEXT PRIMARY KEY, seat TEXT NOT NULL, accepted_at INTEGER NOT NULL,
+            received_at INTEGER NOT NULL, graph_cut INTEGER NOT NULL, metadata TEXT NOT NULL,
+            processed INTEGER NOT NULL DEFAULT 0
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS local_residency_wake_capture_pending
+            ON local_residency_wake_capture(processed,message);
+        CREATE {temporary} TRIGGER IF NOT EXISTS residency_wake_capture AFTER INSERT ON claims
+        WHEN NEW.kind='message.sent' BEGIN
+            INSERT OR IGNORE INTO local_residency_wake_capture
+                (message,seat,accepted_at,received_at,graph_cut,metadata)
+            VALUES(NEW.subject,COALESCE(json_extract(NEW.body,'$.fields.to'),''),
+                CAST(NEW.accepted_at_unix_ms AS INTEGER),
+                CAST(unixepoch('subsec')*1000 AS INTEGER),{graph_cut},
+                json_object('from',json_extract(NEW.body,'$.fields.from'),
+                            'tags',json_extract(NEW.body,'$.fields.tags')));
+        END;
+    "))?;
+    Ok(())
+}
+
+type AuditCapture = (String, String, i64, i64, u64, String);
+
+fn audit_captures(source: &Connection) -> Result<Vec<AuditCapture>> {
+    Ok(source.prepare_cached(
+        "SELECT message,seat,accepted_at,received_at,graph_cut,metadata
+         FROM local_residency_wake_capture WHERE processed=0 ORDER BY message LIMIT 64",
+    )?.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn acknowledge_audits(source: &Connection, rows: &[AuditCapture]) -> Result<bool> {
+    for row in rows {
+        source.execute(/* sqlite-large-value: allow-for-now lv-hd4f758d189b4 owner=fractal_store::store::wake_demand TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_residency_wake_capture SET processed=1 WHERE message=?1", [&row.0])?;
+    }
+    Ok(!source.query_row("SELECT EXISTS(SELECT 1 FROM local_residency_wake_capture WHERE processed=0)",
+        [], |row| row.get::<_, bool>(0))?)
+}
+
+impl Store {
+    /// Process at most 64 captured messages per database. Returns true only when both
+    /// sources are drained; delivery, manual conversion and restart cannot erase a capture.
+    pub fn drain_wake_audits(&self) -> Result<bool> {
+        let shard = messages_shard::shard(self);
+        let mut drained = true;
+        // Shard first follows the source-before-graph writer lock order.
+        if let Some(shard) = &shard {
+            let mut writer = shard.connection.write();
+            let source = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            drained &= self.drain_wake_audit_source(&source)?;
+            source.commit()?;
+        } else {
+            drained = false;
+        }
+        self.connection.batched(|tx| -> Result<bool> {
+            // Graph source and destination share one transaction.
+            let rows = audit_captures(tx)?;
+            if !self.emit_wake_audit_rows(tx, &rows)? { return Ok(false); }
+            drained &= acknowledge_audits(tx, &rows)?;
+            Ok(drained)
+        }).map_err(anyhow::Error::msg)?
+    }
+
+    fn drain_wake_audit_source(&self, source: &Transaction<'_>) -> Result<bool> {
+        let rows = audit_captures(source)?;
+        if !self.connection.batched(|tx| self.emit_wake_audit_rows(tx, &rows))
+            .map_err(anyhow::Error::msg)??
+        { return Ok(false); }
+        // A crash after the graph commit but before this acknowledgement replays immutable
+        // evidence under the same key, rather than losing or duplicating the observation.
+        acknowledge_audits(source, &rows)
+    }
+
+    fn emit_wake_audit_rows(&self, tx: &Transaction<'_>, rows: &[AuditCapture]) -> Result<bool> {
+        if projection_work_pending_tx(tx).map_err(anyhow::Error::new)?
+            || declared_admission::validate_fleet(tx, &self.origin, &residency_evidence::AUDIT_FEATURE).is_err()
+        {
+            return Ok(false);
+        }
+        for (message, seat, accepted, received, cut, metadata) in rows {
+            let fields: Value = serde_json::from_str(metadata)?;
+            let from = fields["from"].as_str().unwrap_or_default();
+            let tags: Vec<String> = fields["tags"].as_array().into_iter().flatten()
+                .filter_map(Value::as_str).map(str::to_owned).collect();
+            let wakes = !tags.iter().any(|tag| crate::silent::is_silent_tag(tag))
+                || crate::silent::always_wakes(from, &tags);
+            let desired = desired_row_at(tx, seat, Some(*cut))?;
+            let owner = desired.filter(|row| row.kind == "agent")
+                .and_then(|row| row.member)
+                .map(|member| serde_json::from_str::<MemberSpec>(&member)).transpose()?;
+            if wakes && owner.is_some_and(|member| member.host == self.origin)
+                && let Some(state) = crate::suspension::current_at_tx(tx, seat, Some(*cut))?
+                && state.cause() == "idle" && state.suspended_at_unix_ms.is_some()
+                && state.phase != "resumed"
+            {
+                let suspension = state.suspend_operation_id.as_deref().unwrap_or(&state.operation_id);
+                idle_residency::evidence(tx, &self.origin, seat, "wake-audit",
+                    &format!("wake-audit:{}:{message}", self.origin), "residency.wake-audit",
+                    json!({"message_id":message,"accepted_at":accepted,"owner_received_at":received,
+                        "suspension_id":suspension,"suspension_cause":"idle"}))?;
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Inputs to a complete host audit census. Audit output itself does not invalidate the cut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditCoverageCut {
+    pub graph: u64,
+    pub source: Option<(u64, u64)>,
+}
+
+#[derive(Default)]
+struct CoverageProgress {
+    since: Option<u128>,
+    through: u128,
+    audit_index: u64,
+    previous: Option<String>,
+    in_flight: bool,
+}
+
+#[derive(Default)]
+struct CoverageInterval(Mutex<CoverageProgress>);
+
+fn audit_graph_cut(connection: &Connection) -> Result<u64> {
+    Ok(connection.query_row(
+        "SELECT COALESCE(MAX(store_index),0) FROM claims WHERE kind NOT LIKE 'residency.%'",
+        [], |row| row.get(0),
+    )?)
+}
+
+impl Store {
+    pub fn residency_audit_coverage_cut(&self) -> Result<AuditCoverageCut> {
+        let interval = self.extension::<CoverageInterval>();
+        let mut progress = interval.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // If the preceding census returned early or failed, its missing interval is unknown.
+        if progress.in_flight { *progress = CoverageProgress::default(); }
+        progress.in_flight = true;
+        drop(progress);
+        self.current_residency_audit_coverage_cut()
+    }
+
+    fn current_residency_audit_coverage_cut(&self) -> Result<AuditCoverageCut> {
+        let source = messages_shard::shard(self).map(|shard| shard.readers.get().query_row(
+            "SELECT COALESCE((SELECT MAX(store_index) FROM stream_messages),0),
+                    COALESCE((SELECT MAX(rowid) FROM stream_lifecycle),0)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        )).transpose()?;
+        Ok(AuditCoverageCut { graph: audit_graph_cut(&self.readers.get())?, source })
+    }
+
+    /// Called only after a complete resume-history census. A fresh process and every failed
+    /// census start a new interval; neither an old frontier nor an unavailable source proves
+    /// completeness. Replicas verify the cumulative dependency set before trusting coverage.
+    pub fn publish_residency_audit_coverage(
+        &self, cut: &AuditCoverageCut, wake_drained: bool, now: u128,
+    ) -> Result<bool> {
+        let interval = self.extension::<CoverageInterval>();
+        let mut progress = interval.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = idle_residency::with_source_fence(self, || {
+            let current = self.current_residency_audit_coverage_cut()?;
+            self.connection.batched(|tx| -> Result<Option<CoverageProgress>> {
+                if declared_admission::validate_fleet(tx, &self.origin, &residency_evidence::AUDIT_FEATURE).is_err() {
+                    return Ok(None);
+                }
+                let pending: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_residency_wake_capture WHERE processed=0)",
+                    [], |row| row.get(0),
+                )?;
+                let source_pending = messages_shard::shard(self).map(|shard| shard.readers.get().query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_residency_wake_capture WHERE processed=0)",
+                    [], |row| row.get::<_, bool>(0),
+                )).transpose()?.unwrap_or(true);
+                if !wake_drained || cut.source.is_none() || current != *cut || pending || source_pending
+                    || progress.since.is_some_and(|since| now < since) || now < progress.through
+                    || audit_graph_cut(tx)? != cut.graph
+                    || projection_work_pending_tx(tx).map_err(anyhow::Error::new)?
+                    || stream_mirror::sent_through(tx)? < cut.source.unwrap().0
+                    || stream_mirror::lifecycle_through(tx)? < cut.source.unwrap().1
+                {
+                    return Ok(None);
+                }
+                let covered_since = progress.since.unwrap_or(now);
+                // Each immutable page binds at most 128 dependencies. A receiver walks the
+                // previous_coverage chain; reordered claims cannot certify a missing audit.
+                let rows = tx.prepare_cached(
+                    "SELECT id,store_index FROM claims WHERE origin=?1 AND store_index>?2
+                     AND kind IN ('residency.wake-audit','residency.resume-audit')
+                     ORDER BY store_index LIMIT 128",
+                )?.query_map(params![self.origin, progress.audit_index],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let audit_index = rows.last().map_or(progress.audit_index, |row| row.1);
+                let remaining: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM claims WHERE origin=?1 AND store_index>?2
+                     AND kind IN ('residency.wake-audit','residency.resume-audit'))",
+                    params![self.origin, audit_index], |row| row.get(0),
+                )?;
+                let mut ids: Vec<_> = rows.into_iter().map(|row| row.0).collect();
+                ids.sort();
+                let mut digest = Sha256::new();
+                for id in &ids { digest.update(id.as_bytes()); digest.update(b"\n"); }
+                let through = if remaining { progress.through.max(covered_since) } else { now };
+                let key = format!("audit-coverage:{}:{covered_since}:{now}:{audit_index}", self.origin);
+                let mut fields = json!({"observed_at":now,"covered_since":covered_since,"through_at":through,
+                    "audit_count":ids.len(),"audit_digest":hex::encode(digest.finalize()),
+                    "audit_ids":ids,"audit_complete":!remaining});
+                if let Some(previous) = &progress.previous {
+                    fields["previous_coverage"] = json!(previous);
+                }
+                idle_residency::evidence(tx, &self.origin, "", "audit-coverage", &key,
+                    "residency.audit-coverage", fields)?;
+                let previous = tx.query_row(
+                    "SELECT canonical_claim_id FROM operations WHERE id=?1 AND state='active'",
+                    [operation_id_for_key(&format!("residency-evidence:{key}"))],
+                    |row| row.get::<_, String>(0),
+                )?;
+                Ok(Some(CoverageProgress { since: Some(covered_since), through, audit_index,
+                    previous: Some(previous), in_flight: false }))
+            }).map_err(anyhow::Error::msg)?
+        });
+        match result {
+            Ok(Some(next)) => { *progress = next; Ok(true) }
+            Ok(None) => { *progress = CoverageProgress::default(); Ok(false) }
+            Err(error) => { *progress = CoverageProgress::default(); Err(error) }
+        }
     }
 }

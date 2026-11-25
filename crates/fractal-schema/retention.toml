@@ -37,6 +37,9 @@
 "residency.eligibility-outcome" = { class = "durable" }
 "residency.unrouted" = { class = "durable" }
 "residency.host-sample" = { class = "durable" }
+"residency.wake-audit" = { class = "durable" }
+"residency.resume-audit" = { class = "durable" }
+"residency.audit-coverage" = { class = "durable" }
 "harness.invocation" = { class = "durable" }
 "effect.intended" = { class = "durable" }
 "effect.in-flight" = { class = "durable" }

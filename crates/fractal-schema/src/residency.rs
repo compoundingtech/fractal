@@ -5,6 +5,7 @@ pub const KINDS: &[&str] = &[
     "residency.wake-demand", "residency.resumed", "residency.first-turn",
     "residency.outcome", "residency.sleep-ended", "residency.eligibility-outcome",
     "residency.unrouted", "residency.host-sample",
+    "residency.wake-audit", "residency.resume-audit", "residency.audit-coverage",
 ];
 
 pub(super) fn register(claims: &mut BTreeMap<String, ClaimSpec>) {
@@ -44,6 +45,26 @@ pub(super) fn register(claims: &mut BTreeMap<String, ClaimSpec>) {
                 ("private_reclaimed_bytes", integer()),
                 ("memory_coverage", required_enum(&["complete", "partial", "unavailable"])),
             ],
+            "residency.wake-audit" => &[
+                ("message_id", required_string()), ("accepted_at", required_integer()),
+                ("suspension_id", required_string()),
+                ("suspension_cause", required_enum(&["idle", "manual", "unknown"])),
+                ("owner_received_at", required_integer()),
+            ],
+            "residency.resume-audit" => &[
+                ("resume_operation_id", required_string()), ("suspension_id", required_string()),
+                ("suspension_cause_at_admission", required_enum(&["idle", "manual", "unknown"])),
+                ("suspension_cause_at_completion", enumeration(&["idle", "manual", "unknown"])),
+                ("admitted_at", required_integer()), ("resumed_at", integer()),
+                ("failure", string()), ("phase", required_enum(&["admitted", "completed"])),
+            ],
+            "residency.audit-coverage" => &[
+                ("observed_at", required_integer()), ("covered_since", required_integer()),
+                ("through_at", required_integer()),
+                ("previous_coverage", string()), ("audit_ids", required_array()),
+                ("audit_count", required_integer()), ("audit_digest", required_string()),
+                ("audit_complete", required_boolean()),
+            ],
             _ => unreachable!("registered residency kind"),
         };
         let mut fields: BTreeMap<String, FieldSpec> = names.iter().cloned()
@@ -53,7 +74,7 @@ pub(super) fn register(claims: &mut BTreeMap<String, ClaimSpec>) {
         claims.insert(kind.into(), ClaimSpec {
             kind: kind.into(), subjects: vec!["residency".into()], fields,
             additional_fields: false, write_policy: WritePolicy::SystemOnly,
-            cardinality: if kind == "residency.host-sample" { Cardinality::Append } else { Cardinality::Once },
+            cardinality: if matches!(kind, "residency.host-sample" | "residency.audit-coverage") { Cardinality::Append } else { Cardinality::Once },
             projection: None, wakes_reconciler: false, source_kdl: Vec::new(),
             retention: claim_retention(kind),
         });
@@ -69,6 +90,9 @@ pub(super) fn validate(subject: &str, kind: &str, fields: &BTreeMap<String, Valu
         "residency.sleep-ended" => "sleep",
         "residency.eligibility-outcome" => "eligibility",
         "residency.unrouted" => "unrouted",
+        "residency.wake-audit" => "wake-audit",
+        "residency.resume-audit" => "resume-audit",
+        "residency.audit-coverage" => "audit-coverage",
         _ => "host",
     };
     let host = fields.get("host").and_then(Value::as_str).unwrap_or_default();
@@ -101,6 +125,29 @@ pub(super) fn validate(subject: &str, kind: &str, fields: &BTreeMap<String, Valu
             _ => {},
         }
     }
+    if kind == "residency.resume-audit" {
+        let completed = fields.get("phase").and_then(Value::as_str) == Some("completed");
+        let cause = fields.contains_key("suspension_cause_at_completion");
+        let resumed = fields.contains_key("resumed_at");
+        let failed = fields.contains_key("failure");
+        if (completed && (!cause || resumed == failed)) || (!completed && (cause || resumed || failed)) {
+            return Err(error("invalid-claim-field", "resume audit completion needs a cause and exactly one result; admission has no completion fields"));
+        }
+    }
+    if kind == "residency.audit-coverage" {
+        let at = |name: &str| fields.get(name).and_then(Value::as_u64).unwrap_or_default();
+        if at("covered_since") > at("through_at") || at("through_at") > at("observed_at") {
+            return Err(error("invalid-claim-field", "audit coverage needs covered_since <= through_at <= observed_at"));
+        }
+        let ids = fields.get("audit_ids").and_then(Value::as_array).expect("validated array");
+        if ids.len() > 128 || ids.iter().any(|id| id.as_str().is_none_or(str::is_empty))
+            || at("audit_count") != ids.len() as u64
+            || fields.get("audit_digest").and_then(Value::as_str).is_none_or(|digest|
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(error("invalid-claim-field", "audit coverage needs at most 128 claim ids, their count and SHA-256 digest"));
+        }
+    }
     Ok(())
 }
 
@@ -119,6 +166,9 @@ mod tests {
             ("residency.eligibility-outcome", "eligibility/e", json!({"eligible_since":0,"decided_at":1,"refused":0,"reason":"suspended"})),
             ("residency.unrouted", "unrouted/u", json!({"observed_at":1,"kind":"attach"})),
             ("residency.host-sample", "host/example", json!({"observed_at":1,"asleep_seats":0,"memory_coverage":"unavailable"})),
+            ("residency.wake-audit", "wake-audit/m", json!({"message_id":"message/m","accepted_at":1,"suspension_id":"claim/s","suspension_cause":"idle","owner_received_at":2})),
+            ("residency.resume-audit", "resume-audit/r", json!({"resume_operation_id":"claim/r","suspension_id":"claim/s","suspension_cause_at_admission":"idle","admitted_at":2,"phase":"admitted"})),
+            ("residency.audit-coverage", "audit-coverage/c", json!({"observed_at":3,"covered_since":1,"through_at":2,"audit_ids":[],"audit_count":0,"audit_digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","audit_complete":true})),
         ]
     }
 
@@ -176,6 +226,37 @@ mod tests {
                 fields.insert("held_silent_age_seconds".into(), json!(-1));
                 assert!(registry().validate_claim(&subject, kind, &fields).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn audit_resume_phases_require_historical_cause_and_exactly_one_terminal_result() {
+        let subject = "residency/example/resume-audit/r";
+        let mut fields: BTreeMap<String, Value> = serde_json::from_value(json!({
+            "host":"example","resume_operation_id":"claim/r","suspension_id":"claim/s",
+            "suspension_cause_at_admission":"idle","admitted_at":2,"phase":"admitted"
+        })).unwrap();
+        registry().validate_replicated_claim(subject, "residency.resume-audit", &fields).unwrap();
+        fields.insert("phase".into(), json!("completed"));
+        assert!(registry().validate_claim(subject, "residency.resume-audit", &fields).is_err());
+        fields.insert("suspension_cause_at_completion".into(), json!("manual"));
+        fields.insert("resumed_at".into(), json!(3));
+        registry().validate_replicated_claim(subject, "residency.resume-audit", &fields).unwrap();
+        fields.insert("failure".into(), json!("manual-suspension"));
+        assert!(registry().validate_claim(subject, "residency.resume-audit", &fields).is_err());
+        fields.remove("resumed_at");
+        registry().validate_claim(subject, "residency.resume-audit", &fields).unwrap();
+    }
+
+    #[test]
+    fn audit_coverage_cannot_invert_or_extend_its_observation() {
+        let subject = "residency/example/audit-coverage/c";
+        for (since, through, valid) in [(1, 2, true), (3, 2, false), (1, 4, false)] {
+            let fields = serde_json::from_value(json!({
+                "host":"example","observed_at":3,"covered_since":since,"through_at":through,
+                "audit_ids":[],"audit_count":0,"audit_digest":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","audit_complete":true
+            })).unwrap();
+            assert_eq!(registry().validate_claim(subject, "residency.audit-coverage", &fields).is_ok(), valid);
         }
     }
 }

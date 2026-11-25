@@ -1,9 +1,10 @@
 //! The runtime of the messages shard: a separate store that holds one immutable `message.sent`
 //! claim per message, replicated beside the graph under the shard ID `messages`.
 //!
-//! The shard takes its fleet from the graph (`bind_fleet_authority`) and has no checkpoint,
-//! so this runtime keeps no tables of its own and never seals. It admits only the messages the
-//! stream may carry: a `message.sent` the schema accepts, written by an agent or the daemon.
+//! The shard takes its fleet from the graph (`bind_fleet_authority`), has no checkpoint,
+//! and never seals. A local audit ledger retains acceptance metadata independently of
+//! deferred graph mirroring. It admits only `message.sent` claims the schema accepts,
+//! written by an agent or the daemon.
 //! A person's device-signed message and an external assistant's message stay graph claims,
 //! because judging their signatures and grants needs principal facts only the graph holds.
 use serde_json::{Value, json};
@@ -838,6 +839,22 @@ impl Runtime for MessagesRuntime {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fc020e207df owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha7b0b4f3013e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_reads::LOCAL_SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbed1ce264b3a owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_operations::LOCAL_SCHEMA)?;
+        // Backup/default runtimes have no owner graph and cannot observe its suspension
+        // state. Only a bound live writer installs the connection-local capture trigger.
+        if self.0.upgrade().is_some() {
+            let graph = self.0.clone();
+            connection.create_scalar_function("residency_graph_cut", 0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                move |_| {
+                    let graph = graph.upgrade().ok_or(rusqlite::Error::InvalidQuery)?;
+                    graph.readers.get().query_row(
+                        "SELECT COALESCE(MAX(store_index),0) FROM claims", [],
+                        |row| row.get::<_, u64>(0),
+                    )
+                })?;
+            super::wake_demand::create_audit_capture(connection, "residency_graph_cut()", true)?;
+        }
         Ok(())
     }
 
@@ -1734,4 +1751,53 @@ mod tests {
         assert!(graph.claims_for(subject, None).unwrap().is_empty(), "lifecycle reached the graph");
     }
 
+    #[test]
+    fn native_capture_is_writer_local_across_rollback_default_and_current_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native.sqlite");
+        let graph = Arc::new(Store::open_memory("alder").unwrap());
+        let runtime = MessagesRuntime(Arc::downgrade(&graph));
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(subject TEXT PRIMARY KEY,kind TEXT NOT NULL,body TEXT NOT NULL,
+                accepted_at_unix_ms TEXT NOT NULL,store_index INTEGER NOT NULL);",
+        ).unwrap();
+        runtime.create_schema(&connection).unwrap();
+        let accept = |connection: &Connection, subject: &str, index: u64| {
+            connection.execute(
+                "INSERT INTO claims VALUES(?1,'message.sent',?2,'100',?3)",
+                rusqlite::params![subject,json!({"fields":{"from":"agent/birch","to":"agent/cedar","tags":[]}}).to_string(),index],
+            ).unwrap();
+        };
+        accept(&connection, "message/current-before-close", 1);
+        let captured = |connection: &Connection| connection.query_row(
+            "SELECT COUNT(*) FROM local_residency_wake_capture", [], |row| row.get::<_, u64>(0),
+        ).unwrap();
+        assert_eq!(captured(&connection), 1);
+        assert!(!connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger'
+                AND sql LIKE '%residency_graph_cut%')", [], |row| row.get::<_, bool>(0),
+        ).unwrap(), "the durable database must not depend on a current-binary scalar");
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE name='residency_wake_capture')",
+            [], |row| row.get::<_, bool>(0),
+        ).unwrap());
+        drop(connection);
+        // An older runtime opens this same database without registering the new scalar.
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        accept(&connection, "message/rollback", 2);
+        assert_eq!(captured(&connection), 1);
+        MessagesRuntime::default().create_schema(&connection).unwrap();
+        accept(&connection, "message/default", 3);
+        assert_eq!(captured(&connection), 1);
+        runtime.create_schema(&connection).unwrap();
+        accept(&connection, "message/current-after-reopen", 4);
+        assert_eq!(captured(&connection), 2);
+        let observed: Vec<String> = connection.prepare(
+            "SELECT message FROM local_residency_wake_capture ORDER BY message",
+        ).unwrap().query_map([], |row| row.get(0)).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(observed, vec!["message/current-after-reopen","message/current-before-close"]);
+    }
 }
