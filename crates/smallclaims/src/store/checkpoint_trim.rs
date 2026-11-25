@@ -836,12 +836,15 @@ impl Store {
                 "checkpoint restore requires empty checkpoint state",
             ));
         }
+        let drop_digest = super::checkpoint::check_checkpoint_manifest(manifest)?;
         let claims = self.checkpoint_claims().map_err(internal)?;
-        if chosen_certificate(&certificates(&claims, &manifest.checkpoint)).is_some() {
+        if chosen_certificate(&certificates(&claims, &manifest.checkpoint)).is_some_and(|certificate| {
+            certificate.terms.cut_unix_ms == manifest.cut_unix_ms
+                && certificate.terms.drop_digest == drop_digest
+        }) {
             return self.adopt_checkpoint_checked(manifest, false);
         }
         let _completion = super::checkpoint_completion::Completion::outer();
-        let drop_digest = super::checkpoint::check_checkpoint_manifest(manifest)?;
         let checkpoint = manifest.checkpoint.as_str();
         {
             let mut connection = self.connection.write();

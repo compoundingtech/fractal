@@ -1433,6 +1433,15 @@ mod tests {
 
     #[test]
     fn a_local_trim_backup_restores_tombstones_and_the_same_inventory() {
+        local_trim_backup_restores(false);
+    }
+
+    #[test]
+    fn a_local_trim_backup_restores_with_a_different_certificate_for_the_same_cut() {
+        local_trim_backup_restores(true);
+    }
+
+    fn local_trim_backup_restores(with_other_certificate: bool) {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open(&root.path().join("source.db"), "alder").unwrap();
         source.bind_fleet("test-fleet").unwrap();
@@ -1460,6 +1469,39 @@ mod tests {
         source.checkpoint_step(&context).unwrap();
         assert!(source.trimmed_checkpoint().unwrap().is_some());
         assert!(source.checkpointed_envelopes().unwrap() > 0);
+        if with_other_certificate {
+            let checkpoint = source.trimmed_checkpoint().unwrap().unwrap();
+            let other_drop = "0".repeat(64);
+            assert_ne!(checkpoint.drop_digest, other_drop);
+            source
+                .append_claim(&ClaimInput {
+                    subject: checkpoint.id.clone(),
+                    kind: "checkpoint.verified".into(),
+                    actor: None,
+                    fields: json!({
+                        "cut_unix_ms": checkpoint.cut_unix_ms,
+                        "participants": ["alder"],
+                        "sealed_digest": "sealed",
+                        "rules_digest": "rules",
+                        "drop_digest": other_drop,
+                        "dropped_envelopes": 1,
+                        "dropped_claims": 1,
+                        "retained_digest": "retained",
+                        "graph_digest": "graph",
+                        "reader_digest": "reader",
+                        "checkpoint_protocol": 1,
+                    }).as_object().unwrap().iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            let claims = source.checkpoint_claims().unwrap();
+            let certificates = smallclaims::store::checkpoint_agreement::certificates(&claims, &checkpoint.id);
+            let certificate = smallclaims::store::checkpoint_agreement::chosen_certificate(&certificates).unwrap();
+            assert_eq!(certificate.terms.cut_unix_ms, checkpoint.cut_unix_ms);
+            assert_ne!(certificate.terms.drop_digest, checkpoint.drop_digest);
+        }
         let path = root.path().join("local-trim.jsonl");
         let header = archive(&source, &path);
         let target = root.path().join("restored.db");
