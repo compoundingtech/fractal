@@ -210,6 +210,97 @@ fn a_count_reads_its_event() {
 }
 
 #[test]
+fn target_goals_are_optional_display_only_numbers_in_the_bounds_unit() {
+    for (source, old, new, stat, goal) in [
+        (COUNT, "min=10", "min=10 goal=15.5", "per-hour", 15.5),
+        (COUNT, "min=10", "max=10 goal=5", "per-hour", 5.0),
+        (INTERVAL, "within=\"5m\"", "within=\"5m\" goal=120000", "p95", 120_000.0),
+    ] {
+        let baseline = one(&source.replace(old, new.split(" goal=").next().unwrap())).unwrap();
+        let mut declared = one(&source.replace(old, new)).unwrap();
+        let target = declared.targets.iter_mut().find(|target| target.stat == stat).unwrap();
+        assert_eq!(target.goal.take(), Some(goal));
+        assert_eq!(declared, baseline, "goal must not alter any measurement or policy input");
+    }
+    assert!(one(COUNT).unwrap().targets.iter().all(|target| target.goal.is_none()));
+    for bound in ["min=10", "max=10", "within=\"10ms\"", "min-percent=10"] {
+        let document: KdlDocument = format!("target \"value\" {bound} goal=10").parse().unwrap();
+        let node = canonical_node(&document.nodes()[0]).unwrap();
+        let target = parse_target(&node, &|message| error("test/goal", message)).unwrap();
+        assert_eq!(target.goal, Some(10.0), "equality is valid for {bound}");
+    }
+}
+
+#[test]
+fn target_goals_reject_the_wrong_side_of_every_bound() {
+    for bound in ["min=11", "min-percent=11", "max=9", "within=\"9ms\""] {
+        let document: KdlDocument = format!("target \"value\" {bound} goal=10").parse().unwrap();
+        let node = canonical_node(&document.nodes()[0]).unwrap();
+        let message = parse_target(&node, &|message| error("test/goal", message)).unwrap_err().message;
+        assert!(message.contains("at least as ambitious"), "{bound}: {message}");
+    }
+}
+
+#[test]
+fn target_goals_reject_non_numeric_non_finite_and_repeated_values() {
+    for goal in ["\"20\"", "#null", "#true", "#inf", "#-inf", "#nan", "20 goal=30"] {
+        assert!(one(&COUNT.replace("min=10", &format!("min=10 goal={goal}"))).is_err(), "{goal}");
+    }
+}
+
+#[test]
+fn target_goals_reject_native_forms_without_an_independent_row() {
+    for (target, goal) in [
+        ("target \"max\" within=\"100ms\"", 50),
+        ("target \"live-gb\" max=8", 4),
+        ("target \"growth-mb-per-day\" max=300", 100),
+    ] {
+        let message = parse_document(&SHIPPED.replace(target, &format!("{target} goal={goal}"))).unwrap_err().message;
+        assert!(message.contains("no independently representable native row"), "{target}: {message}");
+    }
+}
+
+#[test]
+fn target_goals_accept_all_row_addressable_native_forms() {
+    let mut source = SHIPPED.to_owned();
+    for (target, goal) in [
+        ("target \"p99\" within=\"300ms\"", 100.0),
+        ("target \"p99\" scope=\"remote\" within=\"300ms\"", 200.0),
+        ("target \"p99\" within=\"10ms\"", 5.0),
+        ("target \"max\" within=\"300ms\"", 100.0),
+        ("target \"cores\" max=1", 0.5),
+        ("target \"idle-cores\" max=0.5", 0.25),
+        ("target \"live-share\" min-percent=99", 99.9),
+        ("target \"open\" max=0", 0.0),
+    ] {
+        source = source.replace(target, &format!("{target} goal={goal}"));
+    }
+    let objectives = parse_document(&source).unwrap();
+    for name in ["person-read", "sql-statement", "transaction", "writer-hold", "cpu", "ios-live-share", "projection-divergence"] {
+        let objective = objectives.iter().find(|objective| objective.name == name).unwrap();
+        assert!(objective.targets.iter().filter(|target| target.stat != "max" || name != "sql-statement").all(|target| target.goal.is_some()), "{name}");
+    }
+}
+
+#[test]
+fn target_goal_n_minus_one_property_reader_refuses_instead_of_dropping_goal() {
+    let document: KdlDocument = "target \"per-hour\" min=10 goal=20".parse().unwrap();
+    let node = canonical_node(&document.nodes()[0]).unwrap();
+    assert_eq!(node["properties"]["goal"], 20);
+    // Freeze the preceding reader's accepted property set. Generic declaration JSON retains
+    // goal, so that reader fails closed rather than silently reading a different declaration.
+    let previous_properties = ["within", "max", "min", "min-percent", "scope"];
+    let fail = |message| error("test/goal", message);
+    let message = only_properties(&node, &previous_properties, &fail).unwrap_err().message;
+    assert!(message.contains("goal"), "{message}");
+    assert_eq!(parse_target(&node, &fail).unwrap().goal, Some(20.0));
+    let mut baseline = node;
+    baseline["properties"].as_object_mut().unwrap().remove("goal");
+    only_properties(&baseline, &previous_properties, &fail).unwrap();
+    assert_eq!(parse_target(&baseline, &fail).unwrap().goal, None);
+}
+
+#[test]
 fn a_nonsensical_count_is_refused_never_defaulted() {
     let count = |replace: &str, with: &str| {
         assert!(COUNT.contains(replace), "{replace}");

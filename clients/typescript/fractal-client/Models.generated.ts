@@ -4229,6 +4229,7 @@ export type SloRow = {
   explain: string;
   forecast_basis_minutes?: number;
   forecast_used_percent?: number;
+  goal?: number;
   id: string;
   kind: "objective" | "budget";
   measured_at_unix_ms?: number;

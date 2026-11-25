@@ -9,6 +9,10 @@ public struct Signal: Identifiable, Sendable, Equatable {
   public let tone: SloTone
   public let value: String
   public let subtitle: String
+  /// `target X · goal Y` of the worst objective when it declares a goal, led by that objective's
+  /// reading when `value` is a count. The tile shows it in place of `subtitle`; nil keeps the
+  /// subtitle line as it was.
+  public let goalDetail: String?
 }
 
 /// Fixed signal order and membership, computed when objective rows change rather than in views.
@@ -120,15 +124,21 @@ public struct SignalBoard: Sendable, Equatable {
         }
       }
       let value: String
+      var goalDetail: String?
       if let worst {
+        let current = worst.current.range(of: " over ").map { String(worst.current[..<$0.lowerBound]) } ?? worst.current
         if worst.kind == .budget {
           value = worst.remainingPercent.map {
             "\((100 - $0).formatted(.number.precision(.fractionLength(0))))%"
           } ?? "—"
         } else if members.count == 1 {
-          value = worst.current.range(of: " over ").map { String(worst.current[..<$0.lowerBound]) } ?? worst.current
+          value = current
         } else {
           value = "\(missedCount)/\(measuredCount)"
+        }
+        if worst.kind == .objective, let goal = worst.goal {
+          let detail = "target \(worst.target) · goal \(Self.goalText(goal, target: worst.target))"
+          goalDetail = members.count == 1 || current.isEmpty ? detail : "\(current) · \(detail)"
         }
       } else {
         value = "—"
@@ -136,8 +146,41 @@ public struct SignalBoard: Sendable, Equatable {
       return Signal(
         id: definition.id, title: definition.title, members: members, worstMember: worst,
         tone: worst?.tone ?? .quiet, value: value.isEmpty ? "—" : value,
-        subtitle: worst?.id ?? (members.isEmpty ? "no objective" : "no data"))
+        subtitle: worst?.id ?? (members.isEmpty ? "no objective" : "no data"), goalDetail: goalDetail)
     }
     needsAttention = signals.reduce(0) { $0 + ($1.tone == .red || $1.tone == .yellow ? 1 : 0) }
+  }
+
+  /// A goal is in its bound's unit, milliseconds for a duration bound, so it reads in the unit
+  /// of the target's last duration (`p95 ≤ 5 min` with 240000 reads `4 min`, `≤ 48h` with
+  /// 86400000 reads `24h`). Sub-unit goals use smaller units so a positive duration never
+  /// rounds to zero. A target without a duration keeps the plain number.
+  private static func goalText(_ goal: Double, target: String) -> String {
+    func number(_ value: Double) -> String {
+      value.formatted(.number.precision(.fractionLength(0...2)).grouping(.never))
+    }
+    guard let duration = target.matches(of: /\d(\s?)(ms|min|[smhd])\b/).last else { return number(goal) }
+    var unit = duration.output.2
+    var milliseconds: Double =
+      switch unit {
+      case "ms": 1
+      case "s": 1_000
+      case "m", "min": 60_000
+      case "h": 3_600_000
+      default: 86_400_000
+      }
+    while goal != 0 && abs(goal / milliseconds) < 1 && milliseconds > 1 {
+      switch unit {
+      case "d": unit = "h"; milliseconds = 3_600_000
+      case "h": unit = duration.output.1.isEmpty ? "m" : "min"; milliseconds = 60_000
+      case "m", "min": unit = "s"; milliseconds = 1_000
+      default: unit = "ms"; milliseconds = 1
+      }
+    }
+    let value = goal / milliseconds
+    let formatted = value != 0 && abs(value) < 1
+      ? value.formatted(.number.precision(.significantDigits(1...3)).grouping(.never))
+      : number(value)
+    return "\(formatted)\(duration.output.1)\(unit)"
   }
 }

@@ -404,6 +404,7 @@ mod tests {
             account: None,
             about: "about".into(),
             target: "target".into(),
+            goal: None,
             current: "current".into(),
             window: "1h".into(),
             remaining_percent: left,

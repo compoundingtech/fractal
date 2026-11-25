@@ -4797,6 +4797,8 @@ export const SloRow = /*#__PURE__*/ (() => Schema.Struct({
   "forecast_basis_minutes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "How many minutes of recent readings the forecast was fitted to." }),
   /** A budget's projected use when it resets, at the rate of its recent past (at most 100). Absent without enough recent readings. */
   "forecast_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(100))).annotate({ description: "A budget's projected use when it resets, at the rate of its recent past (at most 100). Absent without enough recent readings." }),
+  /** An objective's declared numeric goal; absent for budgets and older daemons. */
+  "goal": optionalKey(Schema.Number).annotate({ description: "An objective's declared numeric goal; absent for budgets and older daemons." }),
   "id": Schema.String,
   "kind": Schema.Literals(["objective","budget"]),
   "measured_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
