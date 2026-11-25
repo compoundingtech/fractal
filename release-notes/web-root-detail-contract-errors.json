@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Name the native envelope or producer lens contract, version, schema field and expected type when root-detail decoding fails, without returning response values.",
+  "replay": { "status": "none", "detail": "No persisted state changes." },
+  "schema": { "status": "none", "detail": "No native API or producer schema changes. Additive response fields remain tolerated." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Root-detail decode refusals now explain the failing contract. Native version admission shares the generated receiver schema and is tested against the native server constant; unknown versions remain refused." },
+  "downtime": { "status": "none", "detail": "No startup or migration work." },
+  "manual": { "status": "none", "detail": "No configuration changes required." },
+  "recovery": { "status": "none", "detail": "No persisted state to recover." }
+}
