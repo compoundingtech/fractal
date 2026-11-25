@@ -23,7 +23,7 @@ thread_local! {
 
 // Reserve the source writer before the graph writer: separate WAL databases need both
 // reservations to exclude a shard acceptance between frontier validation and graph commit.
-fn with_source_fence<T>(store: &Store, action: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(super) fn with_source_fence<T>(store: &Store, action: impl FnOnce() -> Result<T>) -> Result<T> {
     let shard = messages_shard::shard(store);
     let mut writer = shard.as_ref().map(|shard| shard.connection.write());
     let _reservation = writer.as_mut().map(|writer|
@@ -32,13 +32,13 @@ fn with_source_fence<T>(store: &Store, action: impl FnOnce() -> Result<T>) -> Re
     action()
 }
 
-fn evidence(tx: &Transaction<'_>, origin: &str, seat: &str, episode: &str, key: &str, kind: &str, mut fields: Value) -> Result<()> {
+pub(super) fn evidence(tx: &Transaction<'_>, origin: &str, seat: &str, episode: &str, key: &str, kind: &str, mut fields: Value) -> Result<()> {
     let key = format!("residency-evidence:{key}");
     if operation(tx, &key)?.is_some() { return Ok(()); }
     let id = operation_id_for_key(&key);
     let subject = format!("residency/{origin}/{episode}/{}", id.trim_start_matches("op/"));
     fields["host"] = json!(origin);
-    fields["seat"] = json!(seat);
+    if !seat.is_empty() { fields["seat"] = json!(seat); }
     append_residency_claim_tx(tx, origin, &subject, kind, None, &json!({"fields":fields}), &[], None, &key)?;
     Ok(())
 }
@@ -153,6 +153,17 @@ impl Store {
              WHERE claims.kind='runtime.action.requested'
                AND json_extract(claims.body,'$.fields.action') IN ('suspend','resume')
                AND desired.kind='agent' AND json_extract(desired.member,'$.host')=?1"
+        )?.query_map([&self.origin], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Automatic operations remain auditable after their desired seat disappears
+    /// or moves to another owner. Only this host's durable admissions participate.
+    pub fn residency_resume_audit_seats(&self) -> Result<Vec<String>> {
+        smallclaims::touched::note_read(|| "kind:runtime.action.requested".to_owned());
+        Ok(self.readers.get().prepare_cached(
+            "SELECT DISTINCT subject FROM claims INDEXED BY claims_idle_action_index
+             WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle'
+               AND json_extract(body,'$.fields.action')='resume' AND origin=?1"
         )?.query_map([&self.origin], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -427,6 +438,16 @@ impl Store {
             let Some((_, _, _, _, lineage, attempt)) = selected else {
                 return Ok(IdleWakeAdmission { operation_id: None, retry_at_unix_ms: retry_at });
             };
+            // A conversion may commit after ranking but before the writer reservation.
+            // Never turn a now-manual suspension into an automatic resume.
+            let Some(state) = crate::suspension::current_at_tx(tx, subject, None)? else {
+                return Ok(IdleWakeAdmission::default());
+            };
+            if state.cause() != "idle"
+                || state.suspend_operation_id.as_deref().unwrap_or(&state.operation_id) != lineage
+            {
+                return Ok(IdleWakeAdmission::default());
+            }
             let key = format!("idle-wake:{subject}:{lineage}:{attempt}");
             let id = if let Some(id) = operation(tx, &key)? { id } else {
                 let declaration = owned(tx, &self.origin, subject)?.expect("owner checked in this transaction");
@@ -449,7 +470,7 @@ mod tests {
 
     fn started(store: &Store, supported: bool) {
         claim(store, "daemon/alder", "daemon.started", None,
-            json!({"status":"running","features":{"idle_residency":u8::from(supported)}}));
+            json!({"status":"running","features":{"idle_residency":u8::from(supported),"residency_audit":1}}));
     }
 
     fn fixture(path: &Path, root: &Path) -> Arc<Store> {
@@ -948,5 +969,220 @@ mod tests {
         assert_eq!(crate::suspension::current(&reopened,SEAT).unwrap().unwrap().phase,"suspended");
         assert_eq!(reopened.operation_claim(&crate::suspension::suspend_snapshot_key(&request))
             .unwrap().unwrap().id,boundary.id);
+    }
+    fn convert_sleep_to_manual(store: &Store, suspend: &str) {
+        store.connection.batched(|tx| append_residency_claim_tx(tx, "alder", SEAT,
+            "runtime.action.succeeded", Some(SEAT),
+            &json!({"evidence":[suspend],"fields":{"action":"suspend",
+                "operation_status":"suspended","cause":"manual"}}),
+            &[], None, &crate::suspension::suspend_manual_key(suspend))).unwrap().unwrap();
+    }
+
+    #[test]
+    fn wake_audit_captures_every_graph_and_native_message_before_manual_conversion() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.sqlite");
+        let store = fixture(&path, root.path());
+        let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128)
+            .unwrap().unwrap();
+        complete_suspend(&store, SEAT, &suspend);
+        claim(&store, "message/audit-held", "message.sent", Some("agent/birch"),
+            json!({"from":"agent/birch","to":SEAT,"content":"FYI",
+                "status":"sent","tags":["st3-silent"]}));
+        for number in 0..3 {
+            let message = format!("message/audit-graph-{number}");
+            claim(&store, &message, "message.sent", Some("person/avery"),
+                json!({"from":"person/avery","to":SEAT,"content":"Continue.",
+                    "status":"sent","tags":[]}));
+            claim(&store, &message, "message.closed", Some("daemon/runtime"), json!({"status":"closed"}));
+        }
+        let input = ClaimInput {
+            subject: "message/audit-native".into(), kind: "message.sent".into(),
+            actor: Some("agent/birch".into()),
+            fields: serde_json::from_value(json!({"from":"agent/birch","to":SEAT,
+                "content":"Continue.","status":"sent","tags":[]})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some("native-audit".into()),
+        };
+        messages_shard::shard(&store).unwrap().append_claim_outcome(&input).unwrap();
+        convert_sleep_to_manual(&store, &suspend);
+        claim(&store, "message/audit-after-manual", "message.sent", Some("person/avery"),
+            json!({"from":"person/avery","to":SEAT,"content":"Manual hold.",
+                "status":"sent","tags":[]}));
+        let reopened = Arc::new(Store::open(&path, "alder").unwrap());
+        messages_shard::open(&reopened, root.path()).unwrap();
+        assert!(reopened.drain_wake_audits().unwrap());
+        assert!(reopened.drain_wake_audits().unwrap());
+        let audits = reopened.readers.get().prepare(
+            "SELECT json_extract(body,'$.fields.message_id'),
+                    json_extract(body,'$.fields.suspension_id'),
+                    json_extract(body,'$.fields.suspension_cause')
+             FROM claims WHERE kind='residency.wake-audit' ORDER BY subject",
+        ).unwrap().query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(audits.len(), 4);
+        assert!(audits.iter().any(|audit| audit.0 == "message/audit-native"));
+        assert!(audits.iter().all(|audit| audit.1 == suspend && audit.2 == "idle"));
+    }
+
+    #[test]
+    fn wake_audit_backlog_is_bounded_and_replay_is_exactly_once() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128)
+            .unwrap().unwrap();
+        complete_suspend(&store, SEAT, &suspend);
+        for number in 0..70 {
+            claim(&store, &format!("message/audit-{number:03}"), "message.sent", Some("person/avery"),
+                json!({"from":"person/avery","to":SEAT,"content":"Continue.",
+                    "status":"sent","tags":[]}));
+        }
+        assert!(!store.drain_wake_audits().unwrap());
+        let count = || store.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE kind='residency.wake-audit'",
+            [], |row| row.get::<_, u64>(0)).unwrap();
+        assert_eq!(count(), 64);
+        assert!(store.drain_wake_audits().unwrap());
+        assert_eq!(count(), 70);
+        // Simulate a source transaction that lost its acknowledgement after graph commit.
+        store.connection.batched(|tx| tx.execute(
+            "UPDATE local_residency_wake_capture SET processed=0", [],
+        )).unwrap().unwrap();
+        assert!(!store.drain_wake_audits().unwrap());
+        assert!(store.drain_wake_audits().unwrap());
+        assert_eq!(count(), 70);
+    }
+
+    #[test]
+    fn coverage_progress_resets_across_gap_and_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.sqlite");
+        let store = fixture(&path, root.path());
+        stream_mirror::mirror(&store).unwrap();
+        let publish = |store: &Store, now| {
+            let cut = store.residency_audit_coverage_cut().unwrap();
+            let drained = store.drain_wake_audits().unwrap();
+            assert!(store.publish_residency_audit_coverage(&cut, drained, now).unwrap());
+        };
+        publish(&store, 100);
+        publish(&store, 200);
+        let stale = store.residency_audit_coverage_cut().unwrap();
+        claim(&store, "message/coverage-gap", "message.sent", Some("person/avery"),
+            json!({"from":"person/avery","to":SEAT,"content":"Continue.",
+                "status":"sent","tags":[]}));
+        assert!(!store.publish_residency_audit_coverage(&stale, true, 300).unwrap());
+        publish(&store, 400);
+        // A caller that aborts its census must not leave the old interval open.
+        let _aborted = store.residency_audit_coverage_cut().unwrap();
+        publish(&store, 450);
+        let reopened = Arc::new(Store::open(&path, "alder").unwrap());
+        messages_shard::open(&reopened, root.path()).unwrap();
+        publish(&reopened, 500);
+        let rows = reopened.readers.get().prepare(
+            "SELECT json_extract(body,'$.fields.covered_since'),
+                    json_extract(body,'$.fields.through_at')
+             FROM claims WHERE kind='residency.audit-coverage'
+             ORDER BY CAST(json_extract(body,'$.fields.observed_at') AS INTEGER)",
+        ).unwrap().query_map([], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(rows, vec![(100,100),(100,200),(400,400),(450,450),(500,500)]);
+        let unavailable = Store::open_memory("alder").unwrap();
+        let cut = unavailable.residency_audit_coverage_cut().unwrap();
+        assert!(!unavailable.publish_residency_audit_coverage(&cut, true, 600).unwrap());
+    }
+
+    #[test]
+    fn manual_conversion_before_wake_writer_cannot_admit_automatic_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128)
+            .unwrap().unwrap();
+        complete_suspend(&store, SEAT, &suspend);
+        claim(&store, "message/audit-conversion-race", "message.sent", Some("person/avery"),
+            json!({"from":"person/avery","to":SEAT,"content":"Continue.",
+                "status":"sent","tags":[]}));
+        let concurrent = store.clone();
+        BEFORE_WAKE_WRITER.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+            convert_sleep_to_manual(&concurrent, &suspend);
+        })));
+        assert!(store.admit_idle_wake(SEAT, 1, 1_000).unwrap().operation_id.is_none());
+        assert_eq!(crate::suspension::current(&store, SEAT).unwrap().unwrap().cause(), "manual");
+        assert!(store.drain_wake_audits().unwrap());
+        let count: u64 = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE kind='residency.wake-audit'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+    #[test]
+    fn coverage_dependencies_are_bounded_chained_and_bind_audits() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128)
+            .unwrap().unwrap();
+        complete_suspend(&store, SEAT, &suspend);
+        for number in 0..130 {
+            claim(&store, &format!("message/chain-{number:03}"), "message.sent", Some("person/avery"),
+                json!({"from":"person/avery","to":SEAT,"content":"Continue.",
+                    "status":"sent","tags":[]}));
+        }
+        assert!(!store.drain_wake_audits().unwrap());
+        assert!(!store.drain_wake_audits().unwrap());
+        assert!(store.drain_wake_audits().unwrap());
+        let cut = store.residency_audit_coverage_cut().unwrap();
+        assert!(store.publish_residency_audit_coverage(&cut, true, 100).unwrap());
+        let cut = store.residency_audit_coverage_cut().unwrap();
+        assert!(store.publish_residency_audit_coverage(&cut, true, 200).unwrap());
+        let rows = store.readers.get().prepare(
+            "SELECT id,body FROM claims WHERE kind='residency.audit-coverage' ORDER BY store_index",
+        ).unwrap().query_map([], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?)))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 2);
+        let first: Value = serde_json::from_str(&rows[0].1).unwrap();
+        let second: Value = serde_json::from_str(&rows[1].1).unwrap();
+        assert_eq!(first["fields"]["audit_count"], 128);
+        assert_eq!(first["fields"]["audit_complete"], false);
+        assert_eq!(first["fields"]["through_at"], 100);
+        assert_eq!(second["fields"]["audit_count"], 2);
+        assert_eq!(second["fields"]["audit_complete"], true);
+        assert_eq!(second["fields"]["through_at"], 200);
+        assert_eq!(second["fields"]["previous_coverage"], rows[0].0);
+        for body in [&first, &second] {
+            let ids = body["fields"]["audit_ids"].as_array().unwrap();
+            let mut digest = Sha256::new();
+            for id in ids { digest.update(id.as_str().unwrap().as_bytes()); digest.update(b"\n"); }
+            assert_eq!(body["fields"]["audit_digest"], hex::encode(digest.finalize()));
+        }
+    }
+
+    #[test]
+    fn reader_barrier_retains_capture_until_audit_support_returns() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128)
+            .unwrap().unwrap();
+        complete_suspend(&store, SEAT, &suspend);
+        claim(&store, "message/audit-barrier", "message.sent", Some("person/avery"),
+            json!({"from":"person/avery","to":SEAT,"content":"Continue.",
+                "status":"sent","tags":[]}));
+        claim(&store, "daemon/alder", "daemon.started", None,
+            json!({"status":"running","features":{"idle_residency":1}}));
+        store.replication_snapshot().unwrap();
+        assert!(!store.drain_wake_audits().unwrap());
+        let pending: u64 = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM local_residency_wake_capture WHERE processed=0",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(pending, 1);
+        started(&store, true);
+        store.replication_snapshot().unwrap();
+        assert!(store.drain_wake_audits().unwrap());
+        let audit: String = store.readers.get().query_row(
+            "SELECT json_extract(body,'$.fields.suspension_id') FROM claims WHERE kind='residency.wake-audit'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(audit, suspend);
+        let resume = store.admit_idle_wake(SEAT, 1, 1_000).unwrap().operation_id.unwrap();
+        let lineage: String = store.readers.get().query_row(
+            "SELECT json_extract(body,'$.fields.suspend_operation_id') FROM claims WHERE id=?1",
+            [&resume], |row| row.get(0)).unwrap();
+        assert_eq!(lineage, suspend);
     }
 }

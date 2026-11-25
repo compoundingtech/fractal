@@ -838,6 +838,19 @@ impl Runtime for MessagesRuntime {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fc020e207df owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha7b0b4f3013e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_reads::LOCAL_SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbed1ce264b3a owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_operations::LOCAL_SCHEMA)?;
+        let graph = self.0.clone();
+        connection.create_scalar_function("residency_graph_cut", 0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            move |_| {
+                let graph = graph.upgrade().ok_or(rusqlite::Error::InvalidQuery)?;
+                let cut = graph.readers.get().query_row(
+                    "SELECT COALESCE(MAX(store_index),0) FROM claims", [],
+                    |row| row.get::<_, u64>(0),
+                );
+                cut
+            })?;
+        super::wake_demand::create_audit_capture(connection, "residency_graph_cut()")?;
         Ok(())
     }
 

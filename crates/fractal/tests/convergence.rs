@@ -1231,6 +1231,9 @@ impl World {
                 "residency.eligibility-outcome" => "eligibility",
                 "residency.unrouted" => "unrouted",
                 "residency.host-sample" => "host",
+                "residency.wake-audit" => "wake-audit",
+                "residency.resume-audit" => "resume-audit",
+                "residency.audit-coverage" => "audit-coverage",
                 _ => unreachable!(),
             };
             let id = self.fresh("residency");
@@ -1240,6 +1243,12 @@ impl World {
                 let value = match name.as_str() {
                     "resume_failed" | "useless" | "short_sleep" | "refused" => json!(0),
                     "memory_coverage" => json!("unavailable"),
+                    "phase" => json!("admitted"),
+                    "observed_at" | "covered_since" | "through_at" if suffix == "audit-coverage" => json!(now),
+                    "audit_ids" => json!([]),
+                    "audit_count" => json!(0),
+                    "audit_digest" => json!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+                    "audit_complete" => json!(true),
                     _ => self.value_of(field, index),
                 };
                 fields.insert(name.clone(), value);
