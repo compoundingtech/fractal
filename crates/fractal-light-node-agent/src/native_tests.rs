@@ -29,7 +29,7 @@ impl Fixture {
         seat.install_epoch(&selection).unwrap();
         let environment = std::env::vars().collect::<BTreeMap<_, _>>();
         let binary = fractal_runtime::resolve_executable("pty", &environment).expect("native tests require the real pinned pty binary");
-        let pty = PtyRuntime::new(root.path().join("pty")).with_binary(binary);
+        let pty = PtyRuntime::new(root.path().join("pty")).with_binary(binary.to_str().expect("pinned PTY path must be UTF-8"));
         spawn_pty(&pty, root.path());
         let item = pty.snapshot().unwrap().into_iter().find(|item| item.name == "native-worker").unwrap();
         let generation = format!("{}:{}", item.pid.unwrap(), item.created_at.unwrap());

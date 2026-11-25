@@ -666,9 +666,10 @@ fn may_attempt_recovery(journal:&Journal,attempted:&BTreeMap<String,(u64,u64)>,e
     }
 }
 
-#[cfg(test)]
+/// Protocol contracts instantiated by Store integration tests with real graph effects.
+#[cfg(feature = "test-support")]
 #[path = "session_tests.rs"]
-mod tests;
+pub mod contract_tests;
 
 fn is_disconnect(error:&anyhow::Error)->bool {
     use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};

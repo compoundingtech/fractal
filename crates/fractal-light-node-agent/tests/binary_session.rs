@@ -16,7 +16,7 @@ use fractal_light_node_core::{authority::ExecutionBinding, config::{LIGHT_NODE_S
     journal::{Admission, Command, CommandDraft, Journal, Limits, Operation, OperationKind, Outcome, ReceiptState, Scope, Selection},
     session::Home};
 use fractal_runtime::{ExecObservation, ExecRuntime, Launch, LaunchOperation, PtyRuntime};
-use fractal_store::{Store, light_node::StoreRunEffects};
+use fractal_store::{store::Store, light_node::StoreRunEffects};
 use notify::{RecursiveMode, Watcher as _};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};

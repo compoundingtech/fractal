@@ -233,6 +233,11 @@ core, member authentication and native runtime, but no graph Store, replication,
 fleet reductions, planner, reconciliation daemon or full CLI. The full node uses
 the same canonical wire, authentication, authority, custody and session types;
 the graph-backed home effect adapter remains on the home.
+The core has no Store dependency, including in its own unit tests. Its
+`test-support` feature exposes the existing private-wire protocol contracts;
+Store integration tests instantiate every contract with the real graph-backed
+`StoreRunEffects`. This keeps one canonical core crate identity across the test
+boundary without replacing home effects with a fake or duplicating the protocol.
 
 This package is an independently reviewable prerequisite for Phase 3, not the
 whole-node cutover itself. It supports the landed Observe/Stop protocol only.

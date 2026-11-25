@@ -5,6 +5,10 @@ edition = "2024"
 description = "Graph-free durable light-node custody and authenticated sessions"
 license = "MIT"
 
+[features]
+# Protocol contracts run at the real Store integration boundary, never in production.
+test-support = ["fractal-auth/test-support", "dep:tempfile"]
+
 [dependencies]
 fractal-auth = { path = "../fractal-auth" }
 fractal-wire = { path = "../fractal-wire" }
@@ -19,6 +23,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tempfile = { version = "3", optional = true }
 tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
@@ -27,6 +32,5 @@ uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
-fractal-store = { path = "../fractal-store", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

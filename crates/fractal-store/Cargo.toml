@@ -66,6 +66,7 @@ uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 fractal-auth = { path = "../fractal-auth", features = ["test-support"] }
+fractal-light-node-core = { path = "../fractal-light-node-core", features = ["test-support"] }
 fractal_store_self = { package = "fractal-store", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
