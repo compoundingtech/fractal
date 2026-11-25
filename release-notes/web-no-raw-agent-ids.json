@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The web no longer shows an agent's id or id path as its name in the roster, thread senders, a thread's agent, request cards or Inbox rows: an agent with no name reads as An agent, and Fractal's own machinery as Fractal",
+  "replay": {
+    "status": "none",
+    "detail": "Presentation only; no history is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage, wire or generated-schema change. The roster, threads and attention rows are read as before."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Grants and delivery policy are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Web only, against the same daemons; the web shows the effective name Fractal serves, with no new provenance. Display rule: (a) a served name shows as declared, slugs included: 'atlas', 'Atlas', 'Manager'; (b) Fractal's own machinery, the daemon (daemon/*) and exactly the st3 reconciler (agent/st3/reconciler), the ids attention presentation serves as 'st', shows as 'Fractal', ahead of any roster name; (c) an agent with no name shows as 'An agent' ('an agent' mid-sentence, as in 'To an agent'), never as any part of its id, opaque ids included; a served name equal to the agent's id, or to its matching multi-segment path without 'agent/' (for example 'example/atlas'), counts as no name; a supplied readable single name such as 'builder' for agent/builder remains a name; (d) a request whose only source is a step, mission or custom id names no one, since the card already shows the step. Known ambiguity: the served name carries no provenance, so a seat that declares exactly its fallback form, for example the name 'example/atlas' for agent/example/atlas, cannot be told apart from one that declares none, and also reads as 'An agent'. Thread senders and a thread's agent ('With', 'To') keep the full id as their hover title; routing, action and navigation ids are unchanged. The terminal app agrees on (a) for real names, on (b), and on 'an agent' for an empty or 'agent/'-prefixed label; it still shows a served 'example/atlas' fallback label as given."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Refreshing the web bundle does not interrupt the daemon."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step. A seat shows a chosen name once its declaration sets `name`."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling the web bundle back restores the previous labels."
+  }
+}
