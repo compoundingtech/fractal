@@ -479,7 +479,7 @@ export type HistoryState = {
     | { readonly _tag: 'idle' }
     | { readonly _tag: 'inFlight' }
     | { readonly _tag: 'ok' }
-    | { readonly _tag: 'failed'; readonly reason: string }
+    | { readonly _tag: 'failed'; readonly kind: QuotaFailure['kind']; readonly reason: string }
 }
 
 /** Before the first history read. */
