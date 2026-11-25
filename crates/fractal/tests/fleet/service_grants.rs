@@ -257,7 +257,7 @@ async fn upgraded_grants_refuse_previous_reader(counterexample: bool) {
     // Candidate-created grants below do not promise obsolete old-client behavior.
     node.binary = PathBuf::from(st3());
     node.start().await;
-    assert_eq!(database_schema(&database), 23);
+    assert_eq!(database_schema(&database), fractal_schema::STORAGE_VERSION);
     assert_history_retained(&release_history, &stored_history(&node));
     assert_candidate_issuance_grammar(&node).await;
     let grants = fixtures(&mut node, counterexample).await;
@@ -273,19 +273,19 @@ async fn upgraded_grants_refuse_previous_reader(counterexample: bool) {
     }
     let state = node.state_dir();
     node.binary = old;
-    assert!(!node.start_with_schema_refusal(Some(23)).await,
+    assert!(!node.start_with_schema_refusal(Some(fractal_schema::STORAGE_VERSION)).await,
         "the actual previous reader must refuse the upgraded store");
     assert!(tokio::net::UnixStream::connect(node.socket()).await.is_err(),
         "a refused old reader must not expose a credential-serving listener");
     assert_eq!(node.state_dir(), state);
-    assert_eq!(database_schema(&database), 23, "refusal must not lower the storage floor");
+    assert_eq!(database_schema(&database), fractal_schema::STORAGE_VERSION, "refusal must not lower the storage floor");
     assert_eq!(stored_history(&node), upgraded_history,
         "old-reader refusal must leave exact authoritative history and signatures unchanged");
 
     node.binary = PathBuf::from(st3());
     node.start().await;
     assert_eq!(node.state_dir(), state);
-    assert_eq!(database_schema(&database), 23);
+    assert_eq!(database_schema(&database), fractal_schema::STORAGE_VERSION);
     assert_history_retained(&upgraded_history, &stored_history(&node));
     assert_current_grant_controls(&node, &grants, counterexample).await;
     assert!(node.claims().await.iter().any(|claim| claim["id"] == retained_note),
