@@ -74,6 +74,7 @@ pub mod start_jobs;
 mod host_executor;
 mod host_observations;
 mod home_session;
+mod remote_start_home;
 pub use home_session::NativeSessionExecutor;
 pub mod seat_admission;
 mod seat_admission_queue;
@@ -1095,6 +1096,18 @@ impl RuntimeControl for NativeRuntime {
         let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
         let mut backend_entered = false;
         self.start_checked_inner(member, operation, Some(guard), &mut backend_entered, Some((store, &request)))
+            .map_err(|error| {
+                // The durable dispatch fence is not physical producer entry. Finite
+                // coverage, environment and membership checks can still reject before
+                // a backend is called, just as in start_checked.
+                if backend_entered {
+                    error
+                } else {
+                    error.context(fractal_runtime::StartRejected {
+                        operation: operation.map(|operation| operation.0.clone()),
+                    })
+                }
+            })
     }
     fn retire_resource_lane(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
@@ -7892,6 +7905,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<()> {
         self.store.owned_desired_guard(subject)?;
         let pending = self.store.runtime_start_for(&subject.subject)?;
+        if let Some(operation) = pending.as_ref().filter(|operation| operation.body.get("remote_start").is_some()) {
+            return self.stop_remote_start(operation);
+        }
         let pending_member = pending.as_ref().map(|operation|
             serde_json::from_value::<MemberSpec>(operation.body["member"].clone())).transpose()?;
         let actual = self.store.latest_actual_value(&subject.subject)?.or_else(|| pending_member.as_ref()
@@ -8431,6 +8447,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
         let operation = self.store.runtime_start_for(subject)?;
+        if let Some(operation) = operation.as_ref().filter(|operation| operation.body.get("remote_start").is_some()) {
+            self.stop_remote_start(operation)?;
+            // Only retained native recovery may settle this operation and its receipt.
+            return Ok(false);
+        }
         let retirement = if let (Some(operation), Some(incarnation)) = (&operation, incarnation) {
             let member = &operation.body["member"];
             operation.finished
@@ -9180,47 +9201,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         crate::native_seed::omit_seed_for_native_resume(&mut launch_member);
-        crate::environment::set(&mut launch_member.environment, "ST3_ENDPOINT", self.endpoint.clone());
-        crate::environment::set(&mut launch_member.environment, "ST3_DRIVER_STATE_DIR",
-            self.driver_state_dir.to_string_lossy().into_owned());
-        crate::environment::set(&mut launch_member.environment, "ST3_SUBJECT", subject.subject.clone());
-        if subject.kind == "exec" && subject.owner_step.is_some() && !member.terminal {
-            launch_member.environment.insert(fractal_runtime::payload_receipt::TRACK_ENV.into(), "1".into());
-        }
-        if subject.kind == "agent" {
-            crate::environment::set(&mut launch_member.environment, "ST_AGENT", subject.subject.clone());
-            crate::environment::set(&mut launch_member.environment, "ST3_MAILBOX_TRANSPORT", "push".into());
-        } else if let Some(owner) = member.tags.get("st3.agent") {
-            crate::environment::set(&mut launch_member.environment, "ST_AGENT", owner.clone());
-        } else {
-            crate::environment::remove_aliases(&mut launch_member.environment, "ST_AGENT");
-        }
-        let executable = launch_executable()?;
-        let st_binary = self.st_binary.as_ref().unwrap_or(&executable);
-        crate::environment::set(&mut launch_member.environment, "ST3_BIN", st_binary.to_string_lossy().into_owned());
-        if let crate::model::LaunchSpec::Argv(argv) = &mut launch_member.launch
-            && argv.first().map(String::as_str) == Some("st3")
-        {
-            argv[0] = executable.to_string_lossy().into_owned();
-        }
-        if !launch_member.terminal {
-            let original = match &launch_member.launch {
-                crate::model::LaunchSpec::Shell(source) => {
-                    vec!["sh".into(), "-c".into(), source.clone()]
-                }
-                crate::model::LaunchSpec::Argv(argv) => argv.clone(),
-            };
-            let mut wrapper = vec![
-                executable.to_string_lossy().into_owned(),
-                "driver".into(),
-                "exec".into(),
-                "--subject".into(),
-                subject.subject.clone(),
-                "--".into(),
-            ];
-            wrapper.extend(original);
-            launch_member.launch = crate::model::LaunchSpec::Argv(wrapper);
-        }
+        self.decorate_local_launch(&subject.subject, &subject.kind,
+            subject.owner_step.is_some(), member, &mut launch_member)?;
         self.store.owned_desired_guard(subject)?;
         if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
             anyhow::ensure!(
@@ -9299,6 +9281,52 @@ impl<R: RuntimeControl> Reconciler<R> {
                 None
             },
         })
+    }
+
+    /// Host-local launch decoration is shared with graph-free admitted remote starts.
+    /// Endpoint, executable and driver state are never selected by the home payload.
+    pub(super) fn decorate_local_launch(
+        &self, subject: &str, kind: &str, track_payload: bool,
+        member: &MemberSpec, launch_member: &mut MemberSpec,
+    ) -> Result<()> {
+        crate::environment::set(&mut launch_member.environment, "ST3_ENDPOINT", self.endpoint.clone());
+        crate::environment::set(&mut launch_member.environment, "ST3_DRIVER_STATE_DIR",
+            self.driver_state_dir.to_string_lossy().into_owned());
+        crate::environment::set(&mut launch_member.environment, "ST3_SUBJECT", subject.to_owned());
+        if kind == "exec" && track_payload && !member.terminal {
+            launch_member.environment.insert(fractal_runtime::payload_receipt::TRACK_ENV.into(), "1".into());
+        }
+        if kind == "agent" {
+            crate::environment::set(&mut launch_member.environment, "ST_AGENT", subject.to_owned());
+            crate::environment::set(&mut launch_member.environment, "ST3_MAILBOX_TRANSPORT", "push".into());
+        } else if let Some(owner) = member.tags.get("st3.agent") {
+            crate::environment::set(&mut launch_member.environment, "ST_AGENT", owner.clone());
+        } else {
+            crate::environment::remove_aliases(&mut launch_member.environment, "ST_AGENT");
+        }
+        let executable = launch_executable()?;
+        let st_binary = self.st_binary.as_ref().unwrap_or(&executable);
+        crate::environment::set(&mut launch_member.environment, "ST3_BIN", st_binary.to_string_lossy().into_owned());
+        if let crate::model::LaunchSpec::Argv(argv) = &mut launch_member.launch
+            && argv.first().map(String::as_str) == Some("st3")
+        {
+            argv[0] = executable.to_string_lossy().into_owned();
+        }
+        if !launch_member.terminal {
+            let original = match &launch_member.launch {
+                crate::model::LaunchSpec::Shell(source) => {
+                    vec!["sh".into(), "-c".into(), source.clone()]
+                }
+                crate::model::LaunchSpec::Argv(argv) => argv.clone(),
+            };
+            let mut wrapper = vec![
+                st_binary.to_string_lossy().into_owned(),
+                "driver".into(), "exec".into(), "--subject".into(), subject.to_owned(), "--".into(),
+            ];
+            wrapper.extend(original);
+            launch_member.launch = crate::model::LaunchSpec::Argv(wrapper);
+        }
+        Ok(())
     }
 
     fn finish_start(
@@ -10248,6 +10276,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(pending) = self.store.runtime_start_for(&subject.subject)? else {
             return Ok(false);
         };
+        if pending.body.get("remote_start").is_some() {
+            return Ok(false);
+        }
         if !pending.finished || pending.cleanup_verified
             || !pending.result.as_ref().is_some_and(|result| result["error"].is_string())
         {
@@ -10326,6 +10357,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         pending: &RuntimeStartOperation,
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
+        if pending.body.get("remote_start").is_some() {
+            // Native custody is retired through its session journal, never replaced
+            // by the graph-backed failed-start admission transaction.
+            return Ok(false);
+        }
         let stale_after = u128::from(STALE_FAILED_START_MS.load(Ordering::Relaxed));
         let failed = pending.finished
             && !pending.cleanup_verified
