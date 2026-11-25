@@ -65,8 +65,10 @@ private struct SignalTile: View {
         }
         HStack(alignment: .firstTextBaseline, spacing: 4) {
           Text(signal.value).font(.title3.weight(.semibold)).monospacedDigit()
-          if let goalDetail = signal.goalDetail {
-            Text("· \(goalDetail)").font(.subheadline).foregroundStyle(.secondary).truncationMode(.tail)
+          if let target = signal.goalTargetDetail, let goal = signal.goalValueDetail {
+            Text("· \(target)").font(.subheadline).foregroundStyle(.secondary).truncationMode(.tail)
+            Text("· goal \(goal)").font(.subheadline).foregroundStyle(.secondary)
+              .layoutPriority(1).fixedSize(horizontal: true, vertical: false)
           } else {
             Text(signal.subtitle).font(.subheadline).foregroundStyle(.secondary).truncationMode(.middle)
           }
@@ -75,10 +77,10 @@ private struct SignalTile: View {
       .lineLimit(1)
     }
     .buttonStyle(.signalTile)
-    .help("\(signal.title): \(signal.value) · \(signal.goalDetail.map { "\($0) · " } ?? "")\(signal.subtitle)")
+    .help("\(signal.title): \(signal.value) · \(signal.goalFullDetail.map { "\($0) · " } ?? "")\(signal.subtitle)")
     .accessibilityLabel(signal.title)
     .accessibilityValue(
-      "\(signal.value), \(signal.goalDetail.map { "\($0), " } ?? "")\(signal.subtitle), \(SignalTone.word(signal.tone))")
+      "\(signal.value), \(signal.goalFullDetail.map { "\($0), " } ?? "")\(signal.subtitle), \(SignalTone.word(signal.tone))")
     .accessibilityHint("Opens its objectives")
     .focusOnArrival(model.backFrom == .signal(signal.id))
   }

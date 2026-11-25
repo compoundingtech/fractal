@@ -255,7 +255,7 @@ final class SignalBoardTests: XCTestCase {
       row("fractal/flakes", current: "2 over 24h", target: "≤ 3", goal: 1),
     ]))
     XCTAssertEqual(single.value, "2")
-    XCTAssertEqual(single.goalDetail, "target ≤ 3 · goal 1")
+    XCTAssertEqual(single.goalDetail, "target 3 · goal 1")
     XCTAssertEqual(single.subtitle, "fractal/flakes")
 
     let counted = signal("merge-latency", in: SignalBoard(rows: [
@@ -263,7 +263,7 @@ final class SignalBoardTests: XCTestCase {
       row("fractal/merge-latency/p95", status: "missed", current: "5h", target: "≤ 4h", goal: 3 * 3_600_000),
     ]))
     XCTAssertEqual(counted.value, "1/2")
-    XCTAssertEqual(counted.goalDetail, "5h · target ≤ 4h · goal 3h", "a count leads with the worst reading")
+    XCTAssertEqual(counted.goalDetail, "5h · target 4h · goal 3h", "a count leads with the worst reading")
 
     let without = signal("merge-latency", in: SignalBoard(rows: [
       row("fractal/merge-latency/p50", current: "1h", goal: 1),
@@ -280,18 +280,18 @@ final class SignalBoardTests: XCTestCase {
     func detail(_ target: String, _ goal: Double) -> String? {
       signal("flakes", in: SignalBoard(rows: [row("fractal/flakes", target: target, goal: goal)])).goalDetail
     }
-    XCTAssertEqual(detail("≤ 48h", 24 * 3_600_000), "target ≤ 48h · goal 24h")
-    XCTAssertEqual(detail("≤ 20m", 15 * 60_000), "target ≤ 20m · goal 15m")
-    XCTAssertEqual(detail("p95 ≤ 5 min", 4 * 60_000), "target p95 ≤ 5 min · goal 4 min")
-    XCTAssertEqual(detail("p99 ≤ 300 ms", 100), "target p99 ≤ 300 ms · goal 100 ms")
+    XCTAssertEqual(detail("≤ 48h", 24 * 3_600_000), "target 48h · goal 24h")
+    XCTAssertEqual(detail("≤ 20m", 15 * 60_000), "target 20m · goal 15m")
+    XCTAssertEqual(detail("p95 ≤ 5 min", 4 * 60_000), "target 5 min · goal 4 min")
+    XCTAssertEqual(detail("p99 ≤ 300 ms", 100), "target 300 ms · goal 100 ms")
     XCTAssertEqual(
       detail("≤ 5.0% bad events; diagnostic p99 ≤ 300 ms", 100),
       "target ≤ 5.0% bad events; diagnostic p99 ≤ 300 ms · goal 100 ms",
       "a native row's diagnostic latency carries the unit")
-    XCTAssertEqual(detail("≤ 3", 1), "target ≤ 3 · goal 1")
-    XCTAssertEqual(detail("≥ 5 merged PRs per hour", 20), "target ≥ 5 merged PRs per hour · goal 20")
-    XCTAssertEqual(detail("≥ 5 an hour", 20), "target ≥ 5 an hour · goal 20")
-    XCTAssertEqual(detail("live ≥ 99%", 100), "target live ≥ 99% · goal 100")
+    XCTAssertEqual(detail("≤ 3", 1), "target 3 · goal 1")
+    XCTAssertEqual(detail("≥ 5 merged PRs per hour", 20), "target 5/h · goal 20/h")
+    XCTAssertEqual(detail("≥ 5 an hour", 20), "target 5/h · goal 20/h")
+    XCTAssertEqual(detail("live ≥ 99%", 100), "target 99% · goal 100%")
     XCTAssertNil(signal("flakes", in: SignalBoard(rows: [row("fractal/flakes", target: "≤ 48h")])).goalDetail)
   }
 
@@ -306,14 +306,42 @@ final class SignalBoardTests: XCTestCase {
       let tile = signal("flakes", in: SignalBoard(rows: [
         row("fractal/flakes", target: "≤ 48h", goal: goal),
       ]))
-      XCTAssertEqual(tile.goalDetail, "target ≤ 48h · goal \(expected)")
+      XCTAssertEqual(tile.goalDetail, "target 48h · goal \(expected)")
     }
     let tiny = signal("flakes", in: SignalBoard(rows: [
       row("fractal/flakes", target: "≤ 20m", goal: 0.001),
     ]))
     let fractionalMillisecond = 0.001.formatted(.number.precision(.significantDigits(1...3)).grouping(.never))
-    XCTAssertEqual(tiny.goalDetail, "target ≤ 20m · goal \(fractionalMillisecond)ms")
+    XCTAssertEqual(tiny.goalDetail, "target 20m · goal \(fractionalMillisecond)ms")
     XCTAssertNotEqual(fractionalMillisecond, "0")
+  }
+
+  func testCompactGoalUnitsRetainFullTargetsAndKeepGoalSeparateForLayout() {
+    for (target, goal, expected) in [
+      ("≥ 5 merged PRs per hour", 20.0, "target 5/h · goal 20/h"),
+      ("≥ 10 merged PRs per day", 30.0, "target 10/d · goal 30/d"),
+      ("≥ 2 merged PRs per minute", 4.0, "target 2/min · goal 4/min"),
+      ("≥ 95%", 99.0, "target 95% · goal 99%"),
+      ("≤ 20m", 900_000.0, "target 20m · goal 15m"),
+      ("custom target with unknown units", 20.0, "target custom target with unknown units · goal 20"),
+    ] {
+      let tile = signal("flakes", in: SignalBoard(rows: [
+        row("fractal/flakes", current: "6.2/h", target: target, goal: goal),
+      ]))
+      XCTAssertEqual(tile.goalDetail, expected)
+      XCTAssertEqual(tile.goalDetail, "\(tile.goalTargetDetail!) · goal \(tile.goalValueDetail!)")
+      XCTAssertEqual(tile.goalFullDetail, "target \(target) · goal \(tile.goalValueDetail!)")
+      XCTAssertEqual(tile.value, "6.2/h")
+    }
+    let without = signal("flakes", in: SignalBoard(rows: [
+      row("fractal/flakes", current: "6.2/h", target: "≥ 5 merged PRs per hour"),
+    ]))
+    XCTAssertEqual(without.value, "6.2/h")
+    XCTAssertEqual(without.subtitle, "fractal/flakes")
+    XCTAssertNil(without.goalDetail)
+    XCTAssertNil(without.goalTargetDetail)
+    XCTAssertNil(without.goalValueDetail)
+    XCTAssertNil(without.goalFullDetail)
   }
 
   private func signal(_ id: String, in board: SignalBoard) -> Signal {

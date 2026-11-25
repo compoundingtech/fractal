@@ -13,6 +13,9 @@ public struct Signal: Identifiable, Sendable, Equatable {
   /// reading when `value` is a count. The tile shows it in place of `subtitle`; nil keeps the
   /// subtitle line as it was.
   public let goalDetail: String?
+  public let goalTargetDetail: String?
+  public let goalValueDetail: String?
+  public let goalFullDetail: String?
 }
 
 /// Fixed signal order and membership, computed when objective rows change rather than in views.
@@ -125,6 +128,9 @@ public struct SignalBoard: Sendable, Equatable {
       }
       let value: String
       var goalDetail: String?
+      var goalTargetDetail: String?
+      var goalValueDetail: String?
+      var goalFullDetail: String?
       if let worst {
         let current = worst.current.range(of: " over ").map { String(worst.current[..<$0.lowerBound]) } ?? worst.current
         if worst.kind == .budget {
@@ -137,8 +143,13 @@ public struct SignalBoard: Sendable, Equatable {
           value = "\(missedCount)/\(measuredCount)"
         }
         if worst.kind == .objective, let goal = worst.goal {
-          let detail = "target \(worst.target) · goal \(Self.goalText(goal, target: worst.target))"
+          let target = Self.compactTarget(worst.target)
+          let aspiration = Self.goalText(goal, target: worst.target)
+          goalTargetDetail = members.count == 1 || current.isEmpty ? "target \(target)" : "\(current) · target \(target)"
+          goalValueDetail = aspiration
+          let detail = "target \(target) · goal \(aspiration)"
           goalDetail = members.count == 1 || current.isEmpty ? detail : "\(current) · \(detail)"
+          goalFullDetail = "target \(worst.target) · goal \(aspiration)"
         }
       } else {
         value = "—"
@@ -146,9 +157,32 @@ public struct SignalBoard: Sendable, Equatable {
       return Signal(
         id: definition.id, title: definition.title, members: members, worstMember: worst,
         tone: worst?.tone ?? .quiet, value: value.isEmpty ? "—" : value,
-        subtitle: worst?.id ?? (members.isEmpty ? "no objective" : "no data"), goalDetail: goalDetail)
+        subtitle: worst?.id ?? (members.isEmpty ? "no objective" : "no data"), goalDetail: goalDetail,
+        goalTargetDetail: goalTargetDetail, goalValueDetail: goalValueDetail, goalFullDetail: goalFullDetail)
     }
     needsAttention = signals.reduce(0) { $0 + ($1.tone == .red || $1.tone == .yellow ? 1 : 0) }
+  }
+
+  private static func rateTarget(_ target: String) -> (number: Substring, unit: String)? {
+    guard let match = target.wholeMatch(of: /[≥≤]?\s*([0-9]+(?:\.[0-9]+)?)\s+(?:merged PRs? per |an? |per )(hour|day|minute)/) else { return nil }
+    let unit = switch match.output.2 {
+    case "hour": "/h"
+    case "day": "/d"
+    default: "/min"
+    }
+    return (match.output.1, unit)
+  }
+
+  private static func compactTarget(_ target: String) -> String {
+    if let rate = rateTarget(target) { return "\(rate.number)\(rate.unit)" }
+    if let percent = target.wholeMatch(of: /(?:live\s+)?[≥≤]?\s*([0-9]+(?:\.[0-9]+)?)%/) {
+      return "\(percent.output.1)%"
+    }
+    if let duration = target.wholeMatch(of: /(?:p[0-9]+\s+)?[≥≤]?\s*([0-9]+(?:\.[0-9]+)?)(\s?)(ms|min|[smhd])/) {
+      return "\(duration.output.1)\(duration.output.2)\(duration.output.3)"
+    }
+    if let scalar = target.wholeMatch(of: /[≥≤]\s*([0-9]+(?:\.[0-9]+)?)/) { return String(scalar.output.1) }
+    return target
   }
 
   /// A goal is in its bound's unit, milliseconds for a duration bound, so it reads in the unit
@@ -159,6 +193,8 @@ public struct SignalBoard: Sendable, Equatable {
     func number(_ value: Double) -> String {
       value.formatted(.number.precision(.fractionLength(0...2)).grouping(.never))
     }
+    if let rate = rateTarget(target) { return "\(number(goal))\(rate.unit)" }
+    if target.wholeMatch(of: /(?:live\s+)?[≥≤]?\s*[0-9]+(?:\.[0-9]+)?%/) != nil { return "\(number(goal))%" }
     guard let duration = target.matches(of: /\d(\s?)(ms|min|[smhd])\b/).last else { return number(goal) }
     var unit = duration.output.2
     var milliseconds: Double =
