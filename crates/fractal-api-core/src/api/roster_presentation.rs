@@ -185,7 +185,7 @@ mod tests {
                 "incarnation_id":"one", "host_id":host});
             // A noninitial revision lets the public assessment prove that cleanup happened.
             delivery_presence::assess_current_semantic(&subject, "claude", Some("one"));
-            present(&app.store, &[row.clone()], vec![], now).unwrap();
+            present(&app.store, std::slice::from_ref(&row), vec![], now).unwrap();
             assert!(app.store.extension::<Presentation>().0.lock().unwrap()
                 .cards[&subject].delivery_revision.unwrap() > 1);
 
