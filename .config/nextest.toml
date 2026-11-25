@@ -155,6 +155,8 @@ final-status-level = "flaky"
 # backoff and inbound/route interruption controls.
 # scripts/ci-nextest runs the current workspace in one invocation. Its filters control
 # execution; Cargo still compiles test targets containing excluded test cases.
+# Required isolation-vm executes the two native remote-start controls below with
+# a real systemd user manager, built CLI and Bun. The runner has no user manager.
 default-filter = '''
 not (
   ((package(=fractal) or package(=fractal-daemon) or package(=fractal-api-client-v0) or package(=fractal-api-mailbox) or package(=fractal-attention) or package(=fractal-delivery) or package(=fractal-missions) or package(=fractal-seats) or package(=fractal-evidence) or package(=fractal-github) or package(=fractal-seats-base) or package(=fractal-delivery-base) or package(=fractal-missions-base) or package(=fractal-github-base) or package(=fractal-secrets) or package(=fractal-api-core) or package(=fractal-reconcile) or package(=fractal-peer) or package(=fractal-store)) and test(/^messaging_faults::link_minutes$/))
@@ -165,6 +167,10 @@ not (
     and not test(=daemon_cost::the_cost_check_covers_every_route)
     and not test(/^daemon_cost::the_cost_route_inventory_/))
   or (package(=smallclaims) and test(/^sync::worker::tests::retry_tests::isolated_outbound_only_node_converges_after_two_minutes_and_four_hours$/))
+  or (package(=fractal-reconcile) and kind(lib) and (
+    test(=reconcile::home_session::tests::native_finite_start_uses_real_cli_bun_kernel_lane_and_graph_free_fit_and_retirement)
+    or test(=reconcile::home_session::tests::inherited_native_stop_withdrawal_and_predispatch_refusal_preserve_parent_and_sibling)
+  ))
 )
 '''
 

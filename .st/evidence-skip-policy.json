@@ -53,6 +53,7 @@
           "command": [
             "linux-gate",
             "aggregate",
+            "isolation-vm",
             "linux-clippy",
             "linux-fleet-compat",
             "linux-gate",
@@ -89,7 +90,8 @@
                 "scripts/ci-local",
                 "tests",
                 "clippy",
-                "fleet-compat"
+                "fleet-compat",
+                "isolation-vm"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
@@ -117,7 +119,8 @@
                 "scripts/ci-local",
                 "tests",
                 "clippy",
-                "fleet-compat"
+                "fleet-compat",
+                "isolation-vm"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
@@ -145,7 +148,8 @@
                 "scripts/ci-local",
                 "tests",
                 "clippy",
-                "fleet-compat"
+                "fleet-compat",
+                "isolation-vm"
               ],
               "required_inputs": [
                 "flake_lock_sha256",

@@ -403,6 +403,7 @@ def main():
                                'CI_TEST_WORKSPACE': str(Path.cwd()),
                                'CI_TEST_HOOKS_BINARY': str(hooks),
                                'CI_TEST_TARGET_TMPDIR': str(scratch),
+                               'CI_TEST_CLI_BINARY': str(production),
                                'CI_SEKRETS_BINARY': str(production)}.items():
                 if '\n' in value or '\r' in value:
                     raise ValueError('invalid workflow environment path')

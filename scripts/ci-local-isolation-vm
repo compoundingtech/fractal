@@ -7,7 +7,7 @@
 #   2. The workspace test archive linux-test-build produces (`cargo nextest archive` with CI's own filter) and the standalone
 #      production gateway (`cargo build -p fractal-cli --bin fractal`, refused when it or the CLI library it links carries
 #      test-support or a test profile).
-#   3. The transport isolation VM driver, run with the archive (all four current-runtime scope tests), then the sekrets VM driver, run with
+#   3. The transport isolation VM driver, run with the archive and gateway (all seven native scope tests), then the sekrets VM driver, run with
 #      the gateway. The drivers keep their VM state (a 16 GiB disk image) under XDG_RUNTIME_DIR when it is set, else TMPDIR; they
 #      run without XDG_RUNTIME_DIR (a CI runner has none) and with TMPDIR in this run's scratch on disk, so the image never lands
 #      in the small runtime tmpfs and two runs never share it.
@@ -53,6 +53,7 @@ FRACTAL_ISOLATION_ARCHIVE="$archives/workspace.tar.zst" ST_ISOLATION_ARCHIVE="$a
 FRACTAL_ISOLATION_WORKSPACE="$workspace" ST_ISOLATION_WORKSPACE="$workspace" \
 FRACTAL_ISOLATION_BUILD_WORKSPACE="$workspace" ST_ISOLATION_BUILD_WORKSPACE="$workspace" \
 FRACTAL_ISOLATION_TIMINGS="$out/vm-timings.json" ST_ISOLATION_TIMINGS="$out/vm-timings.json" \
+CI_TEST_CLI_BINARY="$archives/sekrets-st3" \
 TMPDIR="$out/tmp" env -u XDG_RUNTIME_DIR "$out/vm-driver/bin/nixos-test-driver" --output_directory "$out/vm-out"
 
 nix build --print-build-logs --out-link "$out/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
