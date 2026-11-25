@@ -1,7 +1,7 @@
 //! Separate agent process, real authenticated Home/Store, and canonical native runtimes.
-//! The exec case requires the owning Linux systemd-user VM lane; neither case skips a
-//! missing PTY executable, relaxes native admission, or substitutes logical retirement.
-#![cfg(target_os = "linux")]
+//! Exec retirement requires the owning Linux systemd-user VM lane. Darwin lifecycle
+//! acceptance requires real launchd and the real pinned PTY; no capability skips.
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]
@@ -80,7 +80,9 @@ struct Pair {
 }
 impl Pair {
     async fn new(terminal: bool) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        // Darwin's conventional temporary root can contain a /var symlink.
+        // Fixtures obey the same physical-root rule as production provisioning.
+        let root = tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let (home_key, _) = MemberKey::generate().unwrap();
         let (agent_key, agent_pkcs8) = MemberKey::generate().unwrap();
         let selection = Selection { home: "example-home".into(), home_key: home_key.public().into(),
@@ -377,4 +379,111 @@ async fn exercise(terminal: bool) {
 async fn standalone_pty_observe_stop_restart_and_private_accounting() { exercise(true).await; }
 
 #[tokio::test]
+#[cfg(target_os = "linux")]
 async fn standalone_exec_observe_stop_restart_and_private_accounting_requires_systemd() { exercise(false).await; }
+
+#[cfg(target_os = "macos")]
+fn service(action: &str, config: &Path) -> std::process::Output {
+    ProcessCommand::new(common::agent_binary()).args(["service", action, "--config"])
+        .arg(config).output().expect("run the real minimal agent lifecycle")
+}
+
+#[cfg(target_os = "macos")]
+fn service_ok(action: &str, config: &Path) -> Value {
+    let output = service(action, config);
+    assert!(output.status.success(), "{action} failed: {}",
+        String::from_utf8_lossy(&output.stderr));
+    serde_json::from_slice(&output.stdout).expect("lifecycle output must be structured JSON")
+}
+
+/// The hosted user is disposable, but a pre-existing service is never a fixture.
+/// Cleanup removes only the exact service installed for this private config.
+#[cfg(target_os = "macos")]
+struct InstalledService(PathBuf);
+#[cfg(target_os = "macos")]
+impl Drop for InstalledService {
+    fn drop(&mut self) {
+        let output = service("uninstall", &self.0);
+        assert!(output.status.success(), "remove only this fixture's owned launchd service: {}",
+            String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn service_ready(config: &Path, socket: &Path, changes: &mut Changes) -> Value {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let next = changes.next();
+            tokio::pin!(next);
+            match performance(socket).await {
+                Ok(_) => return service_ok("health", config),
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound |
+                    std::io::ErrorKind::ConnectionRefused) => next.await,
+                Err(error) => panic!("Darwin service private health failed: {error}"),
+            }
+        }
+    }).await.expect("real launchd must publish the private agent API")
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn darwin_launchd_install_start_stop_restart_preserves_native_custody() {
+    let mut pair = Pair::new(true).await;
+    let mut changes = Changes::new(pair.root.path());
+    let install = service_ok("install", &pair.config_path);
+    let installed = InstalledService(pair.config_path.clone());
+    assert!(!pair.config.socket_path().exists(), "installation must not start the agent");
+    service_ok("start", &pair.config_path);
+    let first_health = service_ready(&pair.config_path, &pair.config.socket_path(), &mut changes).await;
+    let first = performance(&pair.config.socket_path()).await.unwrap();
+    let first_pid = u32::try_from(integer(&first, "pid")).unwrap();
+    accounting(&first, first_pid);
+    assert_eq!(install["ok"], true);
+    assert_eq!(install["operation"], "install");
+    assert_eq!(first_health["local_status"], "healthy");
+    assert_eq!(first_health["pid"], first_pid);
+    assert_eq!(first_health["process_instance_id"], first["process_instance_id"]);
+    assert_eq!(first_health["graph_ready"], false);
+    assert_eq!(first_health["home_status"], "not_observed");
+    pair.binding = Some(pair.offered().await);
+    let observe = pair.journal.enqueue(pair.draft("darwin-observe", Operation::Observe)).unwrap();
+    if let Some(outcome) = pair.settled(&observe).await {
+        assert!(matches!(outcome, Outcome::Observed { incarnation, .. } if incarnation == pair.local.incarnation));
+    }
+    pair.running();
+
+    // Unchanged install/start converges without killing or duplicating the job.
+    service_ok("install", &pair.config_path);
+    service_ok("start", &pair.config_path);
+    assert_eq!(performance(&pair.config.socket_path()).await.unwrap()["process_instance_id"],
+        first["process_instance_id"]);
+    pair.offline().await;
+    service_ok("health", &pair.config_path);
+    service_ok("restart", &pair.config_path);
+    let _ = service_ready(&pair.config_path, &pair.config.socket_path(), &mut changes).await;
+    let second = performance(&pair.config.socket_path()).await.unwrap();
+    accounting(&second, u32::try_from(integer(&second, "pid")).unwrap());
+    assert_ne!(second["process_instance_id"], first["process_instance_id"]);
+    pair.running();
+    // The retained journal recovers even while the home is disconnected.
+    assert_eq!(pair.agent_journal().with_authority(|authority|
+        custody::local_session(authority, &pair.local.subject)).unwrap(), Some(pair.local.clone()));
+    service_ok("stop", &pair.config_path);
+    assert!(!service("health", &pair.config_path).status.success());
+    pair.running();
+    service_ok("stop", &pair.config_path);
+    service_ok("start", &pair.config_path);
+    let _ = service_ready(&pair.config_path, &pair.config.socket_path(), &mut changes).await;
+    pair.online().await;
+    let after = pair.journal.enqueue(pair.draft("darwin-after-restart", Operation::Observe)).unwrap();
+    if let Some(outcome) = pair.settled(&after).await {
+        assert!(matches!(outcome, Outcome::Observed { incarnation, .. } if incarnation == pair.local.incarnation));
+    }
+    pair.running();
+    drop(installed);
+    assert!(!service("start", &pair.config_path).status.success(),
+        "uninstall must remove the owned login-start definition");
+    assert!(pair.config.state_dir.join("session.sqlite3").is_file(),
+        "uninstall must not remove durable custody");
+    pair.running();
+}
