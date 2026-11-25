@@ -139,14 +139,17 @@ impl NativeSessionExecutor {
         let NativeProof::Stop { binding, .. } = proof else { unreachable!("constructed stop proof") };
         let journal = reconciler.home_session_journal.get().context("session journal is not installed")?;
         journal.complete_requiring_local_finalization(&command.execution_id, outcome.clone(), &encoded)?;
-        if let Some(operation) = &binding.start_operation
-            && let Some(operation) = reconciler.store.remote_runtime_start(operation)? {
-                reconciler.retire_remote_start_resources(&operation, Some(&binding.native_incarnation))?;
-                reconciler.store.verify_remote_runtime_start_cleanup(&operation.id)?;
-            }
+        let remote_start = match &binding.start_operation {
+            Some(operation) => reconciler.store.remote_runtime_start(operation)?,
+            None => None,
+        };
+        if let Some(operation) = &remote_start {
+            reconciler.retire_remote_start_resources(operation, Some(&binding.native_incarnation))?;
+            reconciler.store.verify_remote_runtime_start_cleanup(&operation.id)?;
+        }
         reconciler.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
-        if let Some(operation) = &binding.start_operation {
-            reconciler.store.settle_remote_runtime_start(operation)?;
+        if let Some(operation) = remote_start {
+            reconciler.store.settle_remote_runtime_start(&operation.id)?;
         }
         journal.finish_local_finalization(&command.execution_id)?;
         self.waits.lock().map_err(|_| anyhow::anyhow!("native retirement wait ownership poisoned"))?
@@ -591,14 +594,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && binding.subject == command.binding.subject && binding.runtime_id == command.binding.runtime
                 && binding.incarnation == incarnation && binding.custody == SessionCustody::Owned,
                 "pending native stop receipt names another custody owner");
-            if let Some(operation) = &binding.start_operation
-                && let Some(operation) = self.store.remote_runtime_start(operation)? {
-                    self.retire_remote_start_resources(&operation, Some(&binding.native_incarnation))?;
-                    self.store.verify_remote_runtime_start_cleanup(&operation.id)?;
-                }
+            let remote_start = match &binding.start_operation {
+                Some(operation) => self.store.remote_runtime_start(operation)?,
+                None => None,
+            };
+            if let Some(operation) = &remote_start {
+                self.retire_remote_start_resources(operation, Some(&binding.native_incarnation))?;
+                self.store.verify_remote_runtime_start_cleanup(&operation.id)?;
+            }
             self.store.settle_local_session_custody(&binding.subject, &binding.native_incarnation)?;
-            if let Some(operation) = &binding.start_operation {
-                self.store.settle_remote_runtime_start(operation)?;
+            if let Some(operation) = remote_start {
+                self.store.settle_remote_runtime_start(&operation.id)?;
             }
             journal.finish_local_finalization(&command.execution_id)?;
         }

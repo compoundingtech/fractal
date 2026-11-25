@@ -106,6 +106,27 @@ impl NativePair {
         Self::with_options(custody, true).await
     }
 
+    async fn ordinary_owned() -> Self {
+        Self::with_setup(SessionCustody::Owned, true, |executor, store| {
+            let mut binding = local_session(store, executor.runtime.as_ref(), "agent/example/worker", None).unwrap();
+            let mut operation = crate::store::runtime_starts_tests_shared_seats::operation(
+                "ordinary-full-node-start", &binding.subject, None);
+            operation.body["member"]["runtime_id"] = binding.runtime_id.clone().into();
+            assert!(matches!(store.admit_runtime_start(&mut operation, 2).unwrap(),
+                crate::store::RuntimeStartAdmission::Admitted));
+            assert!(store.dispatch_runtime_start(&operation.id, 2).unwrap());
+            store.enter_runtime_start_backend(&operation.id, &operation.owner).unwrap();
+            store.finish_runtime_start(&operation.id, &serde_json::json!({
+                "incarnation": binding.native_incarnation, "verification": "operation-incarnation",
+            })).unwrap();
+            binding.start_operation = Some(operation.id.clone());
+            store.bind_local_session(&binding).unwrap();
+            assert!(store.remote_runtime_start(&operation.id).unwrap().is_none(),
+                "ordinary producer provenance must not be mistaken for a remote Start envelope");
+            executor
+        }).await
+    }
+
     async fn for_start() -> Self {
         Self::with_options(SessionCustody::Owned, false).await
     }
@@ -453,7 +474,7 @@ impl Drop for NativePair {
 
 #[tokio::test]
 async fn native_receipt_replay_reconnect_and_offline_stop_need_no_seat_graph() {
-    let mut pair = NativePair::new().await;
+    let mut pair = NativePair::ordinary_owned().await;
     let observe = pair.home.enqueue(pair.draft("observe-before-ack-loss", Operation::Observe)).unwrap();
     assert!(matches!(pair.seat.admit(&observe).unwrap(), Admission::Accepted(_)));
     pair.seat.enter(&observe.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();
@@ -603,7 +624,7 @@ async fn paired_epoch_replacement_preserves_native_process_and_fences_old_home_s
 
 #[tokio::test]
 async fn restart_finishes_native_custody_from_unacknowledged_stop_receipt_before_replay() {
-    let mut pair = NativePair::new().await;
+    let mut pair = NativePair::ordinary_owned().await;
     let stop = pair.home.enqueue(pair.draft("stop-before-native-metadata-finalization", Operation::Stop)).unwrap();
     assert!(matches!(pair.seat.admit(&stop).unwrap(), Admission::Accepted(_)));
     let recovery = pair.seat.enter(&stop.execution_id, |command, authority| pair.driver.enter(command, authority)).unwrap();

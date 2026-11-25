@@ -286,6 +286,11 @@ physical facts before changing the recovery generation. Positive resource cleanu
 is retained independently from applied custody; local-session finalization must
 succeed before the remote start is applied or either associated terminal receipt
 can be transmitted, including during reopened-journal recovery.
+An ordinary full-node launch may also retain a local start-operation ID. That ID
+does not make it a remote Start: live Stop finalization and startup replay settle
+remote producer custody only when the retained operation contains the remote
+Start envelope. Ordinary native custody still finalizes before its Stop receipt
+is released; it must not wait for a nonexistent remote producer.
 An exact operation rejected before actual backend entry retains a typed no-entry
 witness even if its durable dispatch intent already committed. Intent alone does
 not prove physical entry; conversely, an error after backend entry cannot create
