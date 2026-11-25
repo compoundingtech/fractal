@@ -510,9 +510,15 @@ mod tests {
         store.apply(&intent, &expected, "audit-wake-seat").unwrap();
         let suspended = action_claim(&store, "runtime.action.requested",
             json!({"action":"suspend","cause":"idle"}), vec![]);
-        action_claim(&store, "runtime.action.succeeded",
-            json!({"action":"suspend","operation_status":"suspended"}),
-            vec![suspended.id.clone()]);
+        store.append_claim(&ClaimInput {
+            subject: suspended.subject.clone(), kind: "runtime.action.succeeded".into(),
+            actor: suspended.actor.clone(),
+            fields: serde_json::from_value(json!({
+                "action":"suspend","operation_status":"suspended",
+            })).unwrap(),
+            evidence: vec![suspended.id.clone()], expected_subject: None,
+            idempotency_key: Some(crate::suspension::suspend_completed_key(&suspended.id)),
+        }).unwrap();
         let message = store.append_claim(&ClaimInput {
             subject:"message/audit-wake".into(), kind:"message.sent".into(),
             actor:Some("person/test".into()),
