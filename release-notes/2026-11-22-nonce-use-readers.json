@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "summary": "This release reads storage version 29, in which a claim's nonce use is kept only as its nonce verdict link and the claim_signature_nonce_uses table and index are gone. The replay check, the seal-time duplicate check and forget's requeue of nonce dependents count a use row or a held claim's nonce link. On a real member the two were the same 3.2 million pairs, so no verdict changes. Nothing in this release drops the table: the writer ships in the next release, and this one is the release it can roll back to. Measured on a copy of a real member, the writer will give back 1.79% of the file, about 340 B per signed claim.",
+  "summary": "This release reads storage version 29, in which a claim's nonce use is kept only as its nonce verdict link and the claim_signature_nonce_uses table and index stay empty. The replay check, the seal-time duplicate check and forget's requeue of nonce dependents count a use row or a held claim's nonce link. On a real member the two were the same 3.2 million pairs, so no verdict changes. Nothing in this release empties the table: the writer ships in the next release, and this one is the release it can roll back to. Measured on a copy of a real member, the writer will give back 1.79% of the file, about 340 B per signed claim.",
   "replay": {
     "status": "none",
     "detail": "No replay, no scan at open and no background work."
   },
   "schema": {
     "status": "none",
-    "detail": "No table, index or column change in this release. Version 29 drops claim_signature_nonce_uses and its key index; this release reads stores with or without them."
+    "detail": "No table, index or column change in this release. In version 29 claim_signature_nonce_uses and its key index stay empty; this release reads stores whether they hold rows or not."
   },
   "rules": {
     "status": "none",

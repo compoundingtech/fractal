@@ -2421,7 +2421,7 @@ fn nonce_used(connection: &Connection, key: &str, nonce: &str) -> Result<bool> {
 /// Through storage version 28, a candidate whose signature matches its claim writes a
 /// `claim_signature_nonce_uses` row. Judging that reaches the replay check writes the claim's
 /// `nonce:KEY|NONCE` verdict link; on a real member the two sets were equal, pair for pair. From
-/// version 29 the link is the only copy, written where the row was, and the table is gone.
+/// version 29 the link is the only copy, written where the row was, and the table stays empty.
 /// Readers count either, of a claim the store still holds: a forgotten claim keeps its links
 /// until the sweep, as it lost its row. The replay rules are unchanged.
 fn nonce_used_in_model(
