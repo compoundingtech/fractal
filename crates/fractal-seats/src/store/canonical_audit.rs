@@ -80,6 +80,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_signature_ready",
         "released_envelopes",
         "peer_retired_claims",
+        "peer_signed_claims",
         "record_repair_lookups",
         "repaired_claim_replacements",
         "retired_claim_ids",

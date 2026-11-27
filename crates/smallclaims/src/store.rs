@@ -8918,8 +8918,13 @@ impl Store {
                 eprintln!("st3: signed envelopes from {relay} not admitted: {error:#}");
                 (0, 0)
             });
+        // Whether this peer takes signed claims: release waits while a recent peer does not.
+        let capable = input.inventory.can(crate::replication::SIGNED_CLAIMS);
+        if let Err(error) = self.note_peer_signed_claims(relay, capable) {
+            eprintln!("st3: whether {relay} takes signed claims not noted: {error:#}");
+        }
         // A peer that cannot take signed claims never gets the envelopes this member released.
-        if !input.inventory.can(crate::replication::SIGNED_CLAIMS) {
+        if !capable {
             let lacking = self.released_missing(&snapshot, &input.inventory).map_err(internal)?;
             self.note_unservable_released(relay, lacking.len() as u64).map_err(internal)?;
         }
@@ -11392,7 +11397,9 @@ impl Store {
         let (unservable_released, refused_signed_envelopes) = self.signed_claim_tally()?;
         let peer_retired_kept = self.peer_retired_claims_kept()?;
         let peer_retired_unheld = self.peer_retired_claims_unheld()?;
+        let envelope_release_paused_for = self.peers_lacking_signed_claims()?;
         Ok(ReplicationStatus {
+            envelope_release_paused_for,
             peer_retired_kept,
             peer_retired_unheld,
             unservable_released,

@@ -288,11 +288,20 @@ fn a_store_at_26_opens_and_reads_its_moved_blob_bytes() {
     const { assert!(smallclaims::store::MAX_SUPPORTED_SCHEMA_VERSION >= 26, "this build reads a store at 26") };
 }
 
-/// Storage versions only rise: a store at the valid-record version (27, above the blob file's 25)
-/// keeps it through a blob move and a whole restore, whichever came first.
+/// Storage versions only rise: a store at the valid-record version (27) or the released-envelope
+/// version (28), both above the blob file's 25, keeps it through a blob move and a whole
+/// restore, whichever came first.
 #[test]
 fn a_store_past_the_blob_fence_keeps_its_version_through_a_move_and_a_restore() {
-    let gone = smallclaims::store::record_bytes::VALID_RECORDS_GONE_VERSION;
+    for gone in [
+        smallclaims::store::record_bytes::VALID_RECORDS_GONE_VERSION,
+        smallclaims::store::envelope_release::ENVELOPES_RELEASED_VERSION,
+    ] {
+        keeps_its_version_through_a_move_and_a_restore(gone);
+    }
+}
+
+fn keeps_its_version_through_a_move_and_a_restore(gone: u32) {
     assert!(gone > STORAGE_VERSION);
     let set = |store: &Store, version: u32| store.connection.write().pragma_update(None, "user_version", version).unwrap();
     // At 27 before any blob moves.
