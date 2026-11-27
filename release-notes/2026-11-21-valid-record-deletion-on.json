@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The daemon deletes the valid replica records it holds, [store] valid_record_delete_after (3d unless set) after a member first runs this build: a valid claim's row, position and envelope already give every reader the record it had (replica_record_rows, since #6880). Measured on a fresh copy of a member's store (53.6 GB, storage version 20): emptying record bytes, deleting and the paced vacuum freed 9.36 GB of replica_records, and the file went to 44.2 GB. 3,011,625 of 3,220,230 records were deleted and 208,605 kept. Writer holds while deleting were p50 13.6 ms, p99 53.1 ms, max 335 ms, beside a control writer at p50 12.2 ms, p99 56.2 ms, max 361.5 ms. All 38 projection digests after the passes equal the ones before, which is what a peer that has not deleted reports.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay. Readers already read valid records through replica_record_rows. Deletion pages through replica_records behind a cursor, a budgeted page per write, and keeps every record that is not valid, that belongs to a forked writer sequence, or that a repair names."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "No new table or index. The first deletion commits storage version 27 (VALID_RECORDS_GONE_VERSION) in its own transaction; from then on admission and sealing store no valid record either. A store #6983 already took to 28 stores none and deletes without waiting for the window."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule or fleet coordination change: each member deletes on its own schedule."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire or API change. Peers exchange the same envelopes and reach equal digests whether or not either side has deleted, including a previous-release peer beside a member that has (fleet test previous_release_beside_a_member_that_deletes_its_valid_records_and_refuses_its_rollback). Every build that reads version 27 (from #6880, d72e2f32) gates the signature-reference writer on its own flag (#6876), so committing 27 switches nothing else on."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None from this change: deletion runs beside the daemon in budgeted pages. On the measured copy a reopen after deletion took 10 s (opening the store 169 ms), against 8 s before it. The copy's first open by this build took 503 s (opening the store 367 s, projecting the replication backlog 124 s), but that is the migration from storage version 20 that earlier PRs added, not this one."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No action. To keep the rollback open longer, set [store] valid_record_delete_after along with the upgrade; v0.3.32 refuses the unknown key, so remove it before rolling back."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Upgrade in place keeps working. Rollback to the previous release (v0.3.32, which reads storage versions 10 through 20) works until this member's first deletion, valid_record_delete_after (3d unless set) after it first runs this build: until then this pass keeps every valid record and raises no version. (Moving blob bytes, #6894, and releasing envelopes, #6983, have their own floors, stated in their notes.) From the first deletion the store is at storage version 27, and v0.3.32 refuses to open it ('unsupported st schema version 27'), as the fleet test checks; every build from #6880 (d72e2f32) on opens it. Past that point the only way back to v0.3.32 is a backup taken before the deletion."
+  }
+}
